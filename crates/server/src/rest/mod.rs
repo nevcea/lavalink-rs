@@ -1,0 +1,189 @@
+//! The v4 REST surface.
+
+pub mod info;
+pub mod player;
+pub mod session;
+pub mod track;
+
+use axum::http::{Method, Uri};
+use axum::routing::{get, patch, post};
+use axum::Router;
+
+use crate::error::ApiError;
+use crate::state::AppState;
+
+pub fn router(state: AppState) -> Router {
+    let v4 = Router::new()
+        .route("/v4/info", get(info::info))
+        .route("/v4/stats", get(info::stats))
+        .route("/v4/websocket", get(crate::ws::handler))
+        .route("/v4/loadtracks", get(track::load_tracks))
+        .route("/v4/decodetrack", get(track::decode_track))
+        .route("/v4/decodetracks", post(track::decode_tracks))
+        .route("/v4/sessions/{session_id}", patch(session::update))
+        .route(
+            "/v4/sessions/{session_id}/players",
+            get(player::list_players),
+        )
+        .route(
+            "/v4/sessions/{session_id}/players/{guild_id}",
+            get(player::get_player)
+                .patch(player::patch_player)
+                .delete(player::delete_player),
+        )
+        // Route planning belongs to the IP-rotation feature, which is out of scope.
+        // 501 says "this node does not do that" rather than 404's "no such
+        // endpoint", which a client could read as a version mismatch.
+        .route("/v4/routeplanner/status", get(route_planner))
+        .route("/v4/routeplanner/free/address", post(route_planner))
+        .route("/v4/routeplanner/free/all", post(route_planner));
+
+    Router::new()
+        .route("/version", get(info::version))
+        .merge(v4)
+        // Both must come after every `.route`/`.merge` above: `fallback` only
+        // covers paths that match nothing at all, and `method_not_allowed_fallback`
+        // installs itself on every `MethodRouter` registered so far, so it has to
+        // run last to reach all of them. Both replace axum's default empty-body
+        // 404/405 with the same `Error` JSON shape a client gets from a stale
+        // session or player id.
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_password,
+        ))
+        .layer(axum::middleware::from_fn(crate::error::fill_error_path))
+        .with_state(state)
+}
+
+async fn route_planner() -> ApiError {
+    ApiError::not_implemented("This node does not implement the route planner")
+}
+
+async fn not_found(uri: Uri) -> ApiError {
+    ApiError::no_such_route(uri.path())
+}
+
+async fn method_not_allowed(method: Method, uri: Uri) -> ApiError {
+    ApiError::method_not_allowed(&method, uri.path())
+}
+
+/// Parses a snowflake path segment.
+///
+/// The original types the parameter as `Long` and lets Spring reject anything else
+/// with a 400; doing it by hand keeps the error body ours.
+pub fn parse_guild_id(raw: &str) -> Result<u64, ApiError> {
+    raw.parse::<u64>()
+        .map_err(|_| ApiError::bad_request(format!("Invalid guild id: {raw}")))
+}
+
+/// Resolves a session id, or reports the original's 404.
+///
+/// Serves sessions awaiting resume as well as open ones: such a session is alive,
+/// only its websocket is gone.
+pub fn session(
+    state: &AppState,
+    session_id: &str,
+) -> Result<std::sync::Arc<crate::session::Session>, ApiError> {
+    state
+        .sessions
+        .get(session_id)
+        .ok_or_else(ApiError::session_not_found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{header, Request as HttpRequest, StatusCode};
+    use tower::ServiceExt;
+
+    #[test]
+    fn guild_ids_must_be_snowflakes() {
+        assert_eq!(parse_guild_id("123").unwrap(), 123);
+        assert!(parse_guild_id("abc").is_err());
+        assert!(parse_guild_id("-1").is_err());
+        assert!(parse_guild_id("").is_err());
+    }
+
+    fn test_state() -> AppState {
+        let mut config = crate::config::Config::default();
+        config.lavalink.server.password = "test".into();
+        crate::state::AppState::new(
+            config,
+            crate::loader::Loader::new(Vec::new()),
+            crate::audio::stream::StreamOpener::default(),
+            std::time::Instant::now(),
+        )
+    }
+
+    async fn body_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// An unmatched path with no credentials must fail on auth before it ever
+    /// reaches the fallback — the auth layer wraps the fallback router too.
+    #[tokio::test]
+    async fn an_unknown_path_without_a_password_is_401_not_404() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v4/nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// An authenticated request to an unmatched path gets the Lavalink `Error`
+    /// JSON shape, not axum's built-in empty-body 404.
+    #[tokio::test]
+    async fn an_unknown_path_gets_the_lavalink_error_shape() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v4/nope")
+                    .header(header::AUTHORIZATION, "test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = body_json(response).await;
+        assert_eq!(body["status"], 404);
+        assert_eq!(body["error"], "Not Found");
+        assert_eq!(body["path"], "/v4/nope");
+    }
+
+    /// A known path with the wrong HTTP method gets the same `Error` shape as a
+    /// 405, not axum's default bare status line.
+    #[tokio::test]
+    async fn a_known_path_with_the_wrong_method_gets_the_lavalink_error_shape() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::POST)
+                    .uri("/v4/info")
+                    .header(header::AUTHORIZATION, "test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let body = body_json(response).await;
+        assert_eq!(body["status"], 405);
+        assert_eq!(body["error"], "Method Not Allowed");
+        assert_eq!(body["path"], "/v4/info");
+    }
+}

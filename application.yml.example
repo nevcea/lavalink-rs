@@ -1,0 +1,70 @@
+# Same keys as Lavalink v4's application.yml. Keys for features this node does not
+# ship (plugins, ratelimit, metrics, sentry, logback, bufferDurationMs,
+# opusEncodingQuality, resamplingQuality, soundcloudFilterOutPreviewTracks,
+# timeouts.connectionRequestTimeoutMs — see MAINTENANCE.md for why each is
+# unmodelled) are ignored rather than rejected, so an existing config file can be
+# used unchanged.
+
+server: # REST and WS server
+  port: 2333
+  address: 0.0.0.0
+
+lavalink:
+  server:
+    password: "youshallnotpass"
+
+    sources:
+      http: true   # warning: keeping HTTP enabled without a proxy configured could expose your server's IP address
+      local: false # warning: this turns loadtracks into arbitrary local file reads for anyone holding the password
+      # All four below require yt-dlp on PATH. It is detected once at startup; if it
+      # is missing these are disabled and dropped from /v4/info rather than failing
+      # the boot. Deezer does not use yt-dlp to load — it has its own API — but its
+      # playback substitutes a YouTube match (Deezer's API only ever hands back a
+      # 30-second preview), so it still needs yt-dlp to actually play anything.
+      # Twitch, vimeo and nico are not listed: all three are refused. See
+      # MAINTENANCE.md.
+      youtube: false
+      soundcloud: false
+      bandcamp: false
+      deezer: false
+
+    # false leaves direct URLs and playlists claimed; only the search prefix
+    # (ytsearch:/ytmsearch:, scsearch:) stops being claimed.
+    youtubeSearchEnabled: true
+    soundcloudSearchEnabled: true
+    youtubePlaylistLoadLimit: 6 # pages of 100, same unit as the original
+
+    # Nine of the ten filters are implemented. `timescale` is not — it needs a WSOLA
+    # time-stretcher (the original wraps SoundTouch through JNI) and is always
+    # rejected with 400 regardless of what is set here. /v4/info advertises only the
+    # ones that really run.
+    filters:
+      volume: true
+      equalizer: true
+      karaoke: true
+      tremolo: true
+      vibrato: true
+      distortion: true
+      rotation: true
+      channelMix: true
+      lowPass: true
+
+    frameBufferDurationMs: 5000    # milliseconds of decoded audio buffered per player
+    trackStuckThresholdMs: 10000   # silence before a TrackStuckEvent is emitted
+    playerUpdateInterval: 5        # seconds between playerUpdate messages
+
+    #httpConfig: # every blocking HTTP request this node makes routes through this,
+                 # including yt-dlp's own fetches — set it if the http source is on
+                 # and you do not want this node's IP address reaching arbitrary URLs
+      #proxyHost: "localhost"
+      #proxyPort: 3128
+      #proxyUser: ""
+      #proxyPassword: ""
+
+    timeouts:
+      connectTimeoutMs: 3000
+      socketTimeoutMs: 3000 # idle-read stall threshold, not an overall request timeout
+      # connectionRequestTimeoutMs is not modelled — see MAINTENANCE.md.
+
+# Logging is controlled by RUST_LOG rather than by this file, e.g.
+#   RUST_LOG=info,lavalink_server=debug

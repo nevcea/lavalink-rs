@@ -1,0 +1,66 @@
+[package]
+name = "lavalink-server"
+description = "A small Lavalink v4 compatible audio node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lavalink-protocol = { path = "../protocol" }
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net"] }
+tokio-util = "0.7"
+futures-util = "0.3"
+tower = "0.5"
+async-trait = "0.1"
+
+serde_yaml = "0.9"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+subtle = "2"
+sysinfo = "0.32"
+
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "stream"] }
+# Only the codecs/containers probe.rs's container_name() and the source managers
+# actually produce: mp3/flac/aac/vorbis/pcm decoders, isomp4 (m4a) / mkv (webm) /
+# ogg / wav containers. adpcm, alac, mp1, mp2, caf, aiff are never referenced.
+symphonia = { version = "0.5", default-features = false, features = [
+    "mp3", "flac", "aac", "vorbis", "pcm",
+    "isomp4", "mkv", "ogg", "wav",
+] }
+# `driver` only — no gateway client. Lavalink receives voice state and voice server
+# updates from its own client over REST, which is exactly the standalone driver's
+# input, so serenity/twilight are not needed. `tungstenite` is the websocket backend
+# the driver requires (it insists on exactly one).
+songbird = { version = "0.6", default-features = false, features = [
+    "driver",
+    "rustls",
+    "tungstenite",
+] }
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["html_reports"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
+# Already in the tree transitively via axum; `util` just exposes `oneshot` so
+# router wiring (fallbacks, layer ordering) can be tested as real HTTP calls
+# instead of trusted by inspection.
+tower = { version = "0.5", features = ["util"] }
+
+[[bench]]
+name = "resample"
+harness = false
+
+[[bench]]
+name = "filter"
+harness = false
+
+[[bench]]
+name = "pipeline"
+harness = false

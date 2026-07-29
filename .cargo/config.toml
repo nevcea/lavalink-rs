@@ -1,0 +1,9 @@
+# libopus is vendored by `libopus_sys` (pulled in transitively by `opus2`, via
+# songbird) and its CMakeLists still declares `cmake_minimum_required(VERSION 3.1)`.
+# CMake 4 removed compatibility with anything below 3.5 and refuses to configure
+# it. This tells CMake to treat the project as if it had asked for 3.5, which is
+# what every distribution packaging opus with CMake 4 does.
+#
+# Harmless on CMake 3.x, which ignores the variable.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM= "3.5"

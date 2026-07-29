@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/protocol", "crates/server", "crates/test-bot"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3
+# Never "abort": audio/engine.rs isolates a bad track's panic via catch_unwind
+# and turns it into a Failed event. "abort" would take the whole node down with it.
+panic = "unwind"

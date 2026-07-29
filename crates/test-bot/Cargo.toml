@@ -1,0 +1,50 @@
+[package]
+name = "lavalink-test-bot"
+description = "A Discord bot that drives this node over its v4 API, for end-to-end testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lavalink-protocol = { path = "../protocol" }
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.26", default-features = false, features = [
+    "connect",
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }
+futures-util = "0.3"
+
+# `client`/`gateway` only. The bot never touches audio: it tells Discord which voice
+# channel to put us in and hands the resulting credentials to the node, which owns
+# the actual voice connection. `framework` is left out — the command set here is a
+# handful of prefixes, and parsing them by hand is shorter than configuring one.
+serenity = { version = "0.12", default-features = false, features = [
+    "builder",
+    "cache",
+    "client",
+    "gateway",
+    "model",
+    "http",
+    "utils",
+    "rustls_backend",
+] }
+
+# Driverless songbird: `gateway` without `driver`. It exists for exactly this — the
+# op4 handshake and the voice state/server update correlation are fiddly enough to be
+# worth buying, and `join_gateway` hands back the token/endpoint/sessionId triple the
+# node's `voice` field wants.
+songbird = { version = "0.6", default-features = false, features = [
+    "serenity",
+    "gateway",
+    "rustls",
+] }
