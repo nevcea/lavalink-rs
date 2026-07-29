@@ -21,11 +21,17 @@ Two long-lived branches:
 
 - **`dev`** — active development. Work here by default; commit here unless told
   otherwise.
-- **`main`** — stable. Only receives merges from `dev`, and only after the change
-  has been tested and verified (`cargo test --workspace` passing is the floor;
-  anything touching the audio path should also get a `test-bot` pass per its
-  README before merging). Never commit directly to `main`, never merge into it on
-  your own initiative — that's a step the user triggers explicitly.
+- **`main`** — stable. Merges from `dev` only after the change has been tested
+  and verified (`cargo test --workspace` passing is the floor; anything touching
+  the audio path should also get a `test-bot` pass per its README before
+  merging). Never merge `dev` into `main` on your own initiative — that's a step
+  the user triggers explicitly.
+
+**Exception — low-risk edits may commit directly to `main`:** docs (README,
+CLAUDE.md, MAINTENANCE.md, comments), config examples, typo/formatting fixes,
+and other changes with no behavioral or logic impact. Anything touching code
+under `crates/*/src/` beyond a comment, or anything that changes behavior
+however small, still goes through `dev`.
 
 ### Commit messages — Conventional Commits
 
