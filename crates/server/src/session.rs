@@ -262,14 +262,26 @@ impl SessionRegistry {
         sessions.remove(id).map(|entry| entry.session)
     }
 
-    /// Removes sessions whose resume deadline has passed. Called from the global
+    /// Removes sessions whose resume deadline has passed, or whose essential
+    /// queue has overflowed while waiting to be resumed. Called from the global
     /// tick, which replaces the original's per-session scheduled executor.
+    ///
+    /// A connected session that stops draining essentials is caught by `ws.rs`'s
+    /// `pump`, which closes it with 1008 the moment its sink overflows. A
+    /// `Resumable` session has no websocket for anything to notice that on, so
+    /// without this it would just keep silently dropping essential messages
+    /// (`Sink::send`'s `SendError::Overflow`) for the rest of the resume window
+    /// — defeating the reason resume exists. Treating an overflowing sink the
+    /// same as an expired deadline here gives it the same fate a connected
+    /// session gets, instead of a silent, unbounded event gap.
     pub fn sweep_expired(&self, now: Instant) -> Vec<Arc<Session>> {
         let mut sessions = self.lock();
         let expired: Vec<String> = sessions
             .iter()
             .filter(|(_, entry)| match entry.state {
-                SessionState::Resumable { deadline } => deadline <= now,
+                SessionState::Resumable { deadline } => {
+                    deadline <= now || entry.session.sink.is_overflowing()
+                }
                 SessionState::Open => false,
             })
             .map(|(id, _)| id.clone())
@@ -449,6 +461,51 @@ mod tests {
         assert!(expired.is_empty());
         assert!(registry.get(&open.id).is_some());
         assert!(registry.get(&waiting.id).is_some());
+    }
+
+    /// While `Resumable`, nothing has a websocket to notice an overflowing sink
+    /// the way `ws.rs`'s `pump` does for a connected one — without this, an
+    /// overflowing resumable session would just keep dropping essential messages
+    /// silently until its deadline, however far off that still is.
+    #[test]
+    fn an_overflowing_resumable_session_is_swept_before_its_deadline() {
+        use lavalink_protocol::message::{EmittedEvent, Message};
+        use lavalink_protocol::player::{Track, TrackInfo};
+
+        let registry = SessionRegistry::new();
+        let session = registry.open(1, None);
+        session.set_resuming(true);
+        session.set_resume_timeout_secs(3600); // far from expiring on its own
+        registry.on_disconnect(&session.id, Instant::now());
+
+        let event = || {
+            Message::Event(EmittedEvent::TrackStart {
+                guild_id: "1".into(),
+                track: Box::new(Track::new(
+                    "e".into(),
+                    TrackInfo {
+                        identifier: "i".into(),
+                        is_seekable: true,
+                        author: "a".into(),
+                        length: 1,
+                        is_stream: false,
+                        position: 0,
+                        title: "t".into(),
+                        uri: None,
+                        source_name: "http".into(),
+                        artwork_url: None,
+                        isrc: None,
+                    },
+                )),
+            })
+        };
+        while !session.sink.is_overflowing() {
+            let _ = session.sink.send(event());
+        }
+
+        let expired = registry.sweep_expired(Instant::now());
+        assert_eq!(expired.len(), 1, "an overflowing resumable session must be swept");
+        assert!(registry.get(&session.id).is_none());
     }
 
     #[test]
