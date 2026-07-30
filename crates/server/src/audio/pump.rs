@@ -185,10 +185,13 @@ fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
 
     // Starting mid-track is the same operation as seeking; doing it here rather than
     // decoding and discarding keeps `position` in a play request cheap.
-    if config.start_position_ms > 0 {
-        state.seek(config.start_position_ms);
+    let mut start_position_ms = config.start_position_ms;
+    if start_position_ms > 0 && !state.seek(start_position_ms) {
+        // The source is not seekable (a live stream, an unindexed container): decoding
+        // actually starts at the beginning, so the reported position must too.
+        start_position_ms = 0;
     }
-    writer.reset(config.start_position_ms);
+    writer.reset(start_position_ms);
 
     Ok(state)
 }
@@ -302,10 +305,14 @@ impl State {
             match commands.try_recv() {
                 Ok(PumpCommand::Stop) => return ControlFlow::Stopped,
                 Ok(PumpCommand::Seek { position_ms }) => {
-                    self.seek(position_ms);
                     // Discarding here is what makes the seek audible immediately
-                    // rather than after the buffer drains.
-                    writer.reset(position_ms);
+                    // rather than after the buffer drains — but only when the seek
+                    // actually landed. On failure the decoder just keeps going from
+                    // where it was, so the still-buffered audio is still correct and
+                    // the reported position must stay where it actually is too.
+                    if self.seek(position_ms) {
+                        writer.reset(position_ms);
+                    }
                 }
                 Ok(PumpCommand::SetFilters(filters)) => {
                     self.filters = FilterChain::new(&filters, CHANNELS);
@@ -323,7 +330,12 @@ impl State {
         }
     }
 
-    fn seek(&mut self, position_ms: i64) {
+    /// Returns whether the seek actually landed. The caller must not rebase the
+    /// reported position or discard buffered audio on a failed seek — the decoder
+    /// carries on from wherever it actually is, and treating that as "now at
+    /// `position_ms`" would desync the reported position from the real audio
+    /// forever, since nothing after this ever corrects it back.
+    fn seek(&mut self, position_ms: i64) -> bool {
         let position_ms = position_ms.max(0) as u64;
         let time = Time::new(position_ms / 1000, (position_ms % 1000) as f64 / 1000.0);
 
@@ -338,6 +350,7 @@ impl State {
             },
         );
 
+        let succeeded = result.is_ok();
         if let Err(error) = result {
             // Unseekable input: the original refuses too, and the track carries on
             // from where it was rather than dying.
@@ -346,6 +359,7 @@ impl State {
 
         self.decoder.reset();
         self.resampler.reset();
+        succeeded
     }
 
     fn apply_volume(&self, samples: &mut [f32]) {
@@ -658,6 +672,86 @@ mod tests {
         let (outcome, delivered, _) = play(config);
         assert!(matches!(outcome, PumpOutcome::Finished), "{outcome:?}");
         assert!(delivered > 0);
+    }
+
+    /// Wraps a real format reader but always fails to seek — standing in for a
+    /// live stream or an unindexed container without needing a genuinely
+    /// unseekable source in the test.
+    struct FailingSeekFormat(Box<dyn FormatReader>);
+
+    impl FormatReader for FailingSeekFormat {
+        fn try_new(
+            _source: MediaSourceStream,
+            _options: &FormatOptions,
+        ) -> symphonia::core::errors::Result<Self> {
+            unreachable!("constructed directly in tests, not through probing")
+        }
+
+        fn cues(&self) -> &[symphonia::core::formats::Cue] {
+            self.0.cues()
+        }
+
+        fn metadata(&mut self) -> symphonia::core::meta::Metadata<'_> {
+            self.0.metadata()
+        }
+
+        fn seek(
+            &mut self,
+            _mode: SeekMode,
+            _to: SeekTo,
+        ) -> symphonia::core::errors::Result<symphonia::core::formats::SeekedTo> {
+            Err(SymphoniaError::SeekError(
+                symphonia::core::errors::SeekErrorKind::Unseekable,
+            ))
+        }
+
+        fn tracks(&self) -> &[symphonia::core::formats::Track] {
+            self.0.tracks()
+        }
+
+        fn next_packet(&mut self) -> symphonia::core::errors::Result<symphonia::core::formats::Packet> {
+            self.0.next_packet()
+        }
+
+        fn into_inner(self: Box<Self>) -> MediaSourceStream {
+            self.0.into_inner()
+        }
+    }
+
+    /// The bug: `drain_commands` used to call `writer.reset(position_ms)`
+    /// unconditionally, so a seek that the container refused (the way an
+    /// unindexed container or a live stream would) still rebased the reported
+    /// position to the requested target — permanently desyncing it from the
+    /// audio actually being decoded, since nothing downstream ever corrects it.
+    #[test]
+    fn a_failed_seek_does_not_rebase_the_reported_position() {
+        let wav = TempWav::new("pump-seek-fail", 48_000, 2, 1.0);
+        let config = config(wav.track());
+
+        let position = Arc::new(AtomicI64::new(0));
+        let (writer, _reader) = super::super::ring::channel(
+            4096,
+            Arc::clone(&position),
+            Arc::new(super::super::ring::FrameCounters::default()),
+        );
+
+        let mut state = open(&config, &writer).unwrap();
+        state.format = Box::new(FailingSeekFormat(state.format));
+        // `open` already reset the writer to 0; move it away from 0 so a
+        // spurious rebase toward the requested target (5000) is observable.
+        writer.reset(250);
+
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        commands_tx.send(PumpCommand::Seek { position_ms: 5_000 }).unwrap();
+        drop(commands_tx);
+
+        let flow = state.drain_commands(&commands_rx, &writer);
+        assert!(matches!(flow, ControlFlow::Stopped), "the sender was dropped");
+        assert_eq!(
+            position.load(Ordering::Relaxed),
+            250,
+            "a failed seek must not move the reported position toward the target"
+        );
     }
 
     #[test]
