@@ -35,6 +35,31 @@ const READ_TIMEOUT: Duration = Duration::from_secs(6);
 /// tolerate a run of those either.
 const MAX_RECONNECT_ATTEMPTS: u32 = 3;
 
+/// Hard ceiling on how long a single HTTP request (one [`HttpMediaSource::connect`]
+/// call) may run, applied per-request rather than at the client level.
+///
+/// `reqwest::blocking` has no idle-read timeout of its own in its public API — the
+/// async client's `ClientBuilder::read_timeout` would be exactly right, but the
+/// blocking wrapper never exposes it — and `tcp_user_timeout` doesn't help either,
+/// since it only fires on data left unacknowledged, not on a connection that is
+/// simply silent. Without some bound, a connection that goes quiet without closing
+/// pins `ReaderChannel::spawn`'s reader thread in a blocking `Response::read()`
+/// forever once a reconnect replaces it: `HttpMediaSource::read`'s reconnect logic
+/// only stops the *caller* from waiting past `read_timeout`, it does nothing to the
+/// thread being left behind, so a long-running stream that stalls repeatedly can
+/// leak one OS thread and socket per stall, without limit.
+///
+/// A seekable source (the only kind that ever reconnects, see `connect`'s callers)
+/// resumes transparently well before this fires; hitting it just forces that
+/// resume a little early. For a non-seekable source it ends a request that has
+/// been running for an implausibly long time instead of leaking its thread
+/// forever — a fixed, attributable failure instead of an unbounded one.
+// ponytail: a generous fixed ceiling, not a real idle-read timeout — replace with
+// one if reqwest's blocking client ever exposes `ClientBuilder::read_timeout`
+// publicly (it already exists on the async client; the blocking wrapper's own
+// `with_inner` that could reach it is a private method, not part of its API).
+const MAX_REQUEST_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
+
 /// Opens byte streams for resolved tracks.
 ///
 /// Holds the yt-dlp handle because those sources' media URLs are not stored — they
@@ -170,6 +195,9 @@ pub struct HttpMediaSource {
     /// `READ_TIMEOUT` in production; shrunk in tests so a stall scenario doesn't
     /// have to burn the real multi-second timeout to exercise it.
     read_timeout: Duration,
+    /// `MAX_REQUEST_DURATION` in production; shrunk in tests that specifically
+    /// exercise it.
+    request_duration: Duration,
 }
 
 /// Bytes off a socket, one chunk at a time, from a dedicated thread — so the
@@ -296,13 +324,35 @@ impl HttpMediaSource {
         connect_timeout: Duration,
         read_timeout: Duration,
     ) -> Result<Self, SourceError> {
+        Self::open_full(
+            url,
+            user_agent,
+            proxy,
+            connect_timeout,
+            read_timeout,
+            MAX_REQUEST_DURATION,
+        )
+    }
+
+    /// As [`Self::open_with_timeouts`], with `request_duration` also configurable
+    /// — only tests exercising it need anything other than the production default.
+    fn open_full(
+        url: &str,
+        user_agent: Option<&str>,
+        proxy: Option<reqwest::Proxy>,
+        connect_timeout: Duration,
+        read_timeout: Duration,
+        request_duration: Duration,
+    ) -> Result<Self, SourceError> {
+        // No client-level overall request timeout: this is a whole track, and a
+        // long one is not a stuck one. `reqwest::blocking` has no idle read timeout
+        // of its own (unlike the async client), so `ReaderChannel::spawn` below
+        // reads on a dedicated thread and applies `read_timeout` on the receiving
+        // end — stalls surface as read errors, same as a dropped connection would.
+        // `connect` below applies `request_duration` per request instead, as a
+        // ceiling on how long any one request (and the thread reading it) may run.
         let mut builder = Client::builder()
             .connect_timeout(connect_timeout)
-            // No overall request timeout: this is a whole track, and a long one is
-            // not a stuck one. `reqwest::blocking` has no idle read timeout of its
-            // own (unlike the async client), so `spawn_reader` below reads on a
-            // dedicated thread and applies `READ_TIMEOUT` on the receiving end —
-            // stalls surface as read errors, same as a dropped connection would.
             .user_agent(user_agent.unwrap_or(concat!("lavalink-rs/", env!("CARGO_PKG_VERSION"))));
         if let Some(proxy) = proxy {
             builder = builder.proxy(proxy);
@@ -320,6 +370,7 @@ impl HttpMediaSource {
             reader: Mutex::new(None),
             reconnect_attempts: 0,
             read_timeout,
+            request_duration,
         };
         source.connect(0)?;
         Ok(source)
@@ -327,7 +378,7 @@ impl HttpMediaSource {
 
     /// (Re-)issues the request starting at `offset`.
     fn connect(&mut self, offset: u64) -> Result<(), SourceError> {
-        let mut request = self.client.get(&self.url);
+        let mut request = self.client.get(&self.url).timeout(self.request_duration);
         if offset > 0 {
             request = request.header(RANGE, format!("bytes={offset}-"));
         }
@@ -649,6 +700,62 @@ mod tests {
         }
 
         assert_eq!(collected, BODY);
+    }
+
+    /// The bug this fix targets: nothing keeps a `JoinHandle` for the reader
+    /// thread `ReaderChannel::spawn` starts, so once a reconnect replaces it, the
+    /// *old* thread's blocking `Response::read()` had no bound of its own and
+    /// could stay parked forever on a connection that goes silent without
+    /// closing — `reqwest::blocking` exposes no idle-read timeout in its public
+    /// API. `connect` now puts a ceiling on the request itself
+    /// (`MAX_REQUEST_DURATION` in production), so even a silent connection's read
+    /// eventually returns instead of hanging. This test isolates that mechanism
+    /// from the pre-existing idle-gap check by making `read_timeout` deliberately
+    /// larger than the request ceiling, so only the new per-request bound can be
+    /// what ends the read.
+    #[test]
+    fn a_silent_connection_is_bounded_by_the_request_ceiling_not_just_the_idle_gap() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            consume_request(&stream);
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n").unwrap();
+            stream.write_all(b"partial").unwrap();
+            // Holds the connection open and silent for far longer than the request
+            // ceiling below but well under the (deliberately larger) idle-gap
+            // timeout, so only the ceiling can be what recovers this — an implicit
+            // close from the thread ending and dropping `stream` would otherwise
+            // let the test pass for the wrong reason.
+            std::thread::sleep(Duration::from_secs(5));
+        });
+
+        let mut source = HttpMediaSource::open_full(
+            &format!("http://{addr}"),
+            None,
+            None,
+            CONNECT_TIMEOUT,
+            Duration::from_secs(10),
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        assert!(!source.is_seekable());
+
+        let mut buffer = [0u8; 4096];
+        let started = Instant::now();
+        loop {
+            match source.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the 200ms request ceiling, not the 10s idle-gap timeout or the \
+             server's 5s hold, must be what ends the read"
+        );
     }
 
     /// The bug this fix targets: a connection that never goes fully silent but
