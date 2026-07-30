@@ -69,13 +69,27 @@ struct Active {
     commands: Sender<PumpCommand>,
     /// The songbird side, so pause and stop reach the mixer.
     track: Option<TrackHandle>,
-    /// Bumped on every new track; a late outcome from a superseded pump is ignored.
+    /// Bumped on every new track; checked by both the handle-storing task and the
+    /// terminal-outcome dispatch (`play`, below) via [`is_current`] so a late
+    /// outcome from a superseded pump is ignored rather than applied to whatever
+    /// track replaced it.
     generation: u64,
     /// Desired pause state. Source of truth for both `play`'s spawned task (once
     /// `track` is filled in) and `set_paused` (whenever it runs) — whichever of the
     /// two runs last is what actually gets applied to the handle, instead of a
     /// value snapshotted before the handle existed.
     paused: bool,
+}
+
+/// Whether `generation` is still the one `active` currently holds. `Active`'s
+/// pump-thread `commands` sender is dropped to signal a stop, but the pump can be
+/// mid-`next_packet()` at that moment and reach a terminal outcome (a natural EOF,
+/// a decode error) without ever observing it — so a stale outcome from a
+/// superseded pump can still arrive after a new one has taken over.
+fn is_current(active: &Mutex<Option<Active>>, generation: u64) -> bool {
+    lock(active)
+        .as_ref()
+        .is_some_and(|current| current.generation == generation)
 }
 
 impl PipelineEngine {
@@ -210,6 +224,7 @@ impl Engine for PipelineEngine {
         let position_ms = Arc::clone(&self.position_ms);
         let events = self.events.get().cloned();
         let guild_id = self.guild_id;
+        let active = Arc::clone(&self.active);
         let config = PumpConfig {
             info: request.track.info.clone(),
             start_position_ms: request.start_position_ms,
@@ -269,8 +284,16 @@ impl Engine for PipelineEngine {
                         // A stop was requested; the actor already knows.
                         super::PumpOutcome::Stopped => None,
                     };
+                    // A pump superseded by a replace can still be mid-`next_packet`
+                    // when `Stop` is sent, so it can reach a terminal outcome
+                    // (natural EOF or a decode error) without ever seeing the
+                    // command. Reporting that outcome unconditionally would end
+                    // whatever track replaced this one, not the track that
+                    // actually produced it.
                     if let Some(event) = event {
-                        let _ = events.try_send(Command::Engine(event));
+                        if is_current(&active, generation) {
+                            let _ = events.try_send(Command::Engine(event));
+                        }
                     }
                 }
             });
@@ -333,5 +356,38 @@ impl Engine for PipelineEngine {
         self.stop_active();
         let voice = Arc::clone(&self.voice);
         self.runtime.spawn(async move { voice.leave().await });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_active(generation: u64) -> Active {
+        let (commands, _rx) = mpsc::channel();
+        Active {
+            commands,
+            track: None,
+            generation,
+            paused: false,
+        }
+    }
+
+    /// The bug: a pump superseded by a track replace can still race a natural
+    /// EOF or decode error and report its outcome after a new pump has already
+    /// taken over `active`. `is_current` is what `play`'s terminal-outcome
+    /// dispatch checks before sending that outcome on — this must reject a
+    /// generation that is no longer the one `active` holds.
+    #[test]
+    fn a_superseded_generation_is_not_current() {
+        let active = Mutex::new(Some(dummy_active(2)));
+        assert!(is_current(&active, 2));
+        assert!(!is_current(&active, 1));
+    }
+
+    #[test]
+    fn nothing_is_current_once_active_is_cleared() {
+        let active: Mutex<Option<Active>> = Mutex::new(None);
+        assert!(!is_current(&active, 1));
     }
 }
