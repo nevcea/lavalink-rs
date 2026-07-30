@@ -14,7 +14,7 @@
 //!   writer task owns the socket.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -35,6 +35,17 @@ const CLOSE_POLICY_VIOLATION: u16 = 1008;
 /// capacity, so the session is closed deliberately rather than after messages have
 /// already been refused.
 const OVERFLOW_THRESHOLD: usize = 2048;
+
+/// How long a single outbound write may go unacknowledged before the client is
+/// considered unresponsive.
+///
+/// Without this, a client whose TCP receive window is stuck blocks this task
+/// inside `writer.send` indefinitely — the `pending_essentials` check below
+/// only runs after a write returns, so essentials keep accumulating in
+/// `sink.rs` for the entire stall. Past `ESSENTIAL_CAPACITY` they start being
+/// silently discarded (`SendError::Overflow`, ignored by every caller), which
+/// is exactly the "never dropped" guarantee the essential lane exists to make.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn handler(
     State(state): State<AppState>,
@@ -159,8 +170,26 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) {
                         continue;
                     }
                 };
-                if writer.send(WsMessage::Text(payload.into())).await.is_err() {
-                    break;
+                match tokio::time::timeout(
+                    WRITE_TIMEOUT,
+                    writer.send(WsMessage::Text(payload.into())),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => break,
+                    Err(_elapsed) => {
+                        // The client stopped acknowledging writes at the transport
+                        // level. Treated the same as an overflowing queue below,
+                        // rather than left to block here while essentials pile up
+                        // unseen.
+                        tracing::warn!(
+                            session = %session.id,
+                            "client did not acknowledge a write in time; closing the session"
+                        );
+                        state.sessions.destroy(&session.id).await;
+                        break;
+                    }
                 }
             }
         }
@@ -173,12 +202,14 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) {
                 session = %session.id,
                 "client is not draining events; closing the session"
             );
-            let _ = writer
-                .send(WsMessage::Close(Some(CloseFrame {
+            let _ = tokio::time::timeout(
+                WRITE_TIMEOUT,
+                writer.send(WsMessage::Close(Some(CloseFrame {
                     code: CLOSE_POLICY_VIOLATION,
                     reason: "event queue overflow".into(),
-                })))
-                .await;
+                }))),
+            )
+            .await;
             state.sessions.destroy(&session.id).await;
             break;
         }
