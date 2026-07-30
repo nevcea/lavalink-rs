@@ -164,8 +164,18 @@ impl Engine for PipelineEngine {
             let voice = Arc::clone(&self.voice);
             let active = Arc::clone(&self.active);
             let guild_id = self.guild_id;
+            let paused = request.paused;
             self.runtime.spawn(async move {
                 let handle = voice.play(input).await;
+                // Applied here, before the handle is stored, rather than via a
+                // separate `set_paused` call after `play` returns: `set_paused`
+                // reads back through `self.active.track`, which this same task is
+                // what populates — a caller pausing right after `play` would race
+                // this assignment and, since `play` returns before this task runs
+                // at all, reliably lose it.
+                if paused {
+                    let _ = handle.pause();
+                }
                 // Store the handle only if this track is still the current one: by
                 // the time the mixer has taken the input, a newer play request may
                 // already have replaced it.
