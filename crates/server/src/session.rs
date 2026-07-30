@@ -242,13 +242,20 @@ impl SessionRegistry {
 
     /// Takes ownership of a resumable session, in one atomic step.
     ///
-    /// Returns `None` when the id is unknown or the session is currently open — in
-    /// which case its resume deadline, if any, is left running untouched.
-    pub fn claim_for_resume(&self, id: &str) -> Option<Arc<Session>> {
+    /// Returns `None` when the id is unknown, the session is currently open, or
+    /// its deadline has already passed — in the first two cases its resume
+    /// deadline, if any, is left running untouched; in the last, the entry is
+    /// left for `sweep_expired` to remove rather than raced against it here.
+    /// Without this check, a resume landing between two sweep ticks (up to
+    /// `ticker::SWEEP_INTERVAL` late) could succeed after the deadline the client
+    /// was promised — `sweep_expired` only runs once a second, so it is not a
+    /// substitute for checking `now` at the moment of the claim itself.
+    pub fn claim_for_resume(&self, id: &str, now: Instant) -> Option<Arc<Session>> {
         let mut sessions = self.lock();
         let entry = sessions.get_mut(id)?;
-        if !matches!(entry.state, SessionState::Resumable { .. }) {
-            return None;
+        match entry.state {
+            SessionState::Resumable { deadline } if deadline > now => {}
+            _ => return None,
         }
         entry.state = SessionState::Open;
         let session = Arc::clone(&entry.session);
@@ -479,7 +486,7 @@ mod tests {
         ));
         assert!(session.sink.is_paused());
 
-        let claimed = registry.claim_for_resume(&session.id).unwrap();
+        let claimed = registry.claim_for_resume(&session.id, Instant::now()).unwrap();
         assert!(Arc::ptr_eq(&claimed, &session));
         assert_eq!(registry.state(&session.id), Some(SessionState::Open));
         assert!(!session.sink.is_paused());
@@ -491,8 +498,38 @@ mod tests {
         let registry = SessionRegistry::new();
         let session = resumable_session(&registry);
 
-        assert!(registry.claim_for_resume(&session.id).is_some());
-        assert!(registry.claim_for_resume(&session.id).is_none());
+        assert!(registry.claim_for_resume(&session.id, Instant::now()).is_some());
+        assert!(registry.claim_for_resume(&session.id, Instant::now()).is_none());
+    }
+
+    /// A resume arriving after its deadline must be rejected even if the
+    /// per-second `sweep_expired` tick hasn't gotten to it yet — otherwise a
+    /// client could resume up to `ticker::SWEEP_INTERVAL` late.
+    #[test]
+    fn a_claim_past_its_own_deadline_is_rejected_even_if_unswept() {
+        let registry = SessionRegistry::new();
+        let session = registry.open(1, None);
+        session.set_resuming(true);
+        session.set_resume_timeout_secs(60);
+
+        let disconnected_at = Instant::now();
+        registry.on_disconnect(&session.id, disconnected_at);
+
+        // Just past the deadline, but nothing has swept it yet: still in the map.
+        let past_deadline = disconnected_at + Duration::from_secs(61);
+        assert!(registry.get(&session.id).is_some());
+
+        assert!(
+            registry.claim_for_resume(&session.id, past_deadline).is_none(),
+            "a resume past its deadline must not succeed just because the sweep hasn't run yet"
+        );
+        assert!(
+            matches!(
+                registry.state(&session.id),
+                Some(SessionState::Resumable { .. })
+            ),
+            "a rejected late claim must leave the entry for sweep_expired, not touch it"
+        );
     }
 
     /// A failed claim attempt must not cancel the deadline.
@@ -578,7 +615,7 @@ mod tests {
         let session = resumable_session(&registry);
         let claimed_at = Instant::now();
 
-        registry.claim_for_resume(&session.id).unwrap();
+        registry.claim_for_resume(&session.id, claimed_at).unwrap();
 
         let expired = registry.sweep_expired(claimed_at + Duration::from_secs(3600));
         assert!(expired.is_empty());

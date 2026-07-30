@@ -82,7 +82,7 @@ async fn run(
     // step, at the moment the connection actually exists.
     let resumed = requested_session
         .as_deref()
-        .and_then(|id| state.sessions.claim_for_resume(id));
+        .and_then(|id| state.sessions.claim_for_resume(id, Instant::now()));
 
     let (session, resumed) = match resumed {
         Some(session) => {
