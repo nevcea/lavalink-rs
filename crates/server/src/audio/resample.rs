@@ -74,6 +74,20 @@ impl Resampler {
     /// point, so a decoded packet costs no allocation here once warmed up.
     pub fn process_into(&mut self, input: &[f32], out: &mut Vec<f32>) {
         out.clear();
+
+        // Already 48kHz stereo: `to_stereo_frames` plus a flatten below would be two
+        // full-buffer copies for zero conversion. `is_passthrough` names the same
+        // condition this used to check inline (`source_rate == SAMPLE_RATE`) without
+        // also covering channel count, which meant this path ran through the
+        // planar round-trip even when there was nothing to convert.
+        if self.is_passthrough() {
+            self.cursor = 0.0;
+            self.history.clear();
+            let usable = input.len() - input.len() % CHANNELS;
+            out.extend_from_slice(&input[..usable]);
+            return;
+        }
+
         self.to_stereo_frames(input);
         if self.frames.is_empty() {
             return;
@@ -179,6 +193,27 @@ mod tests {
         let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS);
         assert!(resampler.is_passthrough());
         assert_eq!(resampler.process(&[0.5, -0.5]), vec![0.5, -0.5]);
+    }
+
+    /// The passthrough shortcut must actually skip the planar round-trip, not just
+    /// happen to produce the same bytes — otherwise every already-48kHz-stereo
+    /// packet pays two full-buffer copies for a straight pass-through.
+    #[test]
+    fn passthrough_does_not_touch_the_planar_scratch_buffers() {
+        let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS);
+        resampler.process(&[0.5, -0.5, 0.25, -0.25]);
+        assert!(resampler.frames.is_empty(), "to_stereo_frames should not have run");
+        assert!(resampler.history.is_empty(), "the interpolation history should stay empty");
+    }
+
+    /// A stray trailing sample (an odd-length buffer, which should not happen for
+    /// interleaved stereo but is not this function's job to assume) is dropped
+    /// rather than copied half-formed, matching what `to_stereo_frames`'s
+    /// `chunks_exact` used to do on the slow path.
+    #[test]
+    fn passthrough_drops_an_incomplete_trailing_frame() {
+        let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS);
+        assert_eq!(resampler.process(&[0.5, -0.5, 0.25]), vec![0.5, -0.5]);
     }
 
     #[test]
