@@ -194,7 +194,7 @@ impl Loader {
             return LoadResult::Empty;
         };
 
-        let Ok(_permit) = self.permits.clone().acquire_owned().await else {
+        let Ok(permit) = self.permits.clone().acquire_owned().await else {
             return LoadResult::Error(Exception::new(
                 Severity::Suspicious,
                 "the server is shutting down",
@@ -210,11 +210,22 @@ impl Loader {
         // thread-local context, and `reqwest::blocking` panics outright when it
         // detects one — "cannot drop a runtime in a context where blocking is not
         // allowed". A plain thread does not inherit that context, so the HTTP source
-        // works there. Cost is bounded by the permit acquired above.
+        // works there.
+        //
+        // The permit moves into the thread rather than staying a local here: this
+        // function is cancelled by dropping its own future (a client-side request
+        // cancellation), which would otherwise free the permit the moment that
+        // happens while the OS thread — already started, nothing left to cancel it —
+        // keeps running the real (possibly slow) load. A client that cancels and
+        // retries in a loop would then accumulate unbounded background loads with
+        // the semaphore reporting free slots throughout. Holding the permit for the
+        // thread's actual lifetime ties the concurrency bound to the work that's
+        // really running, not to whether anyone is still awaiting it.
         let (tx, rx) = tokio::sync::oneshot::channel();
         let spawned = std::thread::Builder::new()
             .name("loader".to_owned())
             .spawn(move || {
+                let _permit = permit;
                 // The receiver is gone if the caller was cancelled; nothing to do.
                 let _ = tx.send(manager.load(&identifier));
             });
@@ -738,5 +749,85 @@ mod tests {
             .expect("a cached load must not hang");
         assert!(matches!(cached, LoadResult::Track(_)));
         assert_eq!(loads.load(Ordering::SeqCst), 2, "the third call must be served from cache");
+    }
+
+    /// A manager like [`Blocking`], but signaling when its `load` has actually
+    /// started — so a test can wait for the OS thread to be running (and the
+    /// permit to be taken) before acting, instead of racing the leader's own
+    /// task scheduling.
+    struct BlockingSignaling {
+        started: Arc<std::sync::atomic::AtomicBool>,
+        gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl SourceManager for BlockingSignaling {
+        fn name(&self) -> &'static str {
+            "http"
+        }
+
+        fn matches(&self, identifier: &str) -> bool {
+            identifier.starts_with("https://")
+        }
+
+        fn load(&self, _identifier: &str) -> Result<SourceLoad, SourceError> {
+            self.started.store(true, Ordering::SeqCst);
+            let (mutex, condvar) = &*self.gate;
+            let mut released = mutex.lock().unwrap();
+            while !*released {
+                released = condvar.wait(released).unwrap();
+            }
+            ok_track()
+        }
+    }
+
+    /// The bug: the semaphore permit used to live in `load_uncached`'s own async
+    /// stack frame, so cancelling the caller (dropping its future) freed the
+    /// permit immediately even though the OS thread doing the real load — which
+    /// nothing can cancel — kept running. A client that cancels and retries in a
+    /// loop could then accumulate unbounded background loads while the semaphore
+    /// reported slots free the whole time.
+    #[tokio::test]
+    async fn a_cancelled_leaders_permit_is_held_until_its_thread_actually_finishes() {
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let loader = Arc::new(Loader::new(vec![Arc::new(BlockingSignaling {
+            started: Arc::clone(&started),
+            gate: Arc::clone(&gate),
+        })]));
+        let identifier = "https://example.invalid/a.mp3";
+
+        let leader = {
+            let loader = Arc::clone(&loader);
+            let identifier = identifier.to_owned();
+            tokio::spawn(async move { loader.load(&identifier).await })
+        };
+
+        while !started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+
+        leader.abort();
+        let _ = leader.await;
+
+        assert_eq!(
+            loader.permits.available_permits(),
+            MAX_CONCURRENT_LOADS - 1,
+            "a cancelled leader's permit must stay held until its thread actually finishes"
+        );
+
+        // Release the still-running thread so it doesn't outlive the test.
+        {
+            let (mutex, condvar) = &*gate;
+            *mutex.lock().unwrap() = true;
+            condvar.notify_all();
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while loader.permits.available_permits() < MAX_CONCURRENT_LOADS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the permit must be released once the thread actually finishes");
     }
 }
