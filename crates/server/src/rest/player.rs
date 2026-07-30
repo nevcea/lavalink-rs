@@ -10,14 +10,14 @@
 //! [`PatchRequest`]. That is also what removes the original's worst lock —
 //! `synchronized(player)` wrapped around a blocking voice connect.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use lavalink_protocol::player::{Player, PlayerUpdate, PlayerUpdateTrack, Players, VoiceState};
 use lavalink_protocol::{LoadResult, Omissible, Track};
 use serde::Deserialize;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, ValidatedJson, ValidatedQuery};
 use crate::player::{PatchRequest, TrackChange};
 use crate::rest::{parse_guild_id, session};
 use crate::state::AppState;
@@ -70,8 +70,8 @@ pub struct PatchQuery {
 pub async fn patch_player(
     State(state): State<AppState>,
     Path((session_id, guild_id)): Path<(String, String)>,
-    Query(query): Query<PatchQuery>,
-    Json(update): Json<PlayerUpdate>,
+    ValidatedQuery(query): ValidatedQuery<PatchQuery>,
+    ValidatedJson(update): ValidatedJson<PlayerUpdate>,
 ) -> Result<Json<Player>, ApiError> {
     let session = session(&state, &session_id)?;
     let guild_id = parse_guild_id(&guild_id)?;

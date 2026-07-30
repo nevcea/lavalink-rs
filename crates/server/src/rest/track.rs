@@ -1,12 +1,12 @@
 //! `loadtracks` and `decodetrack(s)`.
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::Json;
 use lavalink_protocol::player::{EncodedTracks, Track, Tracks};
 use lavalink_protocol::LoadResult;
 use serde::Deserialize;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, ValidatedJson, ValidatedQuery};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -19,7 +19,7 @@ pub struct LoadQuery {
 /// broken rather than the track being bad.
 pub async fn load_tracks(
     State(state): State<AppState>,
-    Query(query): Query<LoadQuery>,
+    ValidatedQuery(query): ValidatedQuery<LoadQuery>,
 ) -> Json<LoadResult> {
     tracing::info!(identifier = %query.identifier, "loading");
     Json(state.loader.load(&query.identifier).await)
@@ -36,7 +36,7 @@ pub struct DecodeQuery {
 
 pub async fn decode_track(
     State(state): State<AppState>,
-    Query(query): Query<DecodeQuery>,
+    ValidatedQuery(query): ValidatedQuery<DecodeQuery>,
 ) -> Result<Json<Track>, ApiError> {
     let encoded = query
         .encoded_track
@@ -52,7 +52,7 @@ pub async fn decode_track(
 
 pub async fn decode_tracks(
     State(state): State<AppState>,
-    Json(encoded): Json<EncodedTracks>,
+    ValidatedJson(encoded): ValidatedJson<EncodedTracks>,
 ) -> Result<Json<Tracks>, ApiError> {
     if encoded.0.is_empty() {
         return Err(ApiError::bad_request("No tracks to decode provided"));

@@ -5,13 +5,13 @@ use axum::Json;
 use lavalink_protocol::session::{Session, SessionUpdate};
 use lavalink_protocol::Omissible;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, ValidatedJson};
 use crate::state::AppState;
 
 pub async fn update(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    Json(update): Json<SessionUpdate>,
+    ValidatedJson(update): ValidatedJson<SessionUpdate>,
 ) -> Result<Json<Session>, ApiError> {
     let session = crate::rest::session(&state, &session_id)?;
 

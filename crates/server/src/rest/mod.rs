@@ -186,4 +186,51 @@ mod tests {
         assert_eq!(body["error"], "Method Not Allowed");
         assert_eq!(body["path"], "/v4/info");
     }
+
+    /// A request axum's own extractors reject (a missing required query
+    /// parameter, here) must still get the Lavalink `Error` JSON shape, the
+    /// same as every other error this API returns — not axum's own bare
+    /// plain-text rejection body, which carries no `path` and a status
+    /// `fill_error_path` never gets a chance to normalize.
+    #[tokio::test]
+    async fn a_missing_required_query_param_gets_the_lavalink_error_shape() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v4/loadtracks")
+                    .header(header::AUTHORIZATION, "test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(response).await;
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["path"], "/v4/loadtracks");
+    }
+
+    /// Same as above, for a malformed request body instead of a missing query
+    /// parameter.
+    #[tokio::test]
+    async fn a_malformed_json_body_gets_the_lavalink_error_shape() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::PATCH)
+                    .uri("/v4/sessions/whatever")
+                    .header(header::AUTHORIZATION, "test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{not json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(response).await;
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["path"], "/v4/sessions/whatever");
+    }
 }

@@ -5,12 +5,15 @@
 //! through every handler, a handler raises an [`ApiError`] and a middleware
 //! ([`fill_error_path`]) renders it once, where the path is in scope.
 
-use axum::extract::Request;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{FromRequest, FromRequestParts, Query, Request};
+use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lavalink_protocol::error::Error as ErrorBody;
+use serde::de::DeserializeOwned;
 
 use crate::player::now_epoch_ms;
 
@@ -112,6 +115,53 @@ pub async fn fill_error_path(request: Request, next: Next) -> Response {
         return response;
     };
     (error.status, Json(error.body(&path))).into_response()
+}
+
+/// `axum::Json`, but a malformed or wrongly-typed body becomes an [`ApiError`]
+/// instead of axum's own plain-text rejection.
+///
+/// Without this, a request body that fails to deserialize skips `ApiError`
+/// entirely — `fill_error_path` only rewrites a response that carries one
+/// (`response.extensions().get::<ApiError>()`), so the client would see a
+/// completely different shape (no `path`, no `timestamp`) from every other
+/// error this API returns, plus whatever status axum's `JsonRejection` happens
+/// to pick (400 for bad syntax, 415 for a missing content type, 422 for a
+/// type mismatch) rather than the flat 400 the rest of this API uses.
+pub struct ValidatedJson<T>(pub T);
+
+impl<S, T> FromRequest<S> for ValidatedJson<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Json::<T>::from_request(req, state)
+            .await
+            .map(|Json(value)| Self(value))
+            .map_err(|rejection: JsonRejection| ApiError::bad_request(rejection.body_text()))
+    }
+}
+
+/// `axum::extract::Query`, but a missing required field or an unparsable value
+/// becomes an [`ApiError`] instead of axum's own plain-text rejection — see
+/// [`ValidatedJson`], which exists for the same reason on the body side.
+pub struct ValidatedQuery<T>(pub T);
+
+impl<S, T> FromRequestParts<S> for ValidatedQuery<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Query::<T>::from_request_parts(parts, state)
+            .await
+            .map(|Query(value)| Self(value))
+            .map_err(|rejection: QueryRejection| ApiError::bad_request(rejection.body_text()))
+    }
 }
 
 #[cfg(test)]
