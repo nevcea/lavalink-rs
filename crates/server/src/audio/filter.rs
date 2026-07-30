@@ -418,7 +418,21 @@ struct KaraokeFilter {
 
 impl KaraokeFilter {
     fn new(config: Karaoke) -> Self {
-        let c = (-2.0 * std::f32::consts::PI * config.filter_width / SAMPLE_RATE).exp();
+        // Neither the protocol nor `Filters::validate` bounds `filterWidth`, and
+        // unlike `vibrato`/`tremolo`'s LFOs this coefficient is fed back through
+        // `y1`/`y2` forever rather than recomputed per sample: an unclamped
+        // `filterWidth` around 8e5 or beyond makes `exp` saturate to `0.0` or
+        // `+inf`, which turns the division below into `0.0/0.0` — a `NaN` that
+        // then never leaves the filter chain's state until the client sends a new
+        // `filters` patch. `c` is also this recurrence's pole radius: even a
+        // *finite* but `c >= 1` (any negative `filterWidth`) makes the feedback
+        // loop diverge to infinity within a few dozen samples instead — clamping
+        // strictly below 1 is what actually keeps it stable, not just finite.
+        // Every realistic `filterWidth` (Nyquist and far past it) already lands
+        // well under this bound, so this is bit-identical there.
+        let c = (-2.0 * std::f32::consts::PI * config.filter_width / SAMPLE_RATE)
+            .exp()
+            .clamp(1e-6, 0.999);
         let b = -4.0 * c / (1.0 + c)
             * (2.0 * std::f32::consts::PI * config.filter_band / SAMPLE_RATE).cos();
         let a = (1.0 - b * b / (4.0 * c)).sqrt() * (1.0 - c);
@@ -1087,6 +1101,32 @@ mod tests {
         let mut channels = vec![vec![0.5, -0.5, 0.25]];
         chain.process(&mut channels);
         assert_eq!(channels[0], vec![0.5, -0.5, 0.25]);
+    }
+
+    /// Unlike `vibrato`/`tremolo`, karaoke's coefficient is computed once and then
+    /// fed back through `y1`/`y2` forever, so a `NaN` here doesn't just spoil one
+    /// sample — it never leaves the filter chain's state. `filterWidth` around 8e5
+    /// or beyond used to make `exp` saturate to `0.0` or `+inf`, turning the `b*b /
+    /// (4.0*c)` division into `0.0/0.0`.
+    #[test]
+    fn karaoke_survives_unclamped_filter_width() {
+        let mut chain =
+            FilterChain::new(&filters(r#"{"karaoke":{"filterWidth":900000}}"#), 2);
+        let mut channels = stereo(0.5, -0.3, 4800);
+        chain.process(&mut channels);
+        assert!(
+            channels.iter().all(|c| c.iter().all(|s| s.is_finite())),
+            "unclamped positive filterWidth produced non-finite output"
+        );
+
+        let mut chain =
+            FilterChain::new(&filters(r#"{"karaoke":{"filterWidth":-900000}}"#), 2);
+        let mut channels = stereo(0.5, -0.3, 4800);
+        chain.process(&mut channels);
+        assert!(
+            channels.iter().all(|c| c.iter().all(|s| s.is_finite())),
+            "unclamped negative filterWidth produced non-finite output"
+        );
     }
 
     #[test]
