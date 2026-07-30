@@ -7,7 +7,7 @@
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lavalink_protocol::player::TrackInfo;
 use reqwest::blocking::{Client, Response};
@@ -182,11 +182,27 @@ struct ReaderChannel {
     /// Bytes already received but not yet handed to the caller of `read`.
     leftover: Vec<u8>,
     leftover_pos: usize,
+    /// Bytes received since `window_start`, for the throughput floor below.
+    window_bytes: usize,
+    window_start: Instant,
 }
 
 /// Chunk size for the reader thread's own reads. Unrelated to the caller's buffer
 /// size — it only bounds how much a single stalled `recv_timeout` can be behind.
 const READ_CHUNK_BYTES: usize = 64 * 1024;
+
+/// The least a source may deliver within one `read_timeout` window and still count
+/// as alive.
+///
+/// The idle-gap timeout alone only catches a source that goes fully silent; one
+/// that sends a byte or two just before every timeout never trips it, while still
+/// pinning the pump thread and this reader thread indefinitely — `next_packet()`
+/// only checks for a pending stop between packets, so a source that never finishes
+/// a packet never gives the pump a chance to notice it was asked to stop. Set far
+/// below any real stream's bitrate (even an 8kbps low-bitrate radio feed is
+/// roughly 6 000 bytes over `READ_TIMEOUT`) so this only catches a source making
+/// essentially no progress, not a genuinely slow one.
+const MIN_WINDOW_BYTES: usize = 256;
 
 impl ReaderChannel {
     fn spawn(mut response: Response) -> Self {
@@ -207,6 +223,8 @@ impl ReaderChannel {
             chunks: rx,
             leftover: Vec::new(),
             leftover_pos: 0,
+            window_bytes: 0,
+            window_start: Instant::now(),
         }
     }
 
@@ -214,8 +232,25 @@ impl ReaderChannel {
         if self.leftover_pos >= self.leftover.len() {
             match self.chunks.recv_timeout(timeout) {
                 Ok(Ok(data)) => {
+                    self.window_bytes += data.len();
                     self.leftover = data;
                     self.leftover_pos = 0;
+
+                    // Evaluated on the same clock as the idle-gap timeout above,
+                    // but only once a whole window has actually elapsed — so a
+                    // source that goes quiet between chunks (a paused player never
+                    // calls `read` at all) is never charged for time nobody asked
+                    // it to spend.
+                    if self.window_start.elapsed() >= timeout {
+                        if self.window_bytes < MIN_WINDOW_BYTES {
+                            return Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "read stalled: throughput below the minimum floor",
+                            ));
+                        }
+                        self.window_start = Instant::now();
+                        self.window_bytes = 0;
+                    }
                 }
                 Ok(Err(error)) => return Err(error),
                 // The reader thread hasn't produced a byte in `timeout` — treated
@@ -614,6 +649,64 @@ mod tests {
         }
 
         assert_eq!(collected, BODY);
+    }
+
+    /// The bug this fix targets: a connection that never goes fully silent but
+    /// also never makes real progress — a byte or two just before every idle-gap
+    /// timeout, forever. Before the throughput floor this satisfied the previous
+    /// test's exact protection on every single chunk and never failed, which is
+    /// precisely the shape of connection that can pin the pump thread and this
+    /// reader thread indefinitely: `pump.rs`'s `next_packet()` only checks for a
+    /// pending stop between finished packets, and a source that never finishes
+    /// one never gives it the chance. Not seekable, so the error must surface on
+    /// its own rather than through the reconnect path.
+    #[test]
+    fn a_trickling_connection_fails_the_throughput_floor() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            consume_request(&stream);
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n").unwrap();
+            // One byte every 60ms: comfortably faster than the 200ms idle-gap
+            // timeout used below, but far under the throughput floor over any
+            // full window of it.
+            for _ in 0..40 {
+                if stream.write_all(b"x").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(60));
+            }
+        });
+
+        let mut source = HttpMediaSource::open_with_timeouts(
+            &format!("http://{addr}"),
+            None,
+            None,
+            CONNECT_TIMEOUT,
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        assert!(!source.is_seekable());
+
+        let mut buffer = [0u8; 4096];
+        let mut saw_error = false;
+        for _ in 0..40 {
+            match source.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(error) => {
+                    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+                    saw_error = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            saw_error,
+            "a trickle below the throughput floor must eventually fail the read"
+        );
     }
 
     /// A source without range support cannot safely resume — reconnecting would
