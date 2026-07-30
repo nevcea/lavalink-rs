@@ -113,6 +113,11 @@ struct State {
 /// How many corrupt frames in a row before the track is given up on.
 const MAX_CONSECUTIVE_ERRORS: u32 = 32;
 
+/// How long `write_interruptibly` waits for ring space before checking for new
+/// commands again. Matches `ring::PRODUCER_POLL`'s cadence — this is the same
+/// wait, just interleaved with a command check instead of run in isolation.
+const COMMAND_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
     let source = config
         .opener
@@ -206,7 +211,7 @@ impl State {
     ) -> PumpOutcome {
         loop {
             match self.drain_commands(commands, writer) {
-                ControlFlow::Continue => {}
+                ControlFlow::Continue { .. } => {}
                 ControlFlow::Stopped => return PumpOutcome::Stopped,
             }
 
@@ -286,12 +291,57 @@ impl State {
             self.apply_filters(&mut pcm);
 
             self.produced = true;
-            let sent = writer.write(&pcm);
-            self.pcm = pcm;
-            if !sent {
+            if let ControlFlow::Stopped = self.write_interruptibly(writer, &pcm, commands) {
+                self.pcm = pcm;
                 return PumpOutcome::Stopped;
             }
+            self.pcm = pcm;
             on_progress();
+        }
+    }
+
+    /// Writes `samples`, blocking while the ring is full — like
+    /// [`RingWriter::write`], but checks for new commands between attempts
+    /// instead of leaving them queued.
+    ///
+    /// Pausing stalls the pump on a full ring by design (`engine.rs`'s
+    /// `set_paused` docs): without this, a Seek/SetVolume/SetFilters/SetEndTime
+    /// sent while paused would sit unprocessed until the player is unpaused and
+    /// the write already in progress finally drains, rather than taking effect
+    /// right away.
+    fn write_interruptibly(
+        &mut self,
+        writer: &RingWriter,
+        samples: &[f32],
+        commands: &Receiver<PumpCommand>,
+    ) -> ControlFlow {
+        let mut remaining = samples;
+        loop {
+            let (written, closed) = writer.try_write(remaining);
+            if closed {
+                return ControlFlow::Stopped;
+            }
+            remaining = &remaining[written..];
+            if remaining.is_empty() {
+                return ControlFlow::Continue { reset: false };
+            }
+
+            match self.drain_commands(commands, writer) {
+                ControlFlow::Stopped => return ControlFlow::Stopped,
+                // A seek that landed already discarded the ring's stale
+                // buffered audio (`RingWriter::reset`, called from within
+                // `drain_commands`) — `remaining` is exactly that kind of
+                // stale audio, decoded before the seek, so it must be dropped
+                // rather than appended right back after the discard.
+                ControlFlow::Continue { reset: true } => {
+                    return ControlFlow::Continue { reset: true };
+                }
+                ControlFlow::Continue { reset: false } => {}
+            }
+
+            if !writer.wait_for_space(COMMAND_POLL) {
+                return ControlFlow::Stopped;
+            }
         }
     }
 
@@ -301,6 +351,7 @@ impl State {
         commands: &Receiver<PumpCommand>,
         writer: &RingWriter,
     ) -> ControlFlow {
+        let mut reset = false;
         loop {
             match commands.try_recv() {
                 Ok(PumpCommand::Stop) => return ControlFlow::Stopped,
@@ -312,6 +363,7 @@ impl State {
                     // the reported position must stay where it actually is too.
                     if self.seek(position_ms) {
                         writer.reset(position_ms);
+                        reset = true;
                     }
                 }
                 Ok(PumpCommand::SetFilters(filters)) => {
@@ -323,7 +375,7 @@ impl State {
                 Ok(PumpCommand::SetEndTime(end_time_ms)) => {
                     self.end_time_ms = end_time_ms;
                 }
-                Err(TryRecvError::Empty) => return ControlFlow::Continue,
+                Err(TryRecvError::Empty) => return ControlFlow::Continue { reset },
                 // The engine dropped the sender: nobody is listening any more.
                 Err(TryRecvError::Disconnected) => return ControlFlow::Stopped,
             }
@@ -404,7 +456,9 @@ impl State {
 }
 
 enum ControlFlow {
-    Continue,
+    /// `reset` is set when a command in this batch was a seek that landed,
+    /// discarding whatever the ring held before it.
+    Continue { reset: bool },
     Stopped,
 }
 
@@ -751,6 +805,109 @@ mod tests {
             position.load(Ordering::Relaxed),
             250,
             "a failed seek must not move the reported position toward the target"
+        );
+    }
+
+    /// The bug: the pump only checked for new commands between packets, at the
+    /// top of `decode_loop`. A full ring — exactly what pausing causes,
+    /// deliberately (`engine.rs`'s `set_paused` docs) — used to block inside
+    /// `write` with no visibility into the command channel at all, so a
+    /// Seek/SetVolume/SetFilters/SetEndTime sent while paused sat unprocessed
+    /// until the player was unpaused and the write already in flight finally
+    /// drained.
+    #[test]
+    fn a_command_sent_while_blocked_on_a_full_ring_is_applied_without_waiting_for_space() {
+        let wav = TempWav::new("pump-blocked-command", 48_000, 2, 0.1);
+        let config = config(wav.track());
+
+        let position = Arc::new(AtomicI64::new(0));
+        let buffer_ms = 20;
+        let (writer, _reader) = super::super::ring::channel(
+            buffer_ms,
+            Arc::clone(&position),
+            Arc::new(super::super::ring::FrameCounters::default()),
+        );
+
+        let mut state = open(&config, &writer).unwrap();
+
+        // Fill the ring completely — nobody is draining `_reader`, the same
+        // situation `set_paused` deliberately creates.
+        let capacity_samples =
+            (super::super::ring::SAMPLE_RATE as usize * buffer_ms as usize / 1000) * CHANNELS;
+        let (filled, closed) = writer.try_write(&vec![0.0; capacity_samples]);
+        assert_eq!(filled, capacity_samples);
+        assert!(!closed);
+
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        commands_tx.send(PumpCommand::SetVolume(50)).unwrap();
+        commands_tx.send(PumpCommand::Stop).unwrap();
+        drop(commands_tx);
+
+        // The ring has no room at all, so if commands were only checked
+        // between packets (the old behaviour), this call would have to wait
+        // for space that will never come — it must instead see both commands
+        // on its very first attempt and return immediately.
+        let more_samples = vec![0.0; 10];
+        let flow = state.write_interruptibly(&writer, &more_samples, &commands_rx);
+
+        assert!(matches!(flow, ControlFlow::Stopped));
+        assert_eq!(
+            state.volume,
+            player_volume_multiplier(50),
+            "SetVolume must be applied even though the ring never had room to write into"
+        );
+    }
+
+    /// A seek that interrupts a blocked write discards the ring's stale
+    /// pre-seek audio (`RingWriter::reset`, from within `drain_commands`) — the
+    /// samples this call was in the middle of writing when the seek arrived
+    /// are exactly that kind of stale audio, decoded before the seek, and must
+    /// not be appended back in once the reset has run.
+    #[test]
+    fn a_seek_that_interrupts_a_blocked_write_discards_the_stale_remainder() {
+        let wav = TempWav::new("pump-seek-interrupt", 48_000, 2, 1.0);
+        let config = config(wav.track());
+
+        let position = Arc::new(AtomicI64::new(0));
+        let buffer_ms = 20;
+        let (writer, mut reader) = super::super::ring::channel(
+            buffer_ms,
+            Arc::clone(&position),
+            Arc::new(super::super::ring::FrameCounters::default()),
+        );
+
+        let mut state = open(&config, &writer).unwrap();
+
+        let capacity_samples =
+            (super::super::ring::SAMPLE_RATE as usize * buffer_ms as usize / 1000) * CHANNELS;
+        // A recognizable marker, filling the ring completely.
+        let (filled, _) = writer.try_write(&vec![9.75; capacity_samples]);
+        assert_eq!(filled, capacity_samples);
+
+        // Kept alive (unlike the other tests here) so that after this one
+        // message, `try_recv` reports empty rather than disconnected — a
+        // dropped sender would make `drain_commands` return `Stopped`
+        // regardless of the seek, which is not what this test is about.
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        commands_tx.send(PumpCommand::Seek { position_ms: 500 }).unwrap();
+
+        // Stale audio decoded before the seek — must not survive the reset.
+        let stale_remainder = vec![9.75; 10];
+        let flow = state.write_interruptibly(&writer, &stale_remainder, &commands_rx);
+        assert!(matches!(flow, ControlFlow::Continue { reset: true }));
+
+        // The marker value must never surface: `reset` cleared the pre-seek
+        // buffer, and the stale remainder must not have been appended back in
+        // afterward.
+        let mut out = vec![0u8; capacity_samples * 4 + 64];
+        let read = std::io::Read::read(&mut reader, &mut out).unwrap();
+        let samples: Vec<f32> = out[..read]
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        assert!(
+            !samples.contains(&9.75),
+            "stale pre-seek audio must not reappear after the ring was reset"
         );
     }
 

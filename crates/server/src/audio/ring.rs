@@ -143,32 +143,60 @@ impl RingWriter {
     /// Appends samples, blocking while the ring is full.
     ///
     /// Returns `false` once the ring has been closed, which is the pump's signal to
-    /// stop decoding and exit.
+    /// stop decoding and exit. Built on [`Self::try_write`] and
+    /// [`Self::wait_for_space`] — see those for a caller (the pump's decode loop)
+    /// that needs to do other work between polls instead of blocking outright.
     pub fn write(&self, mut samples: &[f32]) -> bool {
         while !samples.is_empty() {
-            if self.shared.closed.load(Ordering::Relaxed) {
+            let (written, closed) = self.try_write(samples);
+            if closed {
                 return false;
             }
-
-            let mut buffer = lock(&self.shared.buffer);
-            while buffer.len() >= self.shared.capacity {
-                if self.shared.closed.load(Ordering::Relaxed) {
-                    return false;
-                }
-                let (guard, _) = self
-                    .shared
-                    .space
-                    .wait_timeout(buffer, PRODUCER_POLL)
-                    .unwrap_or_else(|e| e.into_inner());
-                buffer = guard;
+            samples = &samples[written..];
+            if samples.is_empty() {
+                break;
             }
-
-            let room = self.shared.capacity - buffer.len();
-            let take = room.min(samples.len());
-            buffer.extend(samples[..take].iter().copied());
-            samples = &samples[take..];
+            if !self.wait_for_space(PRODUCER_POLL) {
+                return false;
+            }
         }
         true
+    }
+
+    /// Appends as many of `samples` as currently fit, without blocking.
+    ///
+    /// Returns how many samples were written and whether the ring is closed.
+    /// Pairs with [`Self::wait_for_space`]: a caller that needs to check for
+    /// other work between attempts (rather than parking the way [`Self::write`]
+    /// does) calls this first, and only waits when it comes back short.
+    pub fn try_write(&self, samples: &[f32]) -> (usize, bool) {
+        if self.shared.closed.load(Ordering::Relaxed) {
+            return (0, true);
+        }
+        let mut buffer = lock(&self.shared.buffer);
+        let room = self.shared.capacity.saturating_sub(buffer.len());
+        let take = room.min(samples.len());
+        buffer.extend(samples[..take].iter().copied());
+        (take, false)
+    }
+
+    /// Waits up to `timeout` for room in the ring or for it to close, whichever
+    /// comes first. Returns whether the ring is still open — `false` means stop,
+    /// same as [`Self::write`]'s return value.
+    pub fn wait_for_space(&self, timeout: Duration) -> bool {
+        if self.shared.closed.load(Ordering::Relaxed) {
+            return false;
+        }
+        let buffer = lock(&self.shared.buffer);
+        if buffer.len() < self.shared.capacity {
+            return true;
+        }
+        let _ = self
+            .shared
+            .space
+            .wait_timeout(buffer, timeout)
+            .unwrap_or_else(|e| e.into_inner());
+        !self.shared.closed.load(Ordering::Relaxed)
     }
 
     /// The track is fully delivered. The reader drains what is left, then reports
