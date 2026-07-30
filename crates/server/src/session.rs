@@ -47,11 +47,23 @@ pub struct Session {
     pub sink: Arc<Sink>,
     resuming: AtomicBool,
     resume_timeout_secs: AtomicU64,
-    players: Mutex<HashMap<u64, PlayerHandle>>,
-    /// Kept alongside the players so a `PATCH` carrying a `voice` field can await
-    /// the connection *before* the actor is told about it — which is what lets a
-    /// failure become a status code instead of being swallowed.
-    voices: Mutex<HashMap<u64, Arc<VoiceConnection>>>,
+    /// One entry per guild: the player and the voice connection its engine was
+    /// actually built with, inserted together in a single step (see
+    /// [`Session::get_or_create_player`]) rather than as two independent maps.
+    /// Two maps updated by two separate `entry().or_insert()` calls let two
+    /// concurrent first-time requests for the same guild disagree about which of
+    /// them won — the registered player's engine could end up holding a voice
+    /// connection that was never the one `PATCH`'s `voice` field gets connected
+    /// against, and the loser's actor (kept alive forever by its own engine's
+    /// self-referencing event-channel sender) would leak permanently. One map
+    /// filled in one step makes "who won" a single decision instead of two.
+    guilds: Mutex<HashMap<u64, GuildPlayer>>,
+}
+
+/// A guild's player, paired with the voice connection its engine holds.
+struct GuildPlayer {
+    handle: PlayerHandle,
+    voice: Arc<VoiceConnection>,
 }
 
 impl std::fmt::Debug for Session {
@@ -73,8 +85,7 @@ impl Session {
             sink: Arc::new(Sink::new()),
             resuming: AtomicBool::new(false),
             resume_timeout_secs: AtomicU64::new(DEFAULT_RESUME_TIMEOUT_SECS),
-            players: Mutex::new(HashMap::new()),
-            voices: Mutex::new(HashMap::new()),
+            guilds: Mutex::new(HashMap::new()),
         }
     }
 
@@ -99,54 +110,60 @@ impl Session {
     }
 
     pub fn player(&self, guild_id: u64) -> Option<PlayerHandle> {
-        self.lock_players().get(&guild_id).cloned()
+        self.lock_guilds().get(&guild_id).map(|guild| guild.handle.clone())
     }
 
     pub fn players(&self) -> Vec<PlayerHandle> {
-        self.lock_players().values().cloned().collect()
-    }
-
-    /// Inserts a player if the guild has none, returning the handle either way.
-    ///
-    /// The original builds the player *inside* `computeIfAbsent` and fires
-    /// `onNewPlayer` from the mapping function (`SocketContext.kt:109-113`), which
-    /// runs arbitrary listener code while holding the map's bin lock — reentrancy
-    /// there is undefined behaviour for `ConcurrentHashMap`. Here construction is
-    /// cheap and side-effect free (spawning the actor task is the caller's job
-    /// before it gets here), so nothing runs under the lock.
-    pub fn insert_player(&self, guild_id: u64, handle: PlayerHandle) -> PlayerHandle {
-        self.lock_players()
-            .entry(guild_id)
-            .or_insert(handle)
-            .clone()
-    }
-
-    pub fn insert_voice(&self, guild_id: u64, voice: Arc<VoiceConnection>) {
-        self.lock_voices().entry(guild_id).or_insert(voice);
-    }
-
-    pub fn voice(&self, guild_id: u64) -> Option<Arc<VoiceConnection>> {
-        self.lock_voices().get(&guild_id).cloned()
-    }
-
-    pub fn remove_player(&self, guild_id: u64) -> Option<PlayerHandle> {
-        self.lock_voices().remove(&guild_id);
-        self.lock_players().remove(&guild_id)
-    }
-
-    pub fn take_players(&self) -> Vec<PlayerHandle> {
-        self.lock_voices().clear();
-        std::mem::take(&mut *self.lock_players())
-            .into_values()
+        self.lock_guilds()
+            .values()
+            .map(|guild| guild.handle.clone())
             .collect()
     }
 
-    fn lock_players(&self) -> std::sync::MutexGuard<'_, HashMap<u64, PlayerHandle>> {
-        crate::lock(&self.players)
+    /// Returns the guild's (player, voice) pair, building and inserting it with
+    /// `build` if there is none yet.
+    ///
+    /// `build` runs at most once per guild, under the same lock that checks for
+    /// and inserts the entry: a race between two first-time callers for the same
+    /// guild is resolved as a single winner for *both* the player and the voice
+    /// connection together, rather than as two independent decisions that could
+    /// disagree about who won (see [`GuildPlayer`]'s docs for what that used to
+    /// cost). The original builds the player *inside* `computeIfAbsent` and fires
+    /// `onNewPlayer` from the mapping function (`SocketContext.kt:109-113`), which
+    /// runs arbitrary listener code while holding the map's bin lock — reentrancy
+    /// there is undefined behaviour for `ConcurrentHashMap`. Here construction is
+    /// cheap and side-effect free (spawning the actor task is all `build` does
+    /// beyond constructing values), so nothing unbounded runs under the lock.
+    pub fn get_or_create_player(
+        &self,
+        guild_id: u64,
+        build: impl FnOnce() -> (PlayerHandle, Arc<VoiceConnection>),
+    ) -> (PlayerHandle, Arc<VoiceConnection>) {
+        let mut guilds = self.lock_guilds();
+        let guild = guilds.entry(guild_id).or_insert_with(|| {
+            let (handle, voice) = build();
+            GuildPlayer { handle, voice }
+        });
+        (guild.handle.clone(), Arc::clone(&guild.voice))
     }
 
-    fn lock_voices(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Arc<VoiceConnection>>> {
-        crate::lock(&self.voices)
+    pub fn voice(&self, guild_id: u64) -> Option<Arc<VoiceConnection>> {
+        self.lock_guilds().get(&guild_id).map(|guild| Arc::clone(&guild.voice))
+    }
+
+    pub fn remove_player(&self, guild_id: u64) -> Option<PlayerHandle> {
+        self.lock_guilds().remove(&guild_id).map(|guild| guild.handle)
+    }
+
+    pub fn take_players(&self) -> Vec<PlayerHandle> {
+        std::mem::take(&mut *self.lock_guilds())
+            .into_values()
+            .map(|guild| guild.handle)
+            .collect()
+    }
+
+    fn lock_guilds(&self) -> std::sync::MutexGuard<'_, HashMap<u64, GuildPlayer>> {
+        crate::lock(&self.guilds)
     }
 }
 
@@ -245,14 +262,26 @@ impl SessionRegistry {
         sessions.remove(id).map(|entry| entry.session)
     }
 
-    /// Removes sessions whose resume deadline has passed. Called from the global
+    /// Removes sessions whose resume deadline has passed, or whose essential
+    /// queue has overflowed while waiting to be resumed. Called from the global
     /// tick, which replaces the original's per-session scheduled executor.
+    ///
+    /// A connected session that stops draining essentials is caught by `ws.rs`'s
+    /// `pump`, which closes it with 1008 the moment its sink overflows. A
+    /// `Resumable` session has no websocket for anything to notice that on, so
+    /// without this it would just keep silently dropping essential messages
+    /// (`Sink::send`'s `SendError::Overflow`) for the rest of the resume window
+    /// — defeating the reason resume exists. Treating an overflowing sink the
+    /// same as an expired deadline here gives it the same fate a connected
+    /// session gets, instead of a silent, unbounded event gap.
     pub fn sweep_expired(&self, now: Instant) -> Vec<Arc<Session>> {
         let mut sessions = self.lock();
         let expired: Vec<String> = sessions
             .iter()
             .filter(|(_, entry)| match entry.state {
-                SessionState::Resumable { deadline } => deadline <= now,
+                SessionState::Resumable { deadline } => {
+                    deadline <= now || entry.session.sink.is_overflowing()
+                }
                 SessionState::Open => false,
             })
             .map(|(id, _)| id.clone())
@@ -292,6 +321,63 @@ fn generate_session_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    use crate::audio::testing::RecordingEngine;
+    use crate::player::PlayerActor;
+    use crate::voice::VoiceConnection;
+
+    fn dummy_pair(guild_id: u64) -> (PlayerHandle, Arc<VoiceConnection>) {
+        let events: crate::player::EventSlot = Arc::new(std::sync::OnceLock::new());
+        let voice = Arc::new(VoiceConnection::new(guild_id, 1, Arc::clone(&events)));
+        let (actor, handle) = PlayerActor::new(
+            guild_id,
+            Box::new(RecordingEngine::new()),
+            Arc::new(crate::sink::Sink::new()),
+            Duration::from_secs(10),
+        );
+        tokio::spawn(actor.run());
+        (handle, voice)
+    }
+
+    /// The race `AppState::player` used to be exposed to: two first-time callers
+    /// for the same guild each building their own (player, voice) pair, with the
+    /// registered player possibly ending up paired with a voice connection built
+    /// by the *other* caller. `get_or_create_player` closes this by making "who
+    /// won" one decision instead of two — `build` runs at most once per guild, and
+    /// every caller gets back the exact pair that was inserted.
+    #[tokio::test]
+    async fn get_or_create_player_builds_at_most_once_and_returns_one_pair() {
+        let session = Session::new("s".into(), 1, None);
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let guild = 42;
+
+        let build = |calls: &Arc<AtomicUsize>| {
+            let calls = Arc::clone(calls);
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                dummy_pair(guild)
+            }
+        };
+
+        let (handle_1, voice_1) =
+            session.get_or_create_player(guild, build(&build_calls));
+        let (handle_2, voice_2) =
+            session.get_or_create_player(guild, build(&build_calls));
+
+        assert_eq!(
+            build_calls.load(Ordering::SeqCst),
+            1,
+            "a second caller for the same guild must not build its own pair"
+        );
+        assert!(
+            Arc::ptr_eq(&voice_1, &voice_2),
+            "every caller must get back the same voice connection as the registered player"
+        );
+        assert_eq!(handle_1.guild_id, handle_2.guild_id);
+        assert!(Arc::ptr_eq(&session.voice(guild).unwrap(), &voice_1));
+    }
 
     fn resumable_session(registry: &SessionRegistry) -> Arc<Session> {
         let session = registry.open(1, None);
@@ -375,6 +461,51 @@ mod tests {
         assert!(expired.is_empty());
         assert!(registry.get(&open.id).is_some());
         assert!(registry.get(&waiting.id).is_some());
+    }
+
+    /// While `Resumable`, nothing has a websocket to notice an overflowing sink
+    /// the way `ws.rs`'s `pump` does for a connected one — without this, an
+    /// overflowing resumable session would just keep dropping essential messages
+    /// silently until its deadline, however far off that still is.
+    #[test]
+    fn an_overflowing_resumable_session_is_swept_before_its_deadline() {
+        use lavalink_protocol::message::{EmittedEvent, Message};
+        use lavalink_protocol::player::{Track, TrackInfo};
+
+        let registry = SessionRegistry::new();
+        let session = registry.open(1, None);
+        session.set_resuming(true);
+        session.set_resume_timeout_secs(3600); // far from expiring on its own
+        registry.on_disconnect(&session.id, Instant::now());
+
+        let event = || {
+            Message::Event(EmittedEvent::TrackStart {
+                guild_id: "1".into(),
+                track: Box::new(Track::new(
+                    "e".into(),
+                    TrackInfo {
+                        identifier: "i".into(),
+                        is_seekable: true,
+                        author: "a".into(),
+                        length: 1,
+                        is_stream: false,
+                        position: 0,
+                        title: "t".into(),
+                        uri: None,
+                        source_name: "http".into(),
+                        artwork_url: None,
+                        isrc: None,
+                    },
+                )),
+            })
+        };
+        while !session.sink.is_overflowing() {
+            let _ = session.sink.send(event());
+        }
+
+        let expired = registry.sweep_expired(Instant::now());
+        assert_eq!(expired.len(), 1, "an overflowing resumable session must be swept");
+        assert!(registry.get(&session.id).is_none());
     }
 
     #[test]

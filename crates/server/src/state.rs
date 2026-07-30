@@ -81,40 +81,43 @@ impl AppState {
 
     /// Returns the guild's player, creating and spawning it if there is none.
     ///
-    /// Construction happens outside the registry's lock and the actor task is
-    /// spawned before insertion, so nothing runs while the map is held. If two
-    /// callers race, one handle wins and the loser's actor exits when its unused
-    /// sender drops.
+    /// Construction happens inside `build`, which `Session::get_or_create_player`
+    /// runs at most once per guild under its own lock — nothing in `build` awaits,
+    /// so nothing blocks while it is held. This is what keeps a race between two
+    /// first-time callers for the same guild from registering a player from one
+    /// caller alongside a voice connection from the other: see
+    /// `Session::get_or_create_player`'s docs for what that used to cost.
     pub fn player(&self, session: &Arc<Session>, guild_id: u64) -> PlayerHandle {
-        if let Some(existing) = session.player(guild_id) {
-            return existing;
-        }
+        let config = Arc::clone(&self.config);
+        let opener = Arc::clone(&self.opener);
+        let sink = Arc::clone(&session.sink);
+        let user_id = session.user_id;
+        let runtime = tokio::runtime::Handle::current();
 
-        // The engine and the voice connection both report to an actor that does not
-        // exist yet, so they share a slot that `PlayerActor::new` fills in.
-        let events = crate::player::EventSlot::default();
-        let voice = Arc::new(VoiceConnection::new(
-            guild_id,
-            session.user_id,
-            Arc::clone(&events),
-        ));
-        let engine: Box<dyn Engine> = Box::new(PipelineEngine::new(
-            guild_id,
-            self.config.lavalink.server.frame_buffer_duration_ms,
-            Arc::clone(&voice),
-            Arc::clone(&self.opener),
-            events,
-            tokio::runtime::Handle::current(),
-        ));
+        let (handle, _voice) = session.get_or_create_player(guild_id, move || {
+            // The engine and the voice connection both report to an actor that
+            // does not exist yet, so they share a slot that `PlayerActor::new`
+            // fills in.
+            let events = crate::player::EventSlot::default();
+            let voice = Arc::new(VoiceConnection::new(guild_id, user_id, Arc::clone(&events)));
+            let engine: Box<dyn Engine> = Box::new(PipelineEngine::new(
+                guild_id,
+                config.lavalink.server.frame_buffer_duration_ms,
+                Arc::clone(&voice),
+                opener,
+                events,
+                runtime,
+            ));
 
-        let stuck_threshold =
-            Duration::from_millis(self.config.lavalink.server.track_stuck_threshold_ms);
-        let (actor, handle) =
-            PlayerActor::new(guild_id, engine, Arc::clone(&session.sink), stuck_threshold);
-        tokio::spawn(actor.run());
+            let stuck_threshold =
+                Duration::from_millis(config.lavalink.server.track_stuck_threshold_ms);
+            let (actor, handle) = PlayerActor::new(guild_id, engine, sink, stuck_threshold);
+            tokio::spawn(actor.run());
 
-        session.insert_voice(guild_id, voice);
-        session.insert_player(guild_id, handle)
+            (handle, voice)
+        });
+
+        handle
     }
 }
 
