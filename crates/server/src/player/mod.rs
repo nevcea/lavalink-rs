@@ -3,6 +3,6 @@ pub mod state;
 
 pub use actor::{
     now_epoch_ms, Command, EventSlot, PatchRequest, PlayerActor, PlayerGone, PlayerHandle,
-    TrackChange, VoiceUpdate,
+    TrackChange, VoiceUpdate, VoiceUpdateSlot,
 };
 pub use state::{Playback, PlayerModel, VoiceConnection};

@@ -47,6 +47,11 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often the actor checks whether the current track has gone quiet.
 const STUCK_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Voice transitions are rare (only on an actual connect/reconnect/disconnect)
+/// and never queue up behind each other in practice — this only has to be
+/// bigger than "one", not big.
+const VOICE_UPDATE_CAPACITY: usize = 16;
+
 #[derive(Debug)]
 pub enum Command {
     /// One `PATCH /v4/sessions/{id}/players/{guildId}`, applied in the original's
@@ -57,8 +62,6 @@ pub enum Command {
     /// read player state itself — asking the actor to publish keeps the actor the
     /// only reader of its own fields.
     EmitUpdate,
-    /// Voice-layer state changed. The only writer of the connection cache.
-    Voice(VoiceUpdate),
     /// The audio engine reported something.
     Engine(EngineEvent),
     Destroy(oneshot::Sender<()>),
@@ -105,6 +108,11 @@ pub enum VoiceUpdate {
 pub struct PlayerHandle {
     pub guild_id: u64,
     commands: mpsc::Sender<Command>,
+    /// Separate from `commands`: a voice transition (the only writer of the
+    /// connection cache) must not be able to lose its turn behind a burst of
+    /// unrelated REST traffic sharing the same queue — see the channel's own
+    /// docs on `PlayerActor`.
+    voice_updates: mpsc::Sender<VoiceUpdate>,
     /// Written by the audio engine's *consuming* side and read here without a lock.
     /// Never written by the pump: the pump runs ahead by `frameBufferDurationMs`, so
     /// its production count is not a playback position.
@@ -152,6 +160,14 @@ impl PlayerHandle {
         self.commands.try_send(command).map_err(|_| PlayerGone)
     }
 
+    /// Reports a voice transition. Non-blocking, like `try_send`: this is the
+    /// same call `ActorNotifier` makes from songbird's own event dispatch,
+    /// which must not block — but on its own channel, so it cannot be starved
+    /// by whatever `commands` happens to be carrying at the same moment.
+    pub fn send_voice(&self, update: VoiceUpdate) -> Result<(), PlayerGone> {
+        self.voice_updates.try_send(update).map_err(|_| PlayerGone)
+    }
+
     pub async fn snapshot(&self) -> Result<Player, PlayerGone> {
         let (tx, rx) = oneshot::channel();
         self.send(Command::Snapshot(tx)).await?;
@@ -182,6 +198,11 @@ impl PlayerHandle {
 /// once, at construction" comment on [`Engine::attach`](crate::audio::Engine::attach).
 pub type EventSlot = Arc<std::sync::OnceLock<mpsc::Sender<Command>>>;
 
+/// As [`EventSlot`], but for voice transitions — `VoiceConnection` is built
+/// before the actor exists, same as the engine, and needs somewhere to put
+/// its sender until [`PlayerActor::new`] fills it in.
+pub type VoiceUpdateSlot = Arc<std::sync::OnceLock<mpsc::Sender<VoiceUpdate>>>;
+
 /// The actor is gone — destroyed, or its task died.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("player is no longer running")]
@@ -192,6 +213,12 @@ pub struct PlayerActor {
     engine: Box<dyn Engine>,
     sink: Arc<Sink>,
     commands: mpsc::Receiver<Command>,
+    /// Kept off `commands` on purpose — see `PlayerHandle::voice_updates`'s
+    /// docs. `None` once the sender side is gone (a defunct `VoiceConnection`
+    /// does not end the player), so `run`'s select loop stops polling it
+    /// instead of spinning on a channel that will only ever report closed.
+    voice_updates: mpsc::Receiver<VoiceUpdate>,
+    voice_updates_closed: bool,
     position_ms: Arc<AtomicI64>,
     playing_since_ms: Arc<AtomicI64>,
     stuck_threshold: Duration,
@@ -202,13 +229,20 @@ pub struct PlayerActor {
 
 impl PlayerActor {
     /// Builds the actor and its handle. The caller spawns [`PlayerActor::run`].
+    ///
+    /// `voice_slot` is filled in here with the actor's own voice-update
+    /// sender, the same deferred-fill pattern [`EventSlot`] uses — the caller
+    /// builds `VoiceConnection` (which needs a sender) before it can build
+    /// the actor (which is what creates one).
     pub fn new(
         guild_id: u64,
         engine: Box<dyn Engine>,
         sink: Arc<Sink>,
         stuck_threshold: Duration,
+        voice_slot: VoiceUpdateSlot,
     ) -> (Self, PlayerHandle) {
         let (tx, rx) = mpsc::channel(COMMAND_CAPACITY);
+        let (voice_tx, voice_rx) = mpsc::channel(VOICE_UPDATE_CAPACITY);
         let position_ms = engine.position_handle();
         let frames = engine.frame_counters();
         // Not from the engine: whether the player is playing is the actor's own
@@ -217,10 +251,12 @@ impl PlayerActor {
         // The engine reports back as `Command::Engine`, so it never needs a
         // reference to the actor itself.
         engine.attach(tx.clone());
+        let _ = voice_slot.set(voice_tx.clone());
 
         let handle = PlayerHandle {
             guild_id,
             commands: tx,
+            voice_updates: voice_tx,
             position_ms: Arc::clone(&position_ms),
             playing_since_ms: Arc::clone(&playing_since_ms),
             frames,
@@ -230,6 +266,8 @@ impl PlayerActor {
             engine,
             sink,
             commands: rx,
+            voice_updates: voice_rx,
+            voice_updates_closed: false,
             position_ms,
             playing_since_ms,
             stuck_threshold,
@@ -248,6 +286,15 @@ impl PlayerActor {
                     let Some(command) = command else { break };
                     if self.handle(command) == Flow::Stop {
                         break;
+                    }
+                }
+                update = self.voice_updates.recv(), if !self.voice_updates_closed => {
+                    match update {
+                        Some(update) => {
+                            self.apply_voice(update);
+                            self.sync_playing();
+                        }
+                        None => self.voice_updates_closed = true,
                     }
                 }
                 _ = stuck_check.tick() => self.check_stuck(Instant::now()),
@@ -270,10 +317,6 @@ impl PlayerActor {
             Command::Patch(request, reply) => {
                 self.apply_patch(*request);
                 let _ = reply.send(self.snapshot());
-                Flow::Continue
-            }
-            Command::Voice(update) => {
-                self.apply_voice(update);
                 Flow::Continue
             }
             Command::Engine(event) => {
@@ -609,6 +652,7 @@ mod tests {
                 Box::new(engine.clone()),
                 Arc::clone(&sink),
                 stuck_threshold,
+                Arc::new(std::sync::OnceLock::new()),
             );
             tokio::spawn(actor.run());
             Self {
@@ -631,6 +675,26 @@ mod tests {
                     _ => None,
                 })
                 .collect()
+        }
+
+        /// Retries `snapshot()` until `until` holds.
+        ///
+        /// Needed whenever a test wants to observe the effect of a
+        /// `send_voice` call: `voice_updates` and `commands` are separate
+        /// channels now (see `PlayerHandle::voice_updates`'s docs), so
+        /// nothing guarantees a voice update sent moments earlier has
+        /// already been applied by the instant a specific `snapshot()`
+        /// call's reply is captured — `tokio::select!` may service either
+        /// channel first.
+        async fn snapshot_until(&self, mut until: impl FnMut(&Player) -> bool) -> Player {
+            for _ in 0..100 {
+                let player = self.handle.snapshot().await.unwrap();
+                if until(&player) {
+                    return player;
+                }
+                tokio::task::yield_now().await;
+            }
+            panic!("condition was never satisfied within the retry budget");
         }
     }
 
@@ -886,12 +950,10 @@ mod tests {
         let harness = Harness::start();
         harness
             .handle
-            .send(Command::Voice(VoiceUpdate::Connected { ping_ms: 21 }))
-            .await
+            .send_voice(VoiceUpdate::Connected { ping_ms: 21 })
             .unwrap();
 
-        let player = harness.handle.snapshot().await.unwrap();
-        assert!(player.state.connected);
+        let player = harness.snapshot_until(|player| player.state.connected).await;
         assert_eq!(player.state.ping, 21);
 
         assert!(harness
@@ -905,13 +967,27 @@ mod tests {
         let harness = Harness::start();
         harness
             .handle
-            .send(Command::Voice(VoiceUpdate::Closed {
+            .send_voice(VoiceUpdate::Closed {
                 code: 4006,
                 by_remote: true,
-            }))
-            .await
+            })
             .unwrap();
-        harness.handle.snapshot().await.unwrap();
+        // A sentinel sent right after, on the same channel: FIFO delivery
+        // within one channel guarantees the actor applies `Closed` before
+        // this, so once this lands, `Closed`'s emission is already in the
+        // sink — unlike `state.connected`/`ping`, which `Closed` sets to the
+        // same values a fresh player already starts with, so they can't
+        // distinguish "applied" from "not yet applied".
+        const SENTINEL_PING: i64 = 4_006_000;
+        harness
+            .handle
+            .send_voice(VoiceUpdate::Connected {
+                ping_ms: SENTINEL_PING,
+            })
+            .unwrap();
+        harness
+            .snapshot_until(|player| player.state.ping == SENTINEL_PING)
+            .await;
 
         assert!(harness.events().iter().any(|event| matches!(
             event,
@@ -1040,6 +1116,7 @@ mod tests {
             Box::new(engine),
             sink,
             Duration::from_secs(10),
+            Arc::new(std::sync::OnceLock::new()),
         );
         // _actor.run() is deliberately never spawned, so nothing ever drains
         // the queue below — the same "wedged actor" shape as a real stall.
@@ -1052,6 +1129,42 @@ mod tests {
             .await
             .expect("send should give up on its own well before this outer bound");
         assert_eq!(result, Err(PlayerGone));
+    }
+
+    /// The bug: voice updates used to share the general `commands` queue
+    /// (`Command::Voice`), so `ActorNotifier`'s `try_send` could be dropped by
+    /// a burst of REST traffic that happened to fill it — misreporting
+    /// `connected: false` until some later, unrelated transition came along
+    /// to correct it. On its own channel, a full `commands` queue must have
+    /// no bearing on whether a voice update can still be delivered.
+    #[tokio::test]
+    async fn a_full_command_queue_does_not_block_a_voice_update() {
+        let sink = Arc::new(Sink::new());
+        let engine = RecordingEngine::new();
+        let (_actor, handle) = PlayerActor::new(
+            123,
+            Box::new(engine),
+            sink,
+            Duration::from_secs(10),
+            Arc::new(std::sync::OnceLock::new()),
+        );
+        // _actor.run() is deliberately never spawned, so `commands` fills
+        // without ever draining.
+
+        for _ in 0..COMMAND_CAPACITY {
+            handle.try_send(Command::EmitUpdate).unwrap();
+        }
+        assert!(
+            handle.try_send(Command::EmitUpdate).is_err(),
+            "the commands queue should now be completely full"
+        );
+
+        assert!(
+            handle
+                .send_voice(VoiceUpdate::Connected { ping_ms: 21 })
+                .is_ok(),
+            "a full commands queue must not block a voice update on its own channel"
+        );
     }
 
     #[tokio::test]

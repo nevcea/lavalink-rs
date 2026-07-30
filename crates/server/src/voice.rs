@@ -28,7 +28,7 @@ use songbird::events::context_data::DisconnectReason;
 use songbird::{Config, ConnectionInfo, CoreEvent, Driver, Event, EventContext, EventHandler};
 use tokio::sync::Mutex;
 
-use crate::player::{Command, EventSlot, VoiceUpdate};
+use crate::player::{VoiceUpdate, VoiceUpdateSlot};
 
 #[derive(Debug, thiserror::Error)]
 pub enum VoiceError {
@@ -72,7 +72,7 @@ impl VoiceConnection {
     ///
     /// The subscription is what keeps the actor's cache honest: every transition
     /// arrives as a message rather than being inferred.
-    pub fn new(guild_id: u64, user_id: u64, events: EventSlot) -> Self {
+    pub fn new(guild_id: u64, user_id: u64, voice_updates: VoiceUpdateSlot) -> Self {
         let mut driver = Driver::new(Config::default());
 
         for event in [
@@ -83,7 +83,7 @@ impl VoiceConnection {
             driver.add_global_event(
                 Event::Core(event),
                 ActorNotifier {
-                    events: Arc::clone(&events),
+                    voice_updates: Arc::clone(&voice_updates),
                 },
             );
         }
@@ -162,7 +162,7 @@ impl VoiceConnection {
 
 /// Forwards songbird's connection events to the player actor.
 struct ActorNotifier {
-    events: EventSlot,
+    voice_updates: VoiceUpdateSlot,
 }
 
 #[async_trait::async_trait]
@@ -180,12 +180,16 @@ impl EventHandler for ActorNotifier {
         };
 
         if let Some(update) = update {
-            let events = self.events.get().cloned();
-            if let Some(events) = events {
-                // Dropping is acceptable here and nowhere else: the actor is either
-                // gone, in which case the connection is about to be too, or wedged,
-                // in which case the next transition re-reports the state.
-                let _ = events.try_send(Command::Voice(update));
+            let voice_updates = self.voice_updates.get().cloned();
+            if let Some(voice_updates) = voice_updates {
+                // On its own channel, not the general command queue, precisely so
+                // a burst of REST traffic sharing that queue can't fill it out
+                // from under a voice transition — the case this used to drop in
+                // (see git history) and misreport `connected` until some later,
+                // unrelated transition happened to come along and correct it.
+                // Only a wedged actor (never draining anything) can still fill
+                // this one, which is what `try_send` still allows dropping.
+                let _ = voice_updates.try_send(update);
             }
         }
 
@@ -227,7 +231,7 @@ mod tests {
         }
     }
 
-    fn events() -> EventSlot {
+    fn voice_updates() -> VoiceUpdateSlot {
         Arc::new(std::sync::OnceLock::new())
     }
 
@@ -326,7 +330,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_complete_voice_state_builds_connection_info() {
-        let connection = VoiceConnection::new(123, 456, events());
+        let connection = VoiceConnection::new(123, 456, voice_updates());
         let info = connection
             .connection_info(&voice_state("t", "e", "s", "789"))
             .unwrap();
@@ -340,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_channel_id_is_rejected() {
-        let connection = VoiceConnection::new(123, 456, events());
+        let connection = VoiceConnection::new(123, 456, voice_updates());
         let mut voice = voice_state("t", "e", "s", "c");
         voice.channel_id = None;
         assert!(matches!(
@@ -351,7 +355,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_non_numeric_channel_id_is_rejected() {
-        let connection = VoiceConnection::new(123, 456, events());
+        let connection = VoiceConnection::new(123, 456, voice_updates());
         assert!(matches!(
             connection.connection_info(&voice_state("t", "e", "s", "not-a-number")),
             Err(VoiceError::BadId(_))
@@ -360,7 +364,7 @@ mod tests {
 
     #[tokio::test]
     async fn guild_id_zero_is_rejected_even_with_a_valid_voice_state() {
-        let connection = VoiceConnection::new(0, 456, events());
+        let connection = VoiceConnection::new(0, 456, voice_updates());
         assert!(matches!(
             connection.connection_info(&voice_state("t", "e", "s", "789")),
             Err(VoiceError::BadId(_))
@@ -369,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn user_id_zero_is_rejected_even_with_a_valid_voice_state() {
-        let connection = VoiceConnection::new(123, 0, events());
+        let connection = VoiceConnection::new(123, 0, voice_updates());
         assert!(matches!(
             connection.connection_info(&voice_state("t", "e", "s", "789")),
             Err(VoiceError::BadId(_))
@@ -382,7 +386,7 @@ mod tests {
     /// voice state fails fast instead of hanging on a network attempt.
     #[tokio::test]
     async fn connecting_with_an_invalid_voice_state_fails_before_touching_the_driver() {
-        let connection = VoiceConnection::new(123, 456, events());
+        let connection = VoiceConnection::new(123, 456, voice_updates());
         let mut voice = voice_state("t", "e", "s", "c");
         voice.channel_id = None;
         assert!(matches!(

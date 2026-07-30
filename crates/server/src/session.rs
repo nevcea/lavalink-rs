@@ -420,13 +420,14 @@ mod tests {
     use crate::voice::VoiceConnection;
 
     fn dummy_pair(guild_id: u64) -> (PlayerHandle, Arc<VoiceConnection>) {
-        let events: crate::player::EventSlot = Arc::new(std::sync::OnceLock::new());
-        let voice = Arc::new(VoiceConnection::new(guild_id, 1, Arc::clone(&events)));
+        let voice_updates: crate::player::VoiceUpdateSlot = Arc::new(std::sync::OnceLock::new());
+        let voice = Arc::new(VoiceConnection::new(guild_id, 1, Arc::clone(&voice_updates)));
         let (actor, handle) = PlayerActor::new(
             guild_id,
             Box::new(RecordingEngine::new()),
             Arc::new(crate::sink::Sink::new()),
             Duration::from_secs(10),
+            voice_updates,
         );
         tokio::spawn(actor.run());
         (handle, voice)
@@ -759,13 +760,19 @@ mod tests {
         // A player whose actor loop never runs: `destroy()`'s command send
         // succeeds (there's room in the channel) but its oneshot reply never
         // arrives, so it can only ever be recovered by `PLAYER_DESTROY_TIMEOUT`.
-        let wedged_events: crate::player::EventSlot = Arc::new(std::sync::OnceLock::new());
-        let wedged_voice = Arc::new(VoiceConnection::new(1, 1, Arc::clone(&wedged_events)));
+        let wedged_voice_updates: crate::player::VoiceUpdateSlot =
+            Arc::new(std::sync::OnceLock::new());
+        let wedged_voice = Arc::new(VoiceConnection::new(
+            1,
+            1,
+            Arc::clone(&wedged_voice_updates),
+        ));
         let (_wedged_actor, wedged_handle) = PlayerActor::new(
             1,
             Box::new(RecordingEngine::new()),
             Arc::new(crate::sink::Sink::new()),
             Duration::from_secs(10),
+            wedged_voice_updates,
         );
         session
             .get_or_create_player(1, || (wedged_handle, wedged_voice))
@@ -775,13 +782,19 @@ mod tests {
         // confirm its destroy actually completed rather than being starved by
         // the wedged one.
         let healthy_engine = RecordingEngine::new();
-        let healthy_events: crate::player::EventSlot = Arc::new(std::sync::OnceLock::new());
-        let healthy_voice = Arc::new(VoiceConnection::new(2, 1, Arc::clone(&healthy_events)));
+        let healthy_voice_updates: crate::player::VoiceUpdateSlot =
+            Arc::new(std::sync::OnceLock::new());
+        let healthy_voice = Arc::new(VoiceConnection::new(
+            2,
+            1,
+            Arc::clone(&healthy_voice_updates),
+        ));
         let (healthy_actor, healthy_handle) = PlayerActor::new(
             2,
             Box::new(healthy_engine.clone()),
             Arc::new(crate::sink::Sink::new()),
             Duration::from_secs(10),
+            healthy_voice_updates,
         );
         tokio::spawn(healthy_actor.run());
         session

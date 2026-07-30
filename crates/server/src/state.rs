@@ -111,10 +111,16 @@ impl AppState {
 
         session.get_or_create_player(guild_id, move || {
             // The engine and the voice connection both report to an actor that
-            // does not exist yet, so they share a slot that `PlayerActor::new`
-            // fills in.
+            // does not exist yet, so they share slots that `PlayerActor::new`
+            // fills in — one per channel, since voice transitions get their own
+            // (see `PlayerHandle::voice_updates`'s docs).
             let events = crate::player::EventSlot::default();
-            let voice = Arc::new(VoiceConnection::new(guild_id, user_id, Arc::clone(&events)));
+            let voice_updates = crate::player::VoiceUpdateSlot::default();
+            let voice = Arc::new(VoiceConnection::new(
+                guild_id,
+                user_id,
+                Arc::clone(&voice_updates),
+            ));
             let engine: Box<dyn Engine> = Box::new(PipelineEngine::new(
                 guild_id,
                 config.lavalink.server.frame_buffer_duration_ms,
@@ -126,7 +132,8 @@ impl AppState {
 
             let stuck_threshold =
                 Duration::from_millis(config.lavalink.server.track_stuck_threshold_ms);
-            let (actor, handle) = PlayerActor::new(guild_id, engine, sink, stuck_threshold);
+            let (actor, handle) =
+                PlayerActor::new(guild_id, engine, sink, stuck_threshold, voice_updates);
             tokio::spawn(actor.run());
 
             (handle, voice)
