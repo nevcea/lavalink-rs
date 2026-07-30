@@ -252,20 +252,24 @@ impl Read for RingReader {
             if self.shared.finished.load(Ordering::Acquire) {
                 return Ok(0);
             }
+            // Silence still advances playback: the listener heard 20ms of nothing,
+            // and a position that stalled during a stutter would be wrong. This
+            // happens before the buffer lock is released — matching the section
+            // `RingWriter::reset` holds the same lock across — so a concurrent
+            // seek can never have its rebase clobbered by a read that started
+            // before it, or vice versa.
+            let silence = out.len().min(FRAME_SAMPLES * 4);
+            self.shared
+                .consumed_frames
+                .fetch_add((silence / 4 / CHANNELS) as i64, Ordering::Relaxed);
+            self.shared.refresh_position();
             drop(buffer);
             // Starved: the pump has not kept up. Hand back silence rather than
             // blocking the mixer, and account for it as a lost frame — exactly what
             // the original counts as `nulled`. No producer can be waiting on space
             // here (the buffer was empty), so there is nothing to `notify_all`.
             self.shared.frames.nulled.fetch_add(1, Ordering::Relaxed);
-            let silence = out.len().min(FRAME_SAMPLES * 4);
             out[..silence].fill(0);
-            // Silence still advances playback: the listener heard 20ms of nothing,
-            // and a position that stalled during a stutter would be wrong.
-            self.shared
-                .consumed_frames
-                .fetch_add((silence / 4 / CHANNELS) as i64, Ordering::Relaxed);
-            self.shared.refresh_position();
             return Ok(silence);
         }
 
@@ -289,14 +293,16 @@ impl Read for RingReader {
             self.leftover.extend_from_slice(&bytes[written..]);
             written
         };
-        drop(buffer);
-        self.shared.space.notify_all();
-
-        self.shared.frames.sent.fetch_add(1, Ordering::Relaxed);
+        // Position bookkeeping happens before the buffer lock is released — see
+        // the starved branch above for why.
         self.shared
             .consumed_frames
             .fetch_add((take / CHANNELS) as i64, Ordering::Relaxed);
         self.shared.refresh_position();
+        drop(buffer);
+        self.shared.space.notify_all();
+
+        self.shared.frames.sent.fetch_add(1, Ordering::Relaxed);
 
         Ok(written)
     }
@@ -540,6 +546,37 @@ mod tests {
 
         producer.join().unwrap();
         assert_eq!(delivered, written, "every sample must survive the trip");
+    }
+
+    /// A concurrent `reset` (the pump, after a seek) must never have its rebase
+    /// clobbered by a `read` (the mixer) that was already in flight, and vice
+    /// versa: whichever one runs must see a consistent, non-interleaved
+    /// `consumed_frames`/`base_position_ms` pair. Regression test for the race
+    /// where `read` wrote its bookkeeping after releasing the buffer lock,
+    /// letting a `reset` land in between and get partially overwritten.
+    #[test]
+    fn a_racing_reset_and_read_never_corrupt_the_position() {
+        for _ in 0..2_000 {
+            let (writer, mut reader, position) = ring(1000);
+            writer.write(&vec![0.0; SAMPLE_RATE as usize * CHANNELS]);
+
+            let reader_thread = std::thread::spawn(move || {
+                let mut out = vec![0u8; FRAME_SAMPLES * 4];
+                let _ = reader.read(&mut out);
+            });
+
+            writer.reset(42_000);
+            reader_thread.join().unwrap();
+
+            // Whichever ran first or second, the reported position must be
+            // exactly the seek target or the target plus one read's worth of
+            // audio — never anything else, and never negative or wildly off.
+            let observed = position.load(Ordering::Relaxed);
+            assert!(
+                observed == 42_000 || observed == 42_020,
+                "position corrupted by a reset/read race: {observed}"
+            );
+        }
     }
 
     /// What `PipelineEngine::play()` actually relies on for `frameStats` to survive
