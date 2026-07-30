@@ -24,7 +24,7 @@
 //! dedicated OS thread rather than the blocking pool, because it lives for the
 //! length of a track and would otherwise occupy a pool slot indefinitely.
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -67,6 +67,11 @@ pub struct PipelineEngine {
 struct Active {
     /// Commands to the pump thread. Dropping it stops the pump.
     commands: Sender<PumpCommand>,
+    /// Set alongside every send on `commands`, so a pump stuck retrying a
+    /// stalled HTTP source (`stream.rs`'s `interrupt`) notices a command is
+    /// waiting and gives up its remaining retry budget instead of making the
+    /// command wait out the whole thing.
+    interrupt: Arc<AtomicBool>,
     /// The songbird side, so pause and stop reach the mixer.
     track: Option<TrackHandle>,
     /// Bumped on every new track; checked by both the handle-storing task and the
@@ -116,6 +121,7 @@ impl PipelineEngine {
 
     fn send_to_pump(&self, command: PumpCommand) {
         if let Some(active) = lock(&self.active).as_ref() {
+            active.interrupt.store(true, Ordering::Relaxed);
             let _ = active.commands.send(command);
         }
     }
@@ -134,6 +140,7 @@ impl PipelineEngine {
         let previous = lock(&self.active).take();
         let Some(previous) = previous else { return 0 };
 
+        previous.interrupt.store(true, Ordering::Relaxed);
         // Dropping the sender is what unblocks a pump parked on a full ring.
         let _ = previous.commands.send(PumpCommand::Stop);
         drop(previous.commands);
@@ -168,12 +175,14 @@ impl Engine for PipelineEngine {
             Arc::clone(&self.frames),
         );
         let (commands, pump_commands) = mpsc::channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
 
         lock(&self.active).replace(Active {
             commands,
             track: None,
             generation,
             paused: request.paused,
+            interrupt: Arc::clone(&interrupt),
         });
 
         // The mixer's end of the ring, dressed as an input it understands. Raw f32
@@ -232,6 +241,7 @@ impl Engine for PipelineEngine {
             volume: request.volume,
             filters: request.filters.clone(),
             opener: Arc::clone(&self.opener),
+            interrupt,
         };
 
         // A dedicated thread, not the blocking pool: this lives for the whole track.
@@ -370,6 +380,7 @@ mod tests {
             track: None,
             generation,
             paused: false,
+            interrupt: Arc::new(AtomicBool::new(false)),
         }
     }
 

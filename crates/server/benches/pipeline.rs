@@ -6,7 +6,7 @@
 //! the whole chain, not any stage in isolation.
 
 use std::io::Read as _;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::mpsc;
 use std::sync::Arc;
 
@@ -102,6 +102,7 @@ fn bench_pipeline(c: &mut Criterion) {
                 volume: 100,
                 filters: Filters::default(),
                 opener: Arc::new(StreamOpener::default()),
+                interrupt: Arc::new(AtomicBool::new(false)),
             };
 
             let outcome = pump::run(config, writer, commands_rx, position, &|| {});

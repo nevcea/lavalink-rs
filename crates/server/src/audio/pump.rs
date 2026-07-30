@@ -20,7 +20,7 @@
 //! where there is an index, approximate where the duration was guessed, refused on a
 //! live stream.
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 
@@ -59,6 +59,11 @@ pub struct PumpConfig {
     pub volume: i32,
     pub filters: Filters,
     pub opener: Arc<StreamOpener>,
+    /// Set (by the engine) whenever a [`PumpCommand`] is enqueued, and checked
+    /// by a stalled HTTP source between reconnect attempts so a waiting command
+    /// cuts the retry short instead of waiting out the whole budget. Cleared
+    /// once [`State::drain_commands`] has drained the commands that set it.
+    pub interrupt: Arc<AtomicBool>,
 }
 
 /// Runs one track to completion. Returns how it ended, for the actor to turn into
@@ -108,6 +113,10 @@ struct State {
     interleaved: Vec<f32>,
     pcm: Vec<f32>,
     planar: Vec<Vec<f32>>,
+    /// Shared with the source: cleared here once a batch of commands has been
+    /// fully drained, so a later, unrelated stall doesn't inherit a stale
+    /// "give up early" signal from a command that was already applied.
+    interrupt: Arc<AtomicBool>,
 }
 
 /// How many corrupt frames in a row before the track is given up on.
@@ -121,7 +130,7 @@ const COMMAND_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
     let source = config
         .opener
-        .open(&config.info)
+        .open(&config.info, Arc::clone(&config.interrupt))
         .map_err(|error| error.to_exception())?;
 
     let mut hint = Hint::new();
@@ -186,6 +195,7 @@ fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
         interleaved: Vec::new(),
         pcm: Vec::new(),
         planar: vec![Vec::new(); CHANNELS],
+        interrupt: Arc::clone(&config.interrupt),
     };
 
     // Starting mid-track is the same operation as seeking; doing it here rather than
@@ -242,6 +252,15 @@ impl State {
                     // decoder and the resampler are both stale.
                     self.decoder.reset();
                     self.resampler.reset();
+                    continue;
+                }
+                // The source gave up a stalled reconnect early because a command
+                // was waiting (see `stream.rs`'s `interrupt` field) — not a real
+                // failure, just a cue to go check that command right now instead
+                // of burning the rest of the reconnect budget on it first.
+                Err(SymphoniaError::IoError(error))
+                    if error.kind() == std::io::ErrorKind::Interrupted =>
+                {
                     continue;
                 }
                 Err(error) => {
@@ -375,7 +394,13 @@ impl State {
                 Ok(PumpCommand::SetEndTime(end_time_ms)) => {
                     self.end_time_ms = end_time_ms;
                 }
-                Err(TryRecvError::Empty) => return ControlFlow::Continue { reset },
+                Err(TryRecvError::Empty) => {
+                    // Nothing left to act on — safe to let a future stall use
+                    // its full reconnect budget again, rather than carrying
+                    // this batch's "something is waiting" forward forever.
+                    self.interrupt.store(false, Ordering::Relaxed);
+                    return ControlFlow::Continue { reset };
+                }
                 // The engine dropped the sender: nobody is listening any more.
                 Err(TryRecvError::Disconnected) => return ControlFlow::Stopped,
             }
@@ -634,6 +659,7 @@ mod tests {
             volume: 100,
             filters: Filters::default(),
             opener: Arc::new(StreamOpener::default()),
+            interrupt: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -770,6 +796,101 @@ mod tests {
         fn into_inner(self: Box<Self>) -> MediaSourceStream {
             self.0.into_inner()
         }
+    }
+
+    /// Wraps a real format reader but returns the `interrupt` error kind from
+    /// `stream.rs`'s reconnect loop exactly once, then delegates normally — a
+    /// stalled HTTP source giving up early because a command is waiting,
+    /// without needing a genuinely stalled source in the test.
+    struct InterruptOnceFormat {
+        inner: Box<dyn FormatReader>,
+        fired: bool,
+    }
+
+    impl FormatReader for InterruptOnceFormat {
+        fn try_new(
+            _source: MediaSourceStream,
+            _options: &FormatOptions,
+        ) -> symphonia::core::errors::Result<Self> {
+            unreachable!("constructed directly in tests, not through probing")
+        }
+
+        fn cues(&self) -> &[symphonia::core::formats::Cue] {
+            self.inner.cues()
+        }
+
+        fn metadata(&mut self) -> symphonia::core::meta::Metadata<'_> {
+            self.inner.metadata()
+        }
+
+        fn seek(
+            &mut self,
+            mode: SeekMode,
+            to: SeekTo,
+        ) -> symphonia::core::errors::Result<symphonia::core::formats::SeekedTo> {
+            self.inner.seek(mode, to)
+        }
+
+        fn tracks(&self) -> &[symphonia::core::formats::Track] {
+            self.inner.tracks()
+        }
+
+        fn next_packet(&mut self) -> symphonia::core::errors::Result<symphonia::core::formats::Packet> {
+            if !self.fired {
+                self.fired = true;
+                return Err(SymphoniaError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "a pump command is pending",
+                )));
+            }
+            self.inner.next_packet()
+        }
+
+        fn into_inner(self: Box<Self>) -> MediaSourceStream {
+            self.inner.into_inner()
+        }
+    }
+
+    /// The bug this fix targets: `next_packet()` returning the `Interrupted`
+    /// error kind — what a stalled HTTP source now does the moment a pump
+    /// command is waiting, instead of exhausting its reconnect budget first —
+    /// used to have no dedicated handling in `decode_loop`, so it fell into the
+    /// catch-all `Err(error) => self.fail(error)` arm and ended the track as a
+    /// spurious failure. It must instead drain the waiting command and keep
+    /// decoding.
+    #[test]
+    fn an_interrupted_packet_drains_commands_and_keeps_decoding_instead_of_failing() {
+        let wav = TempWav::new("pump-interrupted", 48_000, 2, 0.2);
+        let config = config(wav.track());
+
+        let position = Arc::new(AtomicI64::new(0));
+        let (writer, _reader) = super::super::ring::channel(
+            4096,
+            Arc::clone(&position),
+            Arc::new(super::super::ring::FrameCounters::default()),
+        );
+
+        let mut state = open(&config, &writer).unwrap();
+        state.format = Box::new(InterruptOnceFormat {
+            inner: state.format,
+            fired: false,
+        });
+
+        // Kept alive (unlike most tests here) so later `try_recv` calls in the
+        // rest of the loop see `Empty` rather than `Disconnected` — a dropped
+        // sender would end the track as `Stopped` regardless of the interrupt,
+        // which is not what this test is about.
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        commands_tx.send(PumpCommand::SetVolume(50)).unwrap();
+
+        let outcome = state.decode_loop(&writer, &commands_rx, &position, &|| {});
+
+        assert!(matches!(outcome, PumpOutcome::Finished), "{outcome:?}");
+        assert_eq!(
+            state.volume,
+            player_volume_multiplier(50),
+            "the command sent alongside the interrupted packet must still be applied"
+        );
     }
 
     /// The bug: `drain_commands` used to call `writer.reset(position_ms)`
@@ -990,6 +1111,7 @@ mod tests {
                 volume: 100,
                 filters: Filters::default(),
                 opener: Arc::new(StreamOpener::default()),
+                interrupt: Arc::new(AtomicBool::new(false)),
             },
             writer,
             rx,
@@ -1025,6 +1147,7 @@ mod tests {
                 volume: 100,
                 filters: Filters::default(),
                 opener: Arc::new(StreamOpener::default()),
+                interrupt: Arc::new(AtomicBool::new(false)),
             },
             writer,
             rx,

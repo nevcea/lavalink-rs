@@ -5,6 +5,7 @@
 //! happens when a long-running stream drops mid-track.
 
 use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -103,7 +104,15 @@ impl StreamOpener {
         }
     }
 
-    pub fn open(&self, info: &TrackInfo) -> Result<Box<dyn MediaSource>, SourceError> {
+    /// `interrupt` is polled by a stalled HTTP source between reconnect attempts —
+    /// see [`HttpMediaSource`]'s field of the same name — so a pump command that
+    /// arrived while the source was stuck retrying can be acted on immediately
+    /// rather than after the retry budget runs out.
+    pub fn open(
+        &self,
+        info: &TrackInfo,
+        interrupt: Arc<AtomicBool>,
+    ) -> Result<Box<dyn MediaSource>, SourceError> {
         match info.source_name.as_str() {
             "local" => {
                 let file = std::fs::File::open(&info.identifier).map_err(|error| {
@@ -116,7 +125,7 @@ impl StreamOpener {
             }
             "http" => {
                 let url = info.uri.clone().unwrap_or_else(|| info.identifier.clone());
-                self.open_http(&url, None)
+                self.open_http(&url, None, interrupt)
             }
             "youtube" | "soundcloud" | "bandcamp" => {
                 let kind = match info.source_name.as_str() {
@@ -135,7 +144,7 @@ impl StreamOpener {
                 let url = ytdlp.resolve_stream_url(&kind.playback_url(&info.identifier))?;
                 // Fetched under the same User-Agent yt-dlp resolved it with —
                 // googlevideo.com 403s a mismatch. See `STREAM_USER_AGENT`.
-                self.open_http(&url, Some(STREAM_USER_AGENT))
+                self.open_http(&url, Some(STREAM_USER_AGENT), interrupt)
             }
             // Deezer's own API never hands back more than a 30-second preview, so
             // playback substitutes the best YouTube match instead — chosen now,
@@ -150,7 +159,7 @@ impl StreamOpener {
                 let video_id = ytdlp.find_youtube_match(&query)?;
                 let url = ytdlp
                     .resolve_stream_url(&SourceKind::YouTube.playback_url(&video_id))?;
-                self.open_http(&url, Some(STREAM_USER_AGENT))
+                self.open_http(&url, Some(STREAM_USER_AGENT), interrupt)
             }
             other => Err(SourceError::Unplayable {
                 reason: format!("no reader for source {other}"),
@@ -162,6 +171,7 @@ impl StreamOpener {
         &self,
         url: &str,
         user_agent: Option<&str>,
+        interrupt: Arc<AtomicBool>,
     ) -> Result<Box<dyn MediaSource>, SourceError> {
         Ok(Box::new(HttpMediaSource::open_with_timeouts(
             url,
@@ -169,6 +179,7 @@ impl StreamOpener {
             self.proxy.clone(),
             self.connect_timeout,
             self.read_timeout,
+            interrupt,
         )?))
     }
 }
@@ -198,6 +209,13 @@ pub struct HttpMediaSource {
     /// `MAX_REQUEST_DURATION` in production; shrunk in tests that specifically
     /// exercise it.
     request_duration: Duration,
+    /// Set by the pump whenever a command (`Seek`, `Stop`, ...) is waiting to be
+    /// applied. Checked between reconnect attempts so a stalled connection gives
+    /// up its remaining retry budget immediately instead of making the command
+    /// wait out the whole thing — up to `MAX_RECONNECT_ATTEMPTS` full
+    /// connect-and-stall cycles, tens of seconds, otherwise. Cleared by the pump
+    /// once it has drained the commands that set it.
+    interrupt: Arc<AtomicBool>,
 }
 
 /// Bytes off a socket, one chunk at a time, from a dedicated thread — so the
@@ -311,7 +329,14 @@ impl HttpMediaSource {
         user_agent: Option<&str>,
         proxy: Option<reqwest::Proxy>,
     ) -> Result<Self, SourceError> {
-        Self::open_with_timeouts(url, user_agent, proxy, CONNECT_TIMEOUT, READ_TIMEOUT)
+        Self::open_with_timeouts(
+            url,
+            user_agent,
+            proxy,
+            CONNECT_TIMEOUT,
+            READ_TIMEOUT,
+            Arc::new(AtomicBool::new(false)),
+        )
     }
 
     /// `connect_timeout` is `timeouts.connectTimeoutMs`; `read_timeout` is
@@ -323,6 +348,7 @@ impl HttpMediaSource {
         proxy: Option<reqwest::Proxy>,
         connect_timeout: Duration,
         read_timeout: Duration,
+        interrupt: Arc<AtomicBool>,
     ) -> Result<Self, SourceError> {
         Self::open_full(
             url,
@@ -331,6 +357,7 @@ impl HttpMediaSource {
             connect_timeout,
             read_timeout,
             MAX_REQUEST_DURATION,
+            interrupt,
         )
     }
 
@@ -343,6 +370,7 @@ impl HttpMediaSource {
         connect_timeout: Duration,
         read_timeout: Duration,
         request_duration: Duration,
+        interrupt: Arc<AtomicBool>,
     ) -> Result<Self, SourceError> {
         // No client-level overall request timeout: this is a whole track, and a
         // long one is not a stuck one. `reqwest::blocking` has no idle read timeout
@@ -371,6 +399,7 @@ impl HttpMediaSource {
             reconnect_attempts: 0,
             read_timeout,
             request_duration,
+            interrupt,
         };
         source.connect(0)?;
         Ok(source)
@@ -479,6 +508,18 @@ impl Read for HttpMediaSource {
                 }
                 Err(error) => error,
             };
+
+            // A pump command is waiting: give up the remaining retry budget rather
+            // than making it wait out however many attempts are left, each up to
+            // `connect_timeout + read_timeout`. `decode_loop` treats this
+            // particular error kind as "go check the command queue", not a real
+            // failure — see its `next_packet()` match arm.
+            if self.interrupt.load(Ordering::Relaxed) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "a pump command is pending",
+                ));
+            }
 
             // Only a seekable source can be resumed — without Range support a
             // reconnect would restart at byte zero and corrupt the stream far worse
@@ -631,6 +672,83 @@ mod tests {
         assert_eq!(collected, BODY);
     }
 
+    /// The bug this fix targets: `HttpMediaSource::read`'s reconnect loop had no
+    /// way to know a pump command was waiting, so a stalled or dropped
+    /// connection made a Seek/Stop/SetFilters wait out the whole reconnect
+    /// budget — up to `MAX_RECONNECT_ATTEMPTS` attempts, each up to
+    /// `connect_timeout + read_timeout` — before the pump ever got a chance to
+    /// see it (`pump.rs` only checks for commands between packets). Setting
+    /// `interrupt` (what `pump.rs` does the moment a command arrives) must make
+    /// the very next read give up immediately instead of even trying to
+    /// reconnect.
+    #[test]
+    fn an_interrupt_flag_skips_reconnecting_and_fails_fast() {
+        const BODY: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        const CUT_AT: usize = 10;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let reconnected = Arc::new(AtomicBool::new(false));
+        let reconnected_flag = Arc::clone(&reconnected);
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            consume_request(&stream);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n\r\n",
+                BODY.len()
+            )
+            .unwrap();
+            stream.write_all(&BODY[..CUT_AT]).unwrap();
+            drop(stream);
+
+            // Only reached if the client reconnects despite the interrupt flag —
+            // a resumed track never gets this far in the buggy version either,
+            // since the reconnect there just takes longer, not never; the
+            // assertion below is what actually proves the difference.
+            if listener.accept().is_ok() {
+                reconnected_flag.store(true, Ordering::Relaxed);
+            }
+        });
+
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let mut source = HttpMediaSource::open_with_timeouts(
+            &format!("http://{addr}"),
+            None,
+            None,
+            CONNECT_TIMEOUT,
+            Duration::from_millis(200),
+            Arc::clone(&interrupt),
+        )
+        .unwrap();
+        assert!(source.is_seekable());
+
+        let mut buffer = [0u8; 4096];
+        let read = source.read(&mut buffer).unwrap();
+        assert_eq!(&buffer[..read], &BODY[..CUT_AT]);
+
+        // A pump command is now "pending" — set right before the read that
+        // will hit the dropped connection and would otherwise reconnect.
+        interrupt.store(true, Ordering::Relaxed);
+
+        let started = Instant::now();
+        let error = source.read(&mut buffer).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the interrupt must skip straight past the reconnect attempt \
+             instead of waiting out any part of its budget: took {:?}",
+            started.elapsed()
+        );
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !reconnected.load(Ordering::Relaxed),
+            "a pending command must prevent the reconnect from being attempted at all"
+        );
+    }
+
     /// The bug this fix targets: a connection that stays open but stops sending
     /// bytes entirely (no error, no close — the failure mode behind the reported
     /// `TrackStuckEvent`s on long-running streams). Before `ReaderChannel`, this
@@ -685,6 +803,7 @@ mod tests {
             None,
             CONNECT_TIMEOUT,
             Duration::from_millis(200),
+            Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
         assert!(source.is_seekable());
@@ -738,6 +857,7 @@ mod tests {
             CONNECT_TIMEOUT,
             Duration::from_secs(10),
             Duration::from_millis(200),
+            Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
         assert!(!source.is_seekable());
@@ -793,6 +913,7 @@ mod tests {
             None,
             CONNECT_TIMEOUT,
             Duration::from_millis(200),
+            Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
         assert!(!source.is_seekable());
@@ -871,7 +992,7 @@ mod tests {
 
     /// `Box<dyn MediaSource>` is not `Debug`, so `unwrap_err` is unavailable.
     fn open_err(info: &TrackInfo) -> SourceError {
-        match StreamOpener::default().open(info) {
+        match StreamOpener::default().open(info, Arc::new(AtomicBool::new(false))) {
             Err(error) => error,
             Ok(_) => panic!("expected opening to fail"),
         }
@@ -906,7 +1027,10 @@ mod tests {
         std::fs::write(&path, b"not audio, but readable").unwrap();
 
         let source = StreamOpener::default()
-            .open(&info("local", path.to_str().unwrap()))
+            .open(
+                &info("local", path.to_str().unwrap()),
+                Arc::new(AtomicBool::new(false)),
+            )
             .unwrap();
         assert!(source.is_seekable());
         assert_eq!(source.byte_len(), Some(23));
