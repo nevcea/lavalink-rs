@@ -84,6 +84,12 @@ struct Shared {
     closed: AtomicBool,
     /// Frames (not samples) handed to the reader since the last seek.
     consumed_frames: AtomicI64,
+    /// A sample handed to the reader that did not complete a stereo frame by
+    /// itself (0 or 1, since `CHANNELS` is 2) — carried into the next call to
+    /// [`Shared::advance_frames`] instead of being silently dropped by that
+    /// call's own truncating division. Reset alongside `consumed_frames`,
+    /// since a seek discards whatever it was counting toward.
+    remainder_samples: AtomicI64,
     /// Playback position at the last seek, in milliseconds.
     base_position_ms: AtomicI64,
     /// Shared with the actor.
@@ -97,6 +103,19 @@ impl Shared {
         let elapsed_ms = frames * 1000 / i64::from(SAMPLE_RATE);
         let base = self.base_position_ms.load(Ordering::Relaxed);
         self.position_ms.store(base + elapsed_ms, Ordering::Relaxed);
+    }
+
+    /// Advances `consumed_frames` by however many whole frames `samples` (plus
+    /// any sample left over from the previous call) makes up, carrying a new
+    /// leftover forward rather than truncating it away — `samples` is not
+    /// guaranteed to be a multiple of `CHANNELS` on its own, since a partial
+    /// drain near a starved or nearly-empty buffer can hand over an odd count.
+    fn advance_frames(&self, samples: i64) {
+        let total = self.remainder_samples.load(Ordering::Relaxed) + samples;
+        self.consumed_frames
+            .fetch_add(total / CHANNELS as i64, Ordering::Relaxed);
+        self.remainder_samples
+            .store(total % CHANNELS as i64, Ordering::Relaxed);
     }
 }
 
@@ -117,6 +136,7 @@ pub fn channel(
         finished: AtomicBool::new(false),
         closed: AtomicBool::new(false),
         consumed_frames: AtomicI64::new(0),
+        remainder_samples: AtomicI64::new(0),
         base_position_ms: AtomicI64::new(0),
         position_ms,
         frames,
@@ -214,6 +234,7 @@ impl RingWriter {
         buffer.clear();
         self.shared.finished.store(false, Ordering::Release);
         self.shared.consumed_frames.store(0, Ordering::Relaxed);
+        self.shared.remainder_samples.store(0, Ordering::Relaxed);
         self.shared
             .base_position_ms
             .store(position_ms, Ordering::Relaxed);
@@ -287,9 +308,7 @@ impl Read for RingReader {
             // seek can never have its rebase clobbered by a read that started
             // before it, or vice versa.
             let silence = out.len().min(FRAME_SAMPLES * 4);
-            self.shared
-                .consumed_frames
-                .fetch_add((silence / 4 / CHANNELS) as i64, Ordering::Relaxed);
+            self.shared.advance_frames((silence / 4) as i64);
             self.shared.refresh_position();
             drop(buffer);
             // Starved: the pump has not kept up. Hand back silence rather than
@@ -323,9 +342,7 @@ impl Read for RingReader {
         };
         // Position bookkeeping happens before the buffer lock is released — see
         // the starved branch above for why.
-        self.shared
-            .consumed_frames
-            .fetch_add((take / CHANNELS) as i64, Ordering::Relaxed);
+        self.shared.advance_frames(take as i64);
         self.shared.refresh_position();
         drop(buffer);
         self.shared.space.notify_all();
@@ -449,6 +466,33 @@ mod tests {
         }
 
         assert_eq!(position.load(Ordering::Relaxed), 500);
+    }
+
+    /// The bug: a partial drain whose sample count isn't a multiple of
+    /// `CHANNELS` used to silently drop the odd leftover from
+    /// `consumed_frames` via truncating division — individually tiny (half a
+    /// frame, a fraction of a millisecond) but one-directional and never
+    /// corrected, so it compounds over a long-running stream into an
+    /// observable amount of drift.
+    #[test]
+    fn a_partial_drains_remainder_is_not_silently_lost_over_many_reads() {
+        let (writer, mut reader, position) = ring(1000);
+
+        // Each cycle writes and drains 4 samples (2 stereo frames) split
+        // across two reads of 3 and 1 samples — both counts odd, so both
+        // truncate on their own if the remainder isn't carried between them.
+        // Without the fix this nets exactly 1 counted frame per cycle
+        // instead of 2 — half the audio actually delivered.
+        for _ in 0..480 {
+            writer.try_write(&[1.0, 2.0, 3.0]);
+            read_samples(&mut reader, 3);
+            writer.try_write(&[4.0]);
+            read_samples(&mut reader, 1);
+        }
+
+        // 480 cycles * 2 frames = 960 frames = 20ms at 48kHz, not the 10ms a
+        // remainder dropped every cycle would report.
+        assert_eq!(position.load(Ordering::Relaxed), 20);
     }
 
     #[test]
