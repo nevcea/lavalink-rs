@@ -179,7 +179,7 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) {
                     reason: "event queue overflow".into(),
                 })))
                 .await;
-            state.sessions.destroy(&session.id);
+            state.sessions.destroy(&session.id).await;
             break;
         }
     }

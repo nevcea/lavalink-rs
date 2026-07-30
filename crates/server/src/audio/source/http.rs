@@ -14,6 +14,7 @@
 //! mean re-fetching from byte zero, so the track is advertised as non-seekable and
 //! clients do not offer the control.
 
+use std::io::Read;
 use std::time::Duration;
 
 use lavalink_protocol::encoded_track::SourceTail;
@@ -109,8 +110,15 @@ impl SourceManager for HttpSource {
         }
 
         let extension = extension_of(identifier);
-        let body = response
-            .bytes()
+        // Bounded by construction, not by trusting the server: a `Range` header is
+        // only a request, and a server that ignores it and answers `200` with the
+        // full body would otherwise have every `loadtracks` call against it buffer
+        // an entire (possibly multi-gigabyte) file in memory rather than the
+        // "bounded prefix" this module's own docs promise.
+        let mut body = Vec::new();
+        response
+            .take(PROBE_PREFIX_BYTES)
+            .read_to_end(&mut body)
             .map_err(|error| SourceError::Io(error.to_string()))?;
         if body.is_empty() {
             return Err(SourceError::Unplayable {
@@ -118,10 +126,7 @@ impl SourceManager for HttpSource {
             });
         }
 
-        let probed = probe(
-            Box::new(std::io::Cursor::new(body.to_vec())),
-            extension.as_deref(),
-        )?;
+        let probed = probe(Box::new(std::io::Cursor::new(body)), extension.as_deref())?;
 
         Ok(SourceLoad::Track(SourceTrack {
             info: TrackInfo {
@@ -179,10 +184,68 @@ fn is_definitely_not_media(content_type: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
     use super::*;
 
     fn source() -> HttpSource {
         HttpSource::new(None).unwrap()
+    }
+
+    /// A server that ignores the probe's `Range` header, answers `200` (not `206`),
+    /// declares a `Content-Length` far larger than `PROBE_PREFIX_BYTES`, but only
+    /// ever sends `PROBE_PREFIX_BYTES` before dropping the connection — standing in
+    /// for a multi-gigabyte file behind a host that doesn't honor `Range`.
+    ///
+    /// If the probe ever goes back to reading the whole declared body (`response
+    /// .bytes()`), this becomes exactly the short-read-against-`Content-Length`
+    /// case `stream.rs`'s own tests already cover, and surfaces as
+    /// `SourceError::Io` instead of stopping cleanly at the bound.
+    fn spawn_range_ignoring_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            {
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+            }
+
+            let declared_len = PROBE_PREFIX_BYTES * 10;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {declared_len}\r\nContent-Type: audio/mpeg\r\n\r\n",
+            )
+            .unwrap();
+            stream
+                .write_all(&vec![0u8; PROBE_PREFIX_BYTES as usize])
+                .unwrap();
+            // Connection drops here, far short of `declared_len`.
+        });
+
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn the_probe_never_reads_past_its_bounded_prefix() {
+        let source = source();
+        let url = spawn_range_ignoring_server();
+
+        let result = source.load(&url);
+
+        assert!(
+            !matches!(result, Err(SourceError::Io(_))),
+            "expected the probe to stop at PROBE_PREFIX_BYTES rather than trying to \
+             read the full (short-delivered) declared Content-Length, got {result:?}"
+        );
     }
 
     #[test]

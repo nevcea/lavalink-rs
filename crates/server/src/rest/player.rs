@@ -116,22 +116,31 @@ pub async fn patch_player(
         },
     };
 
-    let handle = state.player(&session, guild_id);
+    // `None` here means the session was torn down (resume swept, or its sink
+    // overflowed) while this request was resolving the track above — the same
+    // outcome `patch`'s own `PlayerGone` gets below, reported the same way.
+    //
+    // The voice connection comes from this same call, not a second
+    // `session.voice(guild_id)` lookup: a teardown landing between two
+    // independent lookups could make the second one silently see a different
+    // (or torn-down) guild than the first, which is exactly the race
+    // `AppState::player`'s pairing exists to close.
+    let (handle, connection) = state
+        .player(&session, guild_id)
+        .ok_or_else(|| ApiError::unavailable("The player is not accepting commands"))?;
 
     // Connecting happens here, awaited, before the actor is told anything, so a
     // failure can become a status code. The original wraps this in
     // `.exceptionally { throw … }` and then `.join()`s it, so the intended 500 is
     // buried inside a `CompletionException` and the client sees something else.
     if let Omissible::Present(voice) = &update.voice {
-        if let Some(connection) = session.voice(guild_id) {
-            connection.connect(voice).await.map_err(|error| {
-                tracing::warn!(guild_id, %error, "voice connection failed");
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to connect to voice server",
-                )
-            })?;
-        }
+        connection.connect(voice).await.map_err(|error| {
+            tracing::warn!(guild_id, %error, "voice connection failed");
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to connect to voice server",
+            )
+        })?;
     }
 
     let request = PatchRequest {

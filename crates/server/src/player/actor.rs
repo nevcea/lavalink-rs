@@ -667,6 +667,29 @@ mod tests {
         assert!(!player.paused);
     }
 
+    /// A play request with `paused: true` must reach the engine, not just the
+    /// reported model — otherwise a client sees `"paused": true` while the track
+    /// keeps playing audibly.
+    #[tokio::test]
+    async fn a_play_request_with_paused_pauses_the_engine() {
+        let harness = Harness::start();
+        let player = harness
+            .handle
+            .patch(PatchRequest {
+                paused: Omissible::Present(true),
+                track: Some(TrackChange::Play(Box::new(track("first")))),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(player.paused);
+        assert!(harness.engine.calls().iter().any(|call| matches!(
+            call,
+            EngineCall::Play { paused: true, .. }
+        )));
+    }
+
     #[tokio::test]
     async fn replacing_a_track_ends_the_old_one_as_replaced_before_starting_the_new() {
         let harness = Harness::start();

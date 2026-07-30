@@ -71,6 +71,11 @@ struct Active {
     track: Option<TrackHandle>,
     /// Bumped on every new track; a late outcome from a superseded pump is ignored.
     generation: u64,
+    /// Desired pause state. Source of truth for both `play`'s spawned task (once
+    /// `track` is filled in) and `set_paused` (whenever it runs) — whichever of the
+    /// two runs last is what actually gets applied to the handle, instead of a
+    /// value snapshotted before the handle existed.
+    paused: bool,
 }
 
 impl PipelineEngine {
@@ -154,6 +159,7 @@ impl Engine for PipelineEngine {
             commands,
             track: None,
             generation,
+            paused: request.paused,
         });
 
         // The mixer's end of the ring, dressed as an input it understands. Raw f32
@@ -166,15 +172,34 @@ impl Engine for PipelineEngine {
             let guild_id = self.guild_id;
             self.runtime.spawn(async move {
                 let handle = voice.play(input).await;
+
                 // Store the handle only if this track is still the current one: by
                 // the time the mixer has taken the input, a newer play request may
                 // already have replaced it.
-                let mut active = lock(&active);
-                match active.as_mut() {
-                    Some(current) if current.generation == generation => {
-                        current.track = Some(handle);
+                //
+                // `paused` is read from `current` here, not from a `request.paused`
+                // captured at the top of `play` — `Active::paused` is the same field
+                // `set_paused` writes, so whichever of the two runs last (a separate
+                // `paused`-only patch landing before this task gets to run, or this
+                // task completing first) is what gets applied, instead of a snapshot
+                // from before the handle even existed.
+                let should_pause = {
+                    let mut active = lock(&active);
+                    match active.as_mut() {
+                        Some(current) if current.generation == generation => {
+                            current.track = Some(handle.clone());
+                            Some(current.paused)
+                        }
+                        _ => None,
                     }
-                    _ => {
+                };
+
+                match should_pause {
+                    Some(true) => {
+                        let _ = handle.pause();
+                    }
+                    Some(false) => {}
+                    None => {
                         let _ = handle.stop();
                         tracing::debug!(guild_id, "discarded a superseded input");
                     }
@@ -277,9 +302,12 @@ impl Engine for PipelineEngine {
     /// because the counter advances on consumption. All three follow from the one
     /// call.
     fn set_paused(&self, paused: bool) {
-        let track = lock(&self.active)
-            .as_ref()
-            .and_then(|active| active.track.clone());
+        let track = {
+            let mut active = lock(&self.active);
+            let Some(current) = active.as_mut() else { return };
+            current.paused = paused;
+            current.track.clone()
+        };
         let Some(track) = track else { return };
 
         let _ = if paused { track.pause() } else { track.play() };

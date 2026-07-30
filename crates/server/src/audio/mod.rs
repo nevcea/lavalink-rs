@@ -139,6 +139,7 @@ pub mod testing {
         Play {
             identifier: String,
             start_position_ms: i64,
+            paused: bool,
         },
         Stop,
         SetPaused {
@@ -203,6 +204,7 @@ pub mod testing {
             self.record(EngineCall::Play {
                 identifier: request.track.info.identifier,
                 start_position_ms: request.start_position_ms,
+                paused: request.paused,
             });
         }
 
