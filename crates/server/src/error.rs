@@ -119,9 +119,9 @@ pub async fn fill_error_path(request: Request, next: Next) -> Response {
 /// entirely — `fill_error_path` only rewrites a response that carries one
 /// (`response.extensions().get::<ApiError>()`), so the client would see a
 /// completely different shape (no `path`, no `timestamp`) from every other
-/// error this API returns, plus whatever status axum's `JsonRejection` happens
-/// to pick (400 for bad syntax, 415 for a missing content type, 422 for a
-/// type mismatch) rather than the flat 400 the rest of this API uses.
+/// error this API returns. The status is flattened to 400 for everything
+/// except a missing `Content-Type`, which stays 415 — axum's own default for
+/// that case, and the one the rest of this API's status codes don't override.
 pub struct ValidatedJson<T>(pub T);
 
 impl<S, T> FromRequest<S> for ValidatedJson<T>
@@ -135,7 +135,12 @@ where
         Json::<T>::from_request(req, state)
             .await
             .map(|Json(value)| Self(value))
-            .map_err(|rejection: JsonRejection| ApiError::bad_request(rejection.body_text()))
+            .map_err(|rejection: JsonRejection| match rejection {
+                JsonRejection::MissingJsonContentType(_) => {
+                    ApiError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, rejection.body_text())
+                }
+                _ => ApiError::bad_request(rejection.body_text()),
+            })
     }
 }
 

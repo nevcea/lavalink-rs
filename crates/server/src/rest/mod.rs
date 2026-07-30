@@ -247,6 +247,30 @@ mod tests {
         assert_eq!(body["path"], "/v4/sessions/whatever");
     }
 
+    /// A JSON body sent with no `Content-Type` header must keep axum's own 415
+    /// for that specific case, not the flat 400 every other body rejection
+    /// gets here — the same status Spring's default gives it, which is what a
+    /// client of the original would see.
+    #[tokio::test]
+    async fn a_json_body_with_no_content_type_is_415_not_400() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::PATCH)
+                    .uri("/v4/sessions/whatever")
+                    .header(header::AUTHORIZATION, "test")
+                    .body(Body::from(r#"{"resuming":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let body = body_json(response).await;
+        assert_eq!(body["status"], 415);
+        assert_eq!(body["path"], "/v4/sessions/whatever");
+    }
+
     /// A path segment axum's own `Path` extractor rejects (invalid UTF-8, here)
     /// must still get the Lavalink `Error` JSON shape — see
     /// [`crate::error::ValidatedPath`], which exists for the same reason
