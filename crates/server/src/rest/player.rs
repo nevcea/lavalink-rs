@@ -10,21 +10,21 @@
 //! [`PatchRequest`]. That is also what removes the original's worst lock —
 //! `synchronized(player)` wrapped around a blocking voice connect.
 
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use lavalink_protocol::player::{Player, PlayerUpdate, PlayerUpdateTrack, Players, VoiceState};
 use lavalink_protocol::{LoadResult, Omissible, Track};
 use serde::Deserialize;
 
-use crate::error::{ApiError, ValidatedJson, ValidatedQuery};
+use crate::error::{ApiError, ValidatedJson, ValidatedPath, ValidatedQuery};
 use crate::player::{PatchRequest, TrackChange};
 use crate::rest::{parse_guild_id, session};
 use crate::state::AppState;
 
 pub async fn list_players(
     State(state): State<AppState>,
-    Path(session_id): Path<String>,
+    ValidatedPath(session_id): ValidatedPath<String>,
 ) -> Result<Json<Players>, ApiError> {
     let session = session(&state, &session_id)?;
 
@@ -42,7 +42,7 @@ pub async fn list_players(
 
 pub async fn get_player(
     State(state): State<AppState>,
-    Path((session_id, guild_id)): Path<(String, String)>,
+    ValidatedPath((session_id, guild_id)): ValidatedPath<(String, String)>,
 ) -> Result<Json<Player>, ApiError> {
     let session = session(&state, &session_id)?;
     let guild_id = parse_guild_id(&guild_id)?;
@@ -69,7 +69,7 @@ pub struct PatchQuery {
 
 pub async fn patch_player(
     State(state): State<AppState>,
-    Path((session_id, guild_id)): Path<(String, String)>,
+    ValidatedPath((session_id, guild_id)): ValidatedPath<(String, String)>,
     ValidatedQuery(query): ValidatedQuery<PatchQuery>,
     ValidatedJson(update): ValidatedJson<PlayerUpdate>,
 ) -> Result<Json<Player>, ApiError> {
@@ -168,7 +168,7 @@ pub async fn patch_player(
 /// annotations.
 pub async fn delete_player(
     State(state): State<AppState>,
-    Path((session_id, guild_id)): Path<(String, String)>,
+    ValidatedPath((session_id, guild_id)): ValidatedPath<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let session = session(&state, &session_id)?;
     let guild_id = parse_guild_id(&guild_id)?;

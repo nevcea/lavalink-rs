@@ -247,6 +247,29 @@ mod tests {
         assert_eq!(body["path"], "/v4/sessions/whatever");
     }
 
+    /// A path segment axum's own `Path` extractor rejects (invalid UTF-8, here)
+    /// must still get the Lavalink `Error` JSON shape — see
+    /// [`crate::error::ValidatedPath`], which exists for the same reason
+    /// [`ValidatedJson`](crate::error::ValidatedJson) does on the body side.
+    #[tokio::test]
+    async fn a_non_utf8_path_segment_gets_the_lavalink_error_shape() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v4/sessions/%ff/players")
+                    .header(header::AUTHORIZATION, "test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(response).await;
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["path"], "/v4/sessions/%ff/players");
+    }
+
     /// `RoutePlannerRestHandler.kt::getStatus` returns 204 with no body when no
     /// route planner is configured, which is the only state this node is ever
     /// in — not a 404 or 501.

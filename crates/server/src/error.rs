@@ -5,8 +5,8 @@
 //! through every handler, a handler raises an [`ApiError`] and a middleware
 //! ([`fill_error_path`]) renders it once, where the path is in scope.
 
-use axum::extract::rejection::{JsonRejection, QueryRejection};
-use axum::extract::{FromRequest, FromRequestParts, Query, Request};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::middleware::Next;
@@ -156,6 +156,26 @@ where
             .await
             .map(|Query(value)| Self(value))
             .map_err(|rejection: QueryRejection| ApiError::bad_request(rejection.body_text()))
+    }
+}
+
+/// `axum::extract::Path`, but a rejection (a non-UTF8 segment, a type mismatch)
+/// becomes an [`ApiError`] instead of axum's own plain-text rejection — see
+/// [`ValidatedJson`], which exists for the same reason on the body side.
+pub struct ValidatedPath<T>(pub T);
+
+impl<S, T> FromRequestParts<S> for ValidatedPath<T>
+where
+    T: DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Path::<T>::from_request_parts(parts, state)
+            .await
+            .map(|Path(value)| Self(value))
+            .map_err(|rejection: PathRejection| ApiError::bad_request(rejection.body_text()))
     }
 }
 
