@@ -42,14 +42,22 @@ pub enum VoiceError {
     Connect(#[from] Box<ConnectionError>),
 }
 
-/// One guild's voice connection.
-pub struct VoiceConnection {
-    driver: Mutex<Driver>,
-    guild_id: u64,
-    user_id: u64,
+/// `driver` and `current` behind one lock, not two: `connect()` checks, dials
+/// and records as a single critical section, so two concurrent connects for
+/// the same guild can't interleave and leave `current` pointing at a state
+/// the driver didn't actually end up with.
+struct ConnectionState {
+    driver: Driver,
     /// What the last successful connect used, so a repeated `voice` field with
     /// identical contents does not tear down a working connection.
-    current: Mutex<Option<VoiceState>>,
+    current: Option<VoiceState>,
+}
+
+/// One guild's voice connection.
+pub struct VoiceConnection {
+    state: Mutex<ConnectionState>,
+    guild_id: u64,
+    user_id: u64,
 }
 
 /// Whether `requested` differs from the voice state a connection was last built
@@ -81,10 +89,12 @@ impl VoiceConnection {
         }
 
         Self {
-            driver: Mutex::new(driver),
+            state: Mutex::new(ConnectionState {
+                driver,
+                current: None,
+            }),
             guild_id,
             user_id,
-            current: Mutex::new(None),
         }
     }
 
@@ -94,22 +104,19 @@ impl VoiceConnection {
     /// (`PlayerRestHandler.kt:115-127`); the same comparison is here, because a
     /// client that re-sends an unchanged voice state expects its audio to keep
     /// playing.
+    ///
+    /// Held as one lock for the whole check-dial-record sequence: a second
+    /// `connect()` racing this one on the same guild waits for the lock rather
+    /// than reading a `current` that this call hasn't written yet.
     pub async fn connect(&self, voice: &VoiceState) -> Result<(), VoiceError> {
-        {
-            let current = self.current.lock().await;
-            if !needs_reconnect(current.as_ref(), voice) {
-                return Ok(());
-            }
+        let mut state = self.state.lock().await;
+        if !needs_reconnect(state.current.as_ref(), voice) {
+            return Ok(());
         }
 
         let info = self.connection_info(voice)?;
-        self.driver
-            .lock()
-            .await
-            .connect(info)
-            .await
-            .map_err(Box::new)?;
-        *self.current.lock().await = Some(voice.clone());
+        state.driver.connect(info).await.map_err(Box::new)?;
+        state.current = Some(voice.clone());
         Ok(())
     }
 
@@ -138,18 +145,18 @@ impl VoiceConnection {
     }
 
     pub async fn play(&self, input: songbird::input::Input) -> songbird::tracks::TrackHandle {
-        self.driver.lock().await.play_only_input(input)
+        self.state.lock().await.driver.play_only_input(input)
     }
 
     pub async fn stop(&self) {
-        self.driver.lock().await.stop();
+        self.state.lock().await.driver.stop();
     }
 
     pub async fn leave(&self) {
-        let mut driver = self.driver.lock().await;
-        driver.stop();
-        driver.leave();
-        *self.current.lock().await = None;
+        let mut state = self.state.lock().await;
+        state.driver.stop();
+        state.driver.leave();
+        state.current = None;
     }
 }
 
