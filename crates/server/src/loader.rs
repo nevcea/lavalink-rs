@@ -48,6 +48,18 @@ struct CacheEntry {
     expires_at: Instant,
 }
 
+/// Clears a leader's `in_flight` entry on drop, cancellation included.
+struct LeaderGuard<'a> {
+    loader: &'a Loader,
+    identifier: &'a str,
+}
+
+impl Drop for LeaderGuard<'_> {
+    fn drop(&mut self) {
+        lock(&self.loader.in_flight).remove(self.identifier);
+    }
+}
+
 impl Loader {
     pub fn new(managers: Vec<Arc<dyn SourceManager>>) -> Self {
         Self {
@@ -94,6 +106,17 @@ impl Loader {
                 Err(_) => self.load_uncached(identifier).await,
             };
         }
+
+        // Guarantees the entry inserted above is cleared even if this leader's own
+        // future is dropped before `load_uncached` returns — a client-side request
+        // cancellation (e.g. an HTTP/2 stream reset on timeout) drops this future
+        // mid-await with no further code of ours running. Without this, the
+        // `broadcast::Sender` above would stay in `in_flight` forever with nothing
+        // left to call `.send()` on it, and every later caller for this exact
+        // identifier would subscribe and hang in `recv().await` permanently. The
+        // explicit `remove` below already clears it on a normal return, so this is
+        // a no-op then; it only matters on the cancellation path.
+        let _leader_guard = LeaderGuard { loader: self, identifier };
 
         let result = self.load_uncached(identifier).await;
 
@@ -465,5 +488,70 @@ mod tests {
         let (loader, _) = loader(ok_track);
         let error = loader.decode("not base64!!").unwrap_err();
         assert_eq!(error.severity, Severity::Common);
+    }
+
+    /// A manager whose loader thread blocks until released — lets a test cancel
+    /// the *leader's* awaiting task while the underlying OS thread (which nothing
+    /// can cancel) is still running, the way a client-side request timeout would.
+    struct Blocking {
+        gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl SourceManager for Blocking {
+        fn name(&self) -> &'static str {
+            "http"
+        }
+
+        fn matches(&self, identifier: &str) -> bool {
+            identifier.starts_with("https://")
+        }
+
+        fn load(&self, _identifier: &str) -> Result<SourceLoad, SourceError> {
+            let (mutex, condvar) = &*self.gate;
+            let mut released = mutex.lock().unwrap();
+            while !*released {
+                released = condvar.wait(released).unwrap();
+            }
+            ok_track()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_leader_frees_its_identifier_for_the_next_caller() {
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let loader = Arc::new(Loader::new(vec![Arc::new(Blocking { gate: Arc::clone(&gate) })]));
+        let identifier = "https://example.invalid/a.mp3";
+
+        let leader = {
+            let loader = Arc::clone(&loader);
+            let identifier = identifier.to_owned();
+            tokio::spawn(async move { loader.load(&identifier).await })
+        };
+
+        // The leader registers itself synchronously before its first await, so
+        // this settles as soon as the spawned task gets to run at all.
+        while lock(&loader.in_flight).is_empty() {
+            tokio::task::yield_now().await;
+        }
+
+        leader.abort();
+        let _ = leader.await;
+
+        assert!(
+            lock(&loader.in_flight).is_empty(),
+            "a cancelled leader must clear its own in_flight entry, not just its own task"
+        );
+
+        // Release the still-running thread so it doesn't outlive the test.
+        {
+            let (mutex, condvar) = &*gate;
+            *mutex.lock().unwrap() = true;
+            condvar.notify_all();
+        }
+
+        let result = tokio::time::timeout(Duration::from_secs(1), loader.load(identifier))
+            .await
+            .expect("a fresh load for the identifier must not hang behind the cancelled leader");
+        assert!(matches!(result, LoadResult::Track(_)));
     }
 }
