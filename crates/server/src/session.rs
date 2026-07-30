@@ -58,6 +58,14 @@ pub struct Session {
     /// self-referencing event-channel sender) would leak permanently. One map
     /// filled in one step makes "who won" a single decision instead of two.
     guilds: Mutex<HashMap<u64, GuildPlayer>>,
+    /// Flipped to `false` by [`Session::take_players`], under the same lock as
+    /// `guilds`. Without it, a `get_or_create_player` racing a sweep-driven
+    /// `take_players` on this same (still-`Arc`-alive) `Session` cannot tell "no
+    /// players yet" from "just torn down" — an empty map looks the same either
+    /// way — and would happily build a fresh player that nothing can ever reach
+    /// again, because the session id that led here has already left the
+    /// registry.
+    alive: AtomicBool,
 }
 
 /// A guild's player, paired with the voice connection its engine holds.
@@ -86,6 +94,7 @@ impl Session {
             resuming: AtomicBool::new(false),
             resume_timeout_secs: AtomicU64::new(DEFAULT_RESUME_TIMEOUT_SECS),
             guilds: Mutex::new(HashMap::new()),
+            alive: AtomicBool::new(true),
         }
     }
 
@@ -134,17 +143,27 @@ impl Session {
     /// there is undefined behaviour for `ConcurrentHashMap`. Here construction is
     /// cheap and side-effect free (spawning the actor task is all `build` does
     /// beyond constructing values), so nothing unbounded runs under the lock.
+    ///
+    /// Returns `None` without calling `build` if the session has already been
+    /// torn down by [`Session::take_players`] — otherwise a `PATCH` that is slow
+    /// to reach this call (e.g. stuck resolving an identifier) could race a
+    /// resume-deadline sweep and build a player into a session nothing can find
+    /// again, since only the registry's session id, not this `Arc`, is what a
+    /// later request can look sessions up by.
     pub fn get_or_create_player(
         &self,
         guild_id: u64,
         build: impl FnOnce() -> (PlayerHandle, Arc<VoiceConnection>),
-    ) -> (PlayerHandle, Arc<VoiceConnection>) {
+    ) -> Option<(PlayerHandle, Arc<VoiceConnection>)> {
         let mut guilds = self.lock_guilds();
+        if !self.alive.load(Ordering::Relaxed) {
+            return None;
+        }
         let guild = guilds.entry(guild_id).or_insert_with(|| {
             let (handle, voice) = build();
             GuildPlayer { handle, voice }
         });
-        (guild.handle.clone(), Arc::clone(&guild.voice))
+        Some((guild.handle.clone(), Arc::clone(&guild.voice)))
     }
 
     pub fn voice(&self, guild_id: u64) -> Option<Arc<VoiceConnection>> {
@@ -155,11 +174,28 @@ impl Session {
         self.lock_guilds().remove(&guild_id).map(|guild| guild.handle)
     }
 
+    /// Empties the guild map and marks the session dead to
+    /// [`Session::get_or_create_player`], both under the same lock so the two
+    /// can't race into a player neither state can see.
     pub fn take_players(&self) -> Vec<PlayerHandle> {
-        std::mem::take(&mut *self.lock_guilds())
+        let mut guilds = self.lock_guilds();
+        self.alive.store(false, Ordering::Relaxed);
+        std::mem::take(&mut *guilds)
             .into_values()
             .map(|guild| guild.handle)
             .collect()
+    }
+
+    /// Destroys every player the session holds, then closes its sink. The one
+    /// teardown routine, shared by an explicit close (`SessionRegistry::destroy`)
+    /// and a resume-deadline sweep (`ticker::shutdown_session`) — both need every
+    /// actor, voice connection and pump thread gone, not just the session's own
+    /// bookkeeping removed.
+    pub async fn shutdown(&self) {
+        for player in self.take_players() {
+            let _ = player.destroy().await;
+        }
+        self.sink.close();
     }
 
     fn lock_guilds(&self) -> std::sync::MutexGuard<'_, HashMap<u64, GuildPlayer>> {
@@ -295,9 +331,15 @@ impl SessionRegistry {
     }
 
     /// Unconditional removal, for an explicit close or shutdown.
-    pub fn destroy(&self, id: &str) -> Option<Arc<Session>> {
+    ///
+    /// Tears down every player the session holds before returning: this is the
+    /// only teardown path a still-connected websocket has (`ws.rs`'s overflow
+    /// close), so it must do the full job a resume-deadline sweep does —
+    /// otherwise a session's actors, voice connections and pump threads outlive
+    /// the session id that was the only way to reach them.
+    pub async fn destroy(&self, id: &str) -> Option<Arc<Session>> {
         let session = self.lock().remove(id).map(|entry| entry.session)?;
-        session.sink.close();
+        session.shutdown().await;
         Some(session)
     }
 
@@ -362,9 +404,9 @@ mod tests {
         };
 
         let (handle_1, voice_1) =
-            session.get_or_create_player(guild, build(&build_calls));
+            session.get_or_create_player(guild, build(&build_calls)).unwrap();
         let (handle_2, voice_2) =
-            session.get_or_create_player(guild, build(&build_calls));
+            session.get_or_create_player(guild, build(&build_calls)).unwrap();
 
         assert_eq!(
             build_calls.load(Ordering::SeqCst),
@@ -377,6 +419,28 @@ mod tests {
         );
         assert_eq!(handle_1.guild_id, handle_2.guild_id);
         assert!(Arc::ptr_eq(&session.voice(guild).unwrap(), &voice_1));
+    }
+
+    /// The race a slow `PATCH` could hit: `take_players` (a resume sweep or an
+    /// overflow close) runs while the request is still resolving a track, then
+    /// the request reaches `get_or_create_player`. It must not build a player
+    /// into a session nothing can look up again instead of reporting failure.
+    #[tokio::test]
+    async fn get_or_create_player_refuses_after_take_players() {
+        let session = Session::new("s".into(), 1, None);
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let guild = 7;
+
+        assert!(session.take_players().is_empty());
+
+        let calls = Arc::clone(&build_calls);
+        let result = session.get_or_create_player(guild, move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            dummy_pair(guild)
+        });
+
+        assert!(result.is_none(), "a torn-down session must not build a new player");
+        assert_eq!(build_calls.load(Ordering::SeqCst), 0, "build must not run either");
     }
 
     fn resumable_session(registry: &SessionRegistry) -> Arc<Session> {

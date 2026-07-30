@@ -108,8 +108,5 @@ async fn sweep_tick(state: AppState) {
 
 /// Tears a session down: every player destroyed, then the sink closed.
 pub async fn shutdown_session(session: &Arc<crate::session::Session>) {
-    for player in session.take_players() {
-        let _ = player.destroy().await;
-    }
-    session.sink.close();
+    session.shutdown().await;
 }

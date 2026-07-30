@@ -116,7 +116,12 @@ pub async fn patch_player(
         },
     };
 
-    let handle = state.player(&session, guild_id);
+    // `None` here means the session was torn down (resume swept, or its sink
+    // overflowed) while this request was resolving the track above — the same
+    // outcome `patch`'s own `PlayerGone` gets below, reported the same way.
+    let handle = state
+        .player(&session, guild_id)
+        .ok_or_else(|| ApiError::unavailable("The player is not accepting commands"))?;
 
     // Connecting happens here, awaited, before the actor is told anything, so a
     // failure can become a status code. The original wraps this in

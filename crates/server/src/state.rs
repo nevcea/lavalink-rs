@@ -87,14 +87,18 @@ impl AppState {
     /// first-time callers for the same guild from registering a player from one
     /// caller alongside a voice connection from the other: see
     /// `Session::get_or_create_player`'s docs for what that used to cost.
-    pub fn player(&self, session: &Arc<Session>, guild_id: u64) -> PlayerHandle {
+    ///
+    /// Returns `None` if the session was torn down (resume deadline swept, or an
+    /// overflowing sink closed) while this call was reaching the actor build —
+    /// see `Session::get_or_create_player`'s docs.
+    pub fn player(&self, session: &Arc<Session>, guild_id: u64) -> Option<PlayerHandle> {
         let config = Arc::clone(&self.config);
         let opener = Arc::clone(&self.opener);
         let sink = Arc::clone(&session.sink);
         let user_id = session.user_id;
         let runtime = tokio::runtime::Handle::current();
 
-        let (handle, _voice) = session.get_or_create_player(guild_id, move || {
+        let built = session.get_or_create_player(guild_id, move || {
             // The engine and the voice connection both report to an actor that
             // does not exist yet, so they share a slot that `PlayerActor::new`
             // fills in.
@@ -117,7 +121,7 @@ impl AppState {
             (handle, voice)
         });
 
-        handle
+        built.map(|(handle, _voice)| handle)
     }
 }
 
@@ -175,8 +179,8 @@ mod tests {
         let state = state();
         let session = state.sessions.open(1, None);
 
-        let first = state.player(&session, 123);
-        let second = state.player(&session, 123);
+        let first = state.player(&session, 123).unwrap();
+        let second = state.player(&session, 123).unwrap();
         assert_eq!(first.guild_id, second.guild_id);
         assert_eq!(session.players().len(), 1);
     }
