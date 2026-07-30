@@ -67,12 +67,24 @@ pub struct PatchQuery {
     no_replace: bool,
 }
 
+/// `path`, `query` and `body` are wrapped in `Result` and resolved in that
+/// order inside the body, rather than let axum short-circuit on whichever
+/// fails first in declaration order. axum requires the body-consuming
+/// extractor to be declared last, but the original resolves `@RequestBody`
+/// first (`PlayerRestHandler.kt`'s parameter order) — this module's own docs
+/// on why that order is wire-visible. Declaring them plainly would report a
+/// bad guild id even when the body is *also* malformed, which is not what a
+/// client of the original sees.
 pub async fn patch_player(
     State(state): State<AppState>,
-    ValidatedPath((session_id, guild_id)): ValidatedPath<(String, String)>,
-    ValidatedQuery(query): ValidatedQuery<PatchQuery>,
-    ValidatedJson(update): ValidatedJson<PlayerUpdate>,
+    path: Result<ValidatedPath<(String, String)>, ApiError>,
+    query: Result<ValidatedQuery<PatchQuery>, ApiError>,
+    body: Result<ValidatedJson<PlayerUpdate>, ApiError>,
 ) -> Result<Json<Player>, ApiError> {
+    let ValidatedJson(update) = body?;
+    let ValidatedPath((session_id, guild_id)) = path?;
+    let ValidatedQuery(query) = query?;
+
     let session = session(&state, &session_id)?;
     let guild_id = parse_guild_id(&guild_id)?;
 

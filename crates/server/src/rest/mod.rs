@@ -296,6 +296,39 @@ mod tests {
         assert_eq!(body["timeout"], -5);
     }
 
+    /// The bug this fix targets: `noReplace` fails to parse at the query
+    /// extractor level (unlike the guild/session ids, which are only ever
+    /// validated deeper inside `patch_player` and so were never actually
+    /// affected by extractor declaration order). Before this fix, axum
+    /// short-circuited on that query rejection without ever attempting the
+    /// JSON extractor, which axum requires to be declared last — but the
+    /// original resolves `@RequestBody` first (`PlayerRestHandler.kt`'s
+    /// parameter order), so a client of the original sees the body's error
+    /// here, not the query's.
+    #[tokio::test]
+    async fn a_bad_query_param_does_not_hide_a_malformed_body_error() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::PATCH)
+                    .uri("/v4/sessions/whatever/players/123?noReplace=bogus")
+                    .header(header::AUTHORIZATION, "test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{not json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(response).await;
+        let message = body["message"].as_str().unwrap().to_lowercase();
+        assert!(
+            message.contains("json"),
+            "expected the JSON parse error to win over the query error, got {body:?}"
+        );
+    }
+
     /// A JSON body sent with no `Content-Type` header must keep axum's own 415
     /// for that specific case, not the flat 400 every other body rejection
     /// gets here — the same status Spring's default gives it, which is what a
