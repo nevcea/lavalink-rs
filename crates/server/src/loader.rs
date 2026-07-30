@@ -85,58 +85,68 @@ impl Loader {
             return cached;
         }
 
-        // Join an existing load, or become the one that runs it.
-        let mut receiver = {
-            let mut in_flight = lock(&self.in_flight);
-            match in_flight.get(identifier) {
-                Some(sender) => Some(sender.subscribe()),
-                None => {
-                    let (sender, _) = broadcast::channel(1);
-                    in_flight.insert(identifier.to_owned(), sender);
-                    None
+        // Join an existing load, or become the one that runs it. A leader that dies
+        // without publishing (see the `Err` arm below) sends every follower back
+        // here rather than off to its own independent load, so single-flight still
+        // holds and the result still gets cached: `LeaderGuard`'s `Drop` clears the
+        // dead entry before this loop can observe it again, so exactly one of the
+        // followers becomes the new leader and the rest re-subscribe to it.
+        loop {
+            let mut receiver = {
+                let mut in_flight = lock(&self.in_flight);
+                match in_flight.get(identifier) {
+                    Some(sender) => Some(sender.subscribe()),
+                    None => {
+                        let (sender, _) = broadcast::channel(1);
+                        in_flight.insert(identifier.to_owned(), sender);
+                        None
+                    }
+                }
+            };
+
+            if let Some(receiver) = receiver.as_mut() {
+                match receiver.recv().await {
+                    Ok(result) => return result,
+                    // The leader's task died without publishing — a client-side
+                    // cancellation, most likely. Retry as if we had just arrived:
+                    // becoming the new leader ourselves if nobody beat us to it.
+                    Err(_) => continue,
                 }
             }
-        };
 
-        if let Some(receiver) = receiver.as_mut() {
-            return match receiver.recv().await {
-                Ok(result) => result,
-                // The leader's task died without publishing. Falling through to our
-                // own attempt is better than reporting a failure we did not observe.
-                Err(_) => self.load_uncached(identifier).await,
-            };
+            // Guarantees the entry inserted above is cleared even if this leader's
+            // own future is dropped before `load_uncached` returns — a client-side
+            // request cancellation (e.g. an HTTP/2 stream reset on timeout) drops
+            // this future mid-await with no further code of ours running. Without
+            // this, the `broadcast::Sender` above would stay in `in_flight` forever
+            // with nothing left to call `.send()` on it, and every later caller for
+            // this exact identifier would subscribe and hang in `recv().await`
+            // permanently. The explicit `remove` below already clears it on a
+            // normal return, so this is a no-op then; it only matters on the
+            // cancellation path.
+            let _leader_guard = LeaderGuard { loader: self, identifier };
+
+            let result = self.load_uncached(identifier).await;
+
+            if !matches!(result, LoadResult::Error(_)) {
+                lock(&self.cache).insert(
+                    identifier.to_owned(),
+                    CacheEntry {
+                        result: result.clone(),
+                        expires_at: Instant::now() + CACHE_TTL,
+                    },
+                );
+            }
+
+            // Removing before sending is safe: subscribers join under the same
+            // lock, so anyone who got a receiver did so before the removal and is
+            // still attached.
+            if let Some(sender) = lock(&self.in_flight).remove(identifier) {
+                let _ = sender.send(result.clone());
+            }
+
+            return result;
         }
-
-        // Guarantees the entry inserted above is cleared even if this leader's own
-        // future is dropped before `load_uncached` returns — a client-side request
-        // cancellation (e.g. an HTTP/2 stream reset on timeout) drops this future
-        // mid-await with no further code of ours running. Without this, the
-        // `broadcast::Sender` above would stay in `in_flight` forever with nothing
-        // left to call `.send()` on it, and every later caller for this exact
-        // identifier would subscribe and hang in `recv().await` permanently. The
-        // explicit `remove` below already clears it on a normal return, so this is
-        // a no-op then; it only matters on the cancellation path.
-        let _leader_guard = LeaderGuard { loader: self, identifier };
-
-        let result = self.load_uncached(identifier).await;
-
-        if !matches!(result, LoadResult::Error(_)) {
-            lock(&self.cache).insert(
-                identifier.to_owned(),
-                CacheEntry {
-                    result: result.clone(),
-                    expires_at: Instant::now() + CACHE_TTL,
-                },
-            );
-        }
-
-        // Removing before sending is safe: subscribers join under the same lock, so
-        // anyone who got a receiver did so before the removal and is still attached.
-        if let Some(sender) = lock(&self.in_flight).remove(identifier) {
-            let _ = sender.send(result.clone());
-        }
-
-        result
     }
 
     async fn load_uncached(&self, identifier: &str) -> LoadResult {
@@ -553,5 +563,112 @@ mod tests {
             .await
             .expect("a fresh load for the identifier must not hang behind the cancelled leader");
         assert!(matches!(result, LoadResult::Track(_)));
+    }
+
+    /// A manager like [`Blocking`], but counting invocations too — so a follower
+    /// that wrongly falls through to its own independent load (defeating
+    /// single-flight) is distinguishable from one that correctly waits for a new
+    /// leader.
+    struct CountingBlocking {
+        gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        loads: Arc<AtomicUsize>,
+    }
+
+    impl SourceManager for CountingBlocking {
+        fn name(&self) -> &'static str {
+            "http"
+        }
+
+        fn matches(&self, identifier: &str) -> bool {
+            identifier.starts_with("https://")
+        }
+
+        fn load(&self, _identifier: &str) -> Result<SourceLoad, SourceError> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            let (mutex, condvar) = &*self.gate;
+            let mut released = mutex.lock().unwrap();
+            while !*released {
+                released = condvar.wait(released).unwrap();
+            }
+            ok_track()
+        }
+    }
+
+    /// The scenario `a_cancelled_leader_frees_its_identifier_for_the_next_caller`
+    /// doesn't cover: followers already *subscribed* to a leader that then gets
+    /// cancelled. They must not each fall through to their own independent load —
+    /// exactly one of them should become the new leader, and the result they all
+    /// receive must still be the one that gets cached.
+    #[tokio::test]
+    async fn followers_of_a_cancelled_leader_share_exactly_one_new_load() {
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let loads = Arc::new(AtomicUsize::new(0));
+        let manager = CountingBlocking {
+            gate: Arc::clone(&gate),
+            loads: Arc::clone(&loads),
+        };
+        let loader = Arc::new(Loader::new(vec![Arc::new(manager)]));
+        let identifier = "https://example.invalid/a.mp3";
+
+        let leader = {
+            let loader = Arc::clone(&loader);
+            let identifier = identifier.to_owned();
+            tokio::spawn(async move { loader.load(&identifier).await })
+        };
+
+        while lock(&loader.in_flight).is_empty() {
+            tokio::task::yield_now().await;
+        }
+
+        let mut followers = Vec::new();
+        for _ in 0..2 {
+            let loader = Arc::clone(&loader);
+            let identifier = identifier.to_owned();
+            followers.push(tokio::spawn(async move { loader.load(&identifier).await }));
+        }
+
+        // Wait until both followers have subscribed to the leader's broadcast,
+        // so the abort below actually exercises the "already waiting" path.
+        loop {
+            let subscribed = lock(&loader.in_flight)
+                .get(identifier)
+                .map(|sender| sender.receiver_count())
+                .unwrap_or(0);
+            if subscribed >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        leader.abort();
+        let _ = leader.await;
+
+        // Release every gated thread (the orphaned leader's and whichever
+        // follower becomes the new leader's) so nothing outlives the test.
+        {
+            let (mutex, condvar) = &*gate;
+            *mutex.lock().unwrap() = true;
+            condvar.notify_all();
+        }
+
+        let (a, b) = tokio::join!(followers.remove(0), followers.remove(0));
+        assert!(matches!(a.unwrap(), LoadResult::Track(_)));
+        assert!(matches!(b.unwrap(), LoadResult::Track(_)));
+
+        // One load for the aborted leader (its OS thread was already running and
+        // cannot be cancelled) plus exactly one for the new leader the two
+        // followers elected between themselves — never three.
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            2,
+            "both followers must not each fall through to an independent load"
+        );
+
+        // And the new leader's result must have been cached, not discarded.
+        let cached = tokio::time::timeout(Duration::from_secs(1), loader.load(identifier))
+            .await
+            .expect("a cached load must not hang");
+        assert!(matches!(cached, LoadResult::Track(_)));
+        assert_eq!(loads.load(Ordering::SeqCst), 2, "the third call must be served from cache");
     }
 }
