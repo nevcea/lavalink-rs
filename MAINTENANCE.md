@@ -32,10 +32,15 @@ would be worse than saying so. See `crates/server/src/audio/resample.rs`.
 ## Route planning / IP rotation — not implemented
 
 Route planning belongs to the IP-rotation feature, which is out of scope for
-this node. `/v4/routeplanner/status`, `/v4/routeplanner/free/address` and
-`/v4/routeplanner/free/all` all respond with a 501 rather than a 404, so a
-client can tell "no such endpoint" apart from "this node doesn't support the
-feature". See `crates/server/src/rest/mod.rs`.
+this node. Rather than invent a status code for "not implemented," this node
+matches what a real Lavalink node with no route planner configured already
+does — the only state a real node's `AbstractRoutePlanner?` is ever `null`,
+and the only state this node can ever be in — checked against
+`RoutePlannerRestHandler.kt`: `GET /v4/routeplanner/status` returns `204 No
+Content` with no body, and both `POST /v4/routeplanner/free/address` and
+`POST /v4/routeplanner/free/all` throw `RoutePlannerDisabledException`, a
+plain `500` with the message "Can't access disabled route planner". See
+`crates/server/src/rest/mod.rs`.
 
 ## Twitch, Vimeo, Nico Nico Douga — not implemented
 

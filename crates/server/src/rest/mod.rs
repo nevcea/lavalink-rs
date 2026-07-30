@@ -32,11 +32,17 @@ pub fn router(state: AppState) -> Router {
                 .delete(player::delete_player),
         )
         // Route planning belongs to the IP-rotation feature, which is out of scope.
-        // 501 says "this node does not do that" rather than 404's "no such
-        // endpoint", which a client could read as a version mismatch.
-        .route("/v4/routeplanner/status", get(route_planner))
-        .route("/v4/routeplanner/free/address", post(route_planner))
-        .route("/v4/routeplanner/free/all", post(route_planner));
+        // The original's own behaviour with no route planner configured (the only
+        // state this node can ever be in) is what's matched here, not a made-up
+        // "not implemented" status: `getStatus` returns 204 with no body, and both
+        // `POST` handlers throw `RoutePlannerDisabledException`, a plain 500
+        // (`RoutePlannerRestHandler.kt`).
+        .route("/v4/routeplanner/status", get(route_planner_status))
+        .route(
+            "/v4/routeplanner/free/address",
+            post(route_planner_disabled),
+        )
+        .route("/v4/routeplanner/free/all", post(route_planner_disabled));
 
     Router::new()
         .route("/version", get(info::version))
@@ -57,8 +63,15 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn route_planner() -> ApiError {
-    ApiError::not_implemented("This node does not implement the route planner")
+async fn route_planner_status() -> axum::http::StatusCode {
+    axum::http::StatusCode::NO_CONTENT
+}
+
+async fn route_planner_disabled() -> ApiError {
+    ApiError::new(
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        "Can't access disabled route planner",
+    )
 }
 
 async fn not_found(uri: Uri) -> ApiError {
@@ -232,5 +245,54 @@ mod tests {
         let body = body_json(response).await;
         assert_eq!(body["status"], 400);
         assert_eq!(body["path"], "/v4/sessions/whatever");
+    }
+
+    /// `RoutePlannerRestHandler.kt::getStatus` returns 204 with no body when no
+    /// route planner is configured, which is the only state this node is ever
+    /// in — not a 404 or 501.
+    #[tokio::test]
+    async fn route_planner_status_is_204_with_no_route_planner_configured() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v4/routeplanner/status")
+                    .header(header::AUTHORIZATION, "test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(bytes.is_empty());
+    }
+
+    /// Both free-address endpoints throw `RoutePlannerDisabledException` in the
+    /// original, a plain 500 — not the Lavalink `Error` shape's own 501.
+    #[tokio::test]
+    async fn route_planner_free_endpoints_are_500_with_no_route_planner_configured() {
+        for path in [
+            "/v4/routeplanner/free/address",
+            "/v4/routeplanner/free/all",
+        ] {
+            let app = router(test_state());
+            let response = app
+                .oneshot(
+                    HttpRequest::builder()
+                        .method(Method::POST)
+                        .uri(path)
+                        .header(header::AUTHORIZATION, "test")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = body_json(response).await;
+            assert_eq!(body["message"], "Can't access disabled route planner");
+        }
     }
 }

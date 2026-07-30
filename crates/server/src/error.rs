@@ -53,11 +53,6 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "Player not found")
     }
 
-    /// Route planner endpoints and anything else we deliberately do not implement.
-    pub fn not_implemented(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::NOT_IMPLEMENTED, message)
-    }
-
     /// A path that matches no route at all, so a client sees the same `Error`
     /// shape it gets from a stale session or player id, rather than axum's
     /// built-in empty-body 404.
