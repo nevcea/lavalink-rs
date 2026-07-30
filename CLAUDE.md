@@ -58,6 +58,11 @@ Every commit follows [Conventional Commits v1.0.0](https://www.conventionalcommi
   removal), not internal refactors.
 - Multiple unrelated changes are multiple commits, not one commit with a
   compound type.
+- Keep each commit small enough to review on its own. Even one logical fix
+  should be split where it has separable parts — e.g. a helper/primitive added
+  in one commit, then the commit that puts it to use — rather than landing as
+  one large diff. A commit that touches unrelated files or mixes a refactor
+  with a behavior change is a sign it should be split further.
 
 ## Workspace layout
 
