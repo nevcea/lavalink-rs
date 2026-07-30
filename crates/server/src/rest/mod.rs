@@ -177,6 +177,27 @@ mod tests {
         assert_eq!(body["path"], "/v4/nope");
     }
 
+    /// `?trace=true` must populate a non-null `trace` field — dropped
+    /// entirely otherwise, per `the_body_matches_the_originals_shape` in
+    /// `error.rs`.
+    #[tokio::test]
+    async fn a_trace_query_param_populates_the_trace_field() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v4/nope?trace=true")
+                    .header(header::AUTHORIZATION, "test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = body_json(response).await;
+        assert!(body["trace"].is_string(), "expected a trace, got {body:?}");
+    }
+
     /// A known path with the wrong HTTP method gets the same `Error` shape as a
     /// 405, not axum's default bare status line.
     #[tokio::test]

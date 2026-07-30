@@ -78,14 +78,16 @@ impl ApiError {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
     }
 
-    fn body(&self, path: &str) -> ErrorBody {
+    /// `trace` is `Some` only when the request asked for `?trace=true`
+    /// (`wants_trace`) — a stack trace is a JVM artefact this port has none of,
+    /// so the message stands in for it. What `trace=true` actually toggles on
+    /// the wire is the *field's presence*, and that much is reproduced exactly.
+    fn body(&self, path: &str, trace: Option<String>) -> ErrorBody {
         ErrorBody {
             timestamp: now_epoch_ms(),
             status: self.status.as_u16(),
             error: self.status.canonical_reason().unwrap_or("Error").to_owned(),
-            // Stack traces are a JVM artefact; `trace=true` has nothing to return
-            // here, so the key stays absent rather than carrying a fake.
-            trace: None,
+            trace,
             message: self.message.clone(),
             path: path.to_owned(),
         }
@@ -94,22 +96,36 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        // Rendered without a path; the middleware replaces this once it knows one.
-        let mut response = (self.status, Json(self.body(""))).into_response();
+        // Rendered without a path or trace; the middleware replaces this once
+        // it knows the request, which it does not have access to here.
+        let mut response = (self.status, Json(self.body("", None))).into_response();
         response.extensions_mut().insert(self);
         response
     }
 }
 
+/// Whether the request asked for a trace via `?trace=true`, matching the
+/// original's `@RequestParam` boolean parsing closely enough for the only
+/// value any real client sends.
+fn wants_trace(query: Option<&str>) -> bool {
+    query
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .any(|(key, value)| key == "trace" && value.eq_ignore_ascii_case("true"))
+}
+
 /// Re-renders error responses with the request path filled in.
 pub async fn fill_error_path(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
+    let trace_requested = wants_trace(request.uri().query());
     let response = next.run(request).await;
 
     let Some(error) = response.extensions().get::<ApiError>().cloned() else {
         return response;
     };
-    (error.status, Json(error.body(&path))).into_response()
+    let trace = trace_requested.then(|| error.message.clone());
+    (error.status, Json(error.body(&path, trace))).into_response()
 }
 
 /// `axum::Json`, but a malformed or wrongly-typed body becomes an [`ApiError`]
@@ -191,7 +207,7 @@ mod tests {
     #[test]
     fn the_body_matches_the_originals_shape() {
         let error = ApiError::session_not_found();
-        let body = error.body("/v4/sessions/xyz/players");
+        let body = error.body("/v4/sessions/xyz/players", None);
 
         assert_eq!(body.status, 404);
         assert_eq!(body.error, "Not Found");
@@ -209,5 +225,26 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let error = response.extensions().get::<ApiError>().unwrap();
         assert_eq!(error.message, "nope");
+    }
+
+    #[test]
+    fn trace_is_present_only_when_requested() {
+        assert!(!wants_trace(None));
+        assert!(!wants_trace(Some("")));
+        assert!(!wants_trace(Some("trace=false")));
+        assert!(!wants_trace(Some("identifier=foo")));
+        assert!(wants_trace(Some("trace=true")));
+        assert!(wants_trace(Some("identifier=foo&trace=true")));
+        assert!(wants_trace(Some("trace=TRUE")));
+    }
+
+    #[test]
+    fn a_requested_trace_carries_the_errors_message() {
+        let error = ApiError::session_not_found();
+        let body = error.body("/v4/sessions/xyz/players", Some(error.message.clone()));
+
+        assert_eq!(body.trace.as_deref(), Some("Session not found"));
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["trace"], "Session not found");
     }
 }
