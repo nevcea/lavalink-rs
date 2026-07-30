@@ -171,6 +171,20 @@ impl Sink {
         self.lock().essential.len()
     }
 
+    /// Whether the essential queue is at [`ESSENTIAL_CAPACITY`] — the same
+    /// condition that makes `send` start returning [`SendError::Overflow`].
+    ///
+    /// While a websocket is attached, an overflowing sink is noticed and the
+    /// session is closed with 1008 (`ws.rs`'s `pump`). A session in
+    /// `SessionState::Resumable` has no websocket to notice it, so nobody would
+    /// otherwise react — `SessionRegistry::sweep_expired` polls this instead, to
+    /// give an overflowing resumable session the same fate a connected one gets,
+    /// rather than silently dropping every essential message past the cap for
+    /// the rest of the resume window.
+    pub fn is_overflowing(&self) -> bool {
+        self.lock().essential.len() >= ESSENTIAL_CAPACITY
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         crate::lock(&self.inner)
     }
@@ -262,6 +276,17 @@ mod tests {
             sink.send(event("1")).unwrap();
         }
         assert_eq!(sink.send(event("1")), Err(SendError::Overflow));
+    }
+
+    #[test]
+    fn is_overflowing_reports_the_same_threshold_send_enforces() {
+        let sink = Sink::new();
+        assert!(!sink.is_overflowing());
+
+        for _ in 0..ESSENTIAL_CAPACITY {
+            sink.send(event("1")).unwrap();
+        }
+        assert!(sink.is_overflowing());
     }
 
     #[test]
