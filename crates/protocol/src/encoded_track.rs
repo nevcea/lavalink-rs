@@ -16,7 +16,7 @@
 //! i64  length      milliseconds
 //! utf  identifier
 //! u8   isStream
-//! ?utf uri
+//! ?utf uri         version >= 2 only
 //! ?utf artworkUrl  version >= 3 only
 //! ?utf isrc        version >= 3 only
 //! utf  sourceName
@@ -46,6 +46,8 @@ use crate::player::{Track, TrackInfo};
 const FLAG_VERSIONED: u32 = 1;
 /// The version lavaplayer 2.x writes, and therefore what we write.
 pub const TRACK_INFO_VERSION: u8 = 3;
+/// First version carrying `uri`.
+const VERSION_WITH_URI: u8 = 2;
 /// First version carrying `artworkUrl` and `isrc`.
 const VERSION_WITH_ARTWORK_AND_ISRC: u8 = 3;
 const SIZE_MASK: u32 = 0x3FFF_FFFF;
@@ -164,7 +166,15 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<DecodedTrack> {
     let length = input.read_i64()?;
     let identifier = input.read_utf()?;
     let is_stream = input.read_bool()?;
-    let uri = input.read_nullable_utf()?;
+    // Present on the wire from version 2 on; a version-1 (or unversioned) track
+    // has no `uri` bytes at all, and `sourceName`'s length prefix follows
+    // `isStream` directly — reading unconditionally here would desync every
+    // field after it for a genuinely old track.
+    let uri = if version >= VERSION_WITH_URI {
+        input.read_nullable_utf()?
+    } else {
+        None
+    };
 
     let (artwork_url, isrc) = if version >= VERSION_WITH_ARTWORK_AND_ISRC {
         (input.read_nullable_utf()?, input.read_nullable_utf()?)
@@ -232,7 +242,10 @@ pub fn encode_to_bytes(info: &TrackInfo, tail: &SourceTail, version: u8) -> Resu
     body.write_i64(info.length);
     body.write_utf(&info.identifier)?;
     body.write_bool(info.is_stream);
-    body.write_nullable_utf(info.uri.as_deref())?;
+
+    if version >= VERSION_WITH_URI {
+        body.write_nullable_utf(info.uri.as_deref())?;
+    }
 
     if version >= VERSION_WITH_ARTWORK_AND_ISRC {
         body.write_nullable_utf(info.artwork_url.as_deref())?;
@@ -372,6 +385,25 @@ mod tests {
             assert_eq!(decoded.tail, tail, "tail mismatch for {name}");
             assert_eq!(decoded.version, TRACK_INFO_VERSION, "version for {name}");
         }
+    }
+
+    /// A genuine version-1 track has no `uri` bytes at all — `sourceName`'s length
+    /// prefix follows `isStream` directly. Reading `uri` unconditionally (as this
+    /// decoder used to) would consume a byte belonging to `sourceName` and desync
+    /// every field after it.
+    #[test]
+    fn version_1_track_has_no_uri_field() {
+        let mut info = sample("http");
+        info.uri = None;
+        info.artwork_url = None;
+        info.isrc = None;
+
+        let encoded = encode_with_version(&info, &SourceTail::Probe("mp3".into()), 1).unwrap();
+        let decoded = decode(&encoded).unwrap();
+
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.info, info);
+        assert_eq!(decoded.info.uri, None);
     }
 
     #[test]
