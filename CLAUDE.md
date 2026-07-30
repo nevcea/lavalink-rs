@@ -58,11 +58,14 @@ Every commit follows [Conventional Commits v1.0.0](https://www.conventionalcommi
   removal), not internal refactors.
 - Multiple unrelated changes are multiple commits, not one commit with a
   compound type.
-- Keep each commit small enough to review on its own. Even one logical fix
-  should be split where it has separable parts — e.g. a helper/primitive added
-  in one commit, then the commit that puts it to use — rather than landing as
-  one large diff. A commit that touches unrelated files or mixes a refactor
-  with a behavior change is a sign it should be split further.
+- Keep each commit small enough to review on its own, and each commit
+  independently understandable and revertible — a split that leaves an
+  intermediate commit non-compiling or meaningless on its own is not the goal,
+  just noise. Even one logical fix should be split where it has separable
+  parts that meet that bar — e.g. a helper/primitive added in one commit, then
+  the commit that puts it to use — rather than landing as one large diff. A
+  commit that touches unrelated files or mixes a refactor with a behavior
+  change is a sign it should be split further.
 
 ## Workspace layout
 
@@ -72,10 +75,11 @@ Every commit follows [Conventional Commits v1.0.0](https://www.conventionalcommi
   node depends on this crate alone.
 - `crates/server` (`lavalink-server`) — the audio node itself: REST/WS surface,
   player actors, the audio pipeline, source managers.
-- `crates/test-bot` (`lavalink-test-bot`) — a Discord bot that drives a running node
-  as an ordinary v4 client, for exercising the one path unit tests can't reach: real
-  audio into a real Discord voice channel. See `crates/test-bot/README.md` for setup
-  and the event sequence to watch for per command.
+- `crates/test-bot` (`lavalink-test-bot`) — an integration harness, not a feature
+  bot: a Discord bot that drives a running node as an ordinary v4 client, for
+  exercising the one path unit tests can't reach: real audio into a real Discord
+  voice channel. See `crates/test-bot/README.md` for setup and the event sequence
+  to watch for per command.
 
 ## Requirements
 
@@ -102,11 +106,12 @@ cargo run -p lavalink-server --release -- application.yml   # path arg optional,
 `cp application.yml.example application.yml` first — the node refuses to start with
 an empty password (`Config::validate`).
 
-**Do not run `cargo fmt`.** This codebase is hand-formatted deliberately (see
-`MAINTENANCE.md`'s "Formatting" section); a full-tree `cargo fmt` produces ~84 diff
-hunks and destroys at least one table (`filter.rs`'s `COEFFICIENTS_48000`) that's
-intentionally kept diffable against the original Java source. Match the surrounding
-style by hand instead.
+**Do not run `cargo fmt` (or `rustfmt`) across the tree.** This codebase is
+hand-formatted deliberately (see `MAINTENANCE.md`'s "Formatting" section); a
+full-tree `cargo fmt` produces ~84 diff hunks and destroys at least one table
+(`filter.rs`'s `COEFFICIENTS_48000`) that's intentionally kept diffable against
+the original Java source. Whatever file you touch — including a brand new one
+— match its surrounding style by hand instead.
 
 No CI config and no `rustfmt.toml`/`clippy.toml` exist in the repo; `cargo test` and
 `cargo clippy` are the checks to run yourself before calling something done.
