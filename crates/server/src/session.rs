@@ -317,24 +317,53 @@ impl SessionRegistry {
     /// — defeating the reason resume exists. Treating an overflowing sink the
     /// same as an expired deadline here gives it the same fate a connected
     /// session gets, instead of a silent, unbounded event gap.
+    ///
+    /// Scans and removes as two separate critical sections rather than one held
+    /// across the whole pass — every other session lookup on the node (every REST
+    /// request, every websocket handshake) shares this same registry lock, so
+    /// holding it for an uninterrupted O(sessions) scan plus O(expired) removal
+    /// once a second stalls all of them for that whole span. Splitting leaves a
+    /// gap between deciding a session is expired and removing it, so
+    /// [`Self::remove_if_still_expired`] re-checks the same condition under its
+    /// own lock before removing — otherwise a resume that legitimately claims a
+    /// session in that gap (turning it `Open`) would be undone by a removal
+    /// decided against the stale, no-longer-true `Resumable` state.
     pub fn sweep_expired(&self, now: Instant) -> Vec<Arc<Session>> {
-        let mut sessions = self.lock();
-        let expired: Vec<String> = sessions
-            .iter()
-            .filter(|(_, entry)| match entry.state {
-                SessionState::Resumable { deadline } => {
-                    deadline <= now || entry.session.sink.is_overflowing()
-                }
-                SessionState::Open => false,
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
+        let expired: Vec<String> = {
+            let sessions = self.lock();
+            sessions
+                .iter()
+                .filter(|(_, entry)| Self::is_expired(entry, now))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
 
         expired
-            .into_iter()
-            .filter_map(|id| sessions.remove(&id))
-            .map(|entry| entry.session)
+            .iter()
+            .filter_map(|id| self.remove_if_still_expired(id, now))
             .collect()
+    }
+
+    /// Removes `id` only if it is still expired under `now` at the moment of
+    /// removal — see [`Self::sweep_expired`]'s docs for why a stale decision from
+    /// an earlier scan cannot be trusted on its own.
+    fn remove_if_still_expired(&self, id: &str, now: Instant) -> Option<Arc<Session>> {
+        let mut sessions = self.lock();
+        match sessions.get(id) {
+            Some(entry) if Self::is_expired(entry, now) => {
+                sessions.remove(id).map(|entry| entry.session)
+            }
+            _ => None,
+        }
+    }
+
+    fn is_expired(entry: &Entry, now: Instant) -> bool {
+        match entry.state {
+            SessionState::Resumable { deadline } => {
+                deadline <= now || entry.session.sink.is_overflowing()
+            }
+            SessionState::Open => false,
+        }
     }
 
     /// Unconditional removal, for an explicit close or shutdown.
@@ -607,6 +636,70 @@ mod tests {
         let expired = registry.sweep_expired(Instant::now());
         assert_eq!(expired.len(), 1, "an overflowing resumable session must be swept");
         assert!(registry.get(&session.id).is_none());
+    }
+
+    /// The race `sweep_expired`'s two-phase split opens up: an overflowing
+    /// session (deadline still far off, so `claim_for_resume` has no reason of
+    /// its own to reject it) is decided expired by the scan phase, then
+    /// successfully claimed for resume — turning it `Open` — before the
+    /// matching removal runs. Unlike a deadline-expired session (whose claim
+    /// would fail on `claim_for_resume`'s own deadline check), nothing else
+    /// protects an overflow-expired one, so the removal must re-check expiry
+    /// itself rather than trust the scan's now-stale verdict.
+    #[test]
+    fn a_session_resumed_between_scan_and_removal_is_not_torn_down() {
+        use lavalink_protocol::message::{EmittedEvent, Message};
+        use lavalink_protocol::player::{Track, TrackInfo};
+
+        let registry = SessionRegistry::new();
+        let session = registry.open(1, None);
+        session.set_resuming(true);
+        session.set_resume_timeout_secs(3600); // far from expiring on its own
+        registry.on_disconnect(&session.id, Instant::now());
+
+        let event = || {
+            Message::Event(EmittedEvent::TrackStart {
+                guild_id: "1".into(),
+                track: Box::new(Track::new(
+                    "e".into(),
+                    TrackInfo {
+                        identifier: "i".into(),
+                        is_seekable: true,
+                        author: "a".into(),
+                        length: 1,
+                        is_stream: false,
+                        position: 0,
+                        title: "t".into(),
+                        uri: None,
+                        source_name: "http".into(),
+                        artwork_url: None,
+                        isrc: None,
+                    },
+                )),
+            })
+        };
+        while !session.sink.is_overflowing() {
+            let _ = session.sink.send(event());
+        }
+
+        let now = Instant::now();
+        // What `sweep_expired`'s scan phase would have decided moments earlier:
+        // this session is expired (by overflow, not deadline).
+        assert!(registry
+            .lock()
+            .get(&session.id)
+            .is_some_and(|entry| SessionRegistry::is_expired(entry, now)));
+
+        // The claim that lands in the gap between scan and removal. Succeeds
+        // because the deadline itself is nowhere near `now`.
+        assert!(registry.claim_for_resume(&session.id, now).is_some());
+        assert_eq!(registry.state(&session.id), Some(SessionState::Open));
+
+        // The stale removal decision must see the session is `Open` now and
+        // leave it alone, instead of tearing down a session just resumed.
+        assert!(registry.remove_if_still_expired(&session.id, now).is_none());
+        assert!(registry.get(&session.id).is_some());
+        assert_eq!(registry.state(&session.id), Some(SessionState::Open));
     }
 
     #[test]
