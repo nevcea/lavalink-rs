@@ -49,14 +49,36 @@ struct CacheEntry {
 }
 
 /// Clears a leader's `in_flight` entry on drop, cancellation included.
+///
+/// Holds the sender this leader itself registered, so a removal — here or in
+/// [`Loader::load`]'s normal-completion path — only ever clears the entry it
+/// actually owns. A plain remove-by-key would also work most of the time, but
+/// not once a new leader has already replaced this one's entry under the same
+/// identifier: `HashMap::remove` cannot distinguish "my entry" from "a
+/// different generation's entry that happens to share this key", so it would
+/// delete a fresh leader's live sender before it ever sends, forcing its
+/// followers to retry as new leaders of their own.
 struct LeaderGuard<'a> {
     loader: &'a Loader,
     identifier: &'a str,
+    sender: broadcast::Sender<LoadResult>,
+}
+
+impl LeaderGuard<'_> {
+    fn remove_if_still_ours(&self) {
+        let mut in_flight = lock(&self.loader.in_flight);
+        if in_flight
+            .get(self.identifier)
+            .is_some_and(|current| current.same_channel(&self.sender))
+        {
+            in_flight.remove(self.identifier);
+        }
+    }
 }
 
 impl Drop for LeaderGuard<'_> {
     fn drop(&mut self) {
-        lock(&self.loader.in_flight).remove(self.identifier);
+        self.remove_if_still_ours();
     }
 }
 
@@ -92,17 +114,19 @@ impl Loader {
         // dead entry before this loop can observe it again, so exactly one of the
         // followers becomes the new leader and the rest re-subscribe to it.
         loop {
-            let mut receiver = {
+            let mut receiver = None;
+            let mut own_sender = None;
+            {
                 let mut in_flight = lock(&self.in_flight);
                 match in_flight.get(identifier) {
-                    Some(sender) => Some(sender.subscribe()),
+                    Some(sender) => receiver = Some(sender.subscribe()),
                     None => {
                         let (sender, _) = broadcast::channel(1);
-                        in_flight.insert(identifier.to_owned(), sender);
-                        None
+                        in_flight.insert(identifier.to_owned(), sender.clone());
+                        own_sender = Some(sender);
                     }
                 }
-            };
+            }
 
             if let Some(receiver) = receiver.as_mut() {
                 match receiver.recv().await {
@@ -114,6 +138,10 @@ impl Loader {
                 }
             }
 
+            // No receiver means the match above took the `None` arm and this task
+            // became the leader, inserting `own_sender` itself.
+            let sender = own_sender.expect("the leader branch always sets own_sender");
+
             // Guarantees the entry inserted above is cleared even if this leader's
             // own future is dropped before `load_uncached` returns — a client-side
             // request cancellation (e.g. an HTTP/2 stream reset on timeout) drops
@@ -121,10 +149,14 @@ impl Loader {
             // this, the `broadcast::Sender` above would stay in `in_flight` forever
             // with nothing left to call `.send()` on it, and every later caller for
             // this exact identifier would subscribe and hang in `recv().await`
-            // permanently. The explicit `remove` below already clears it on a
+            // permanently. The explicit removal below already clears it on a
             // normal return, so this is a no-op then; it only matters on the
             // cancellation path.
-            let _leader_guard = LeaderGuard { loader: self, identifier };
+            let leader_guard = LeaderGuard {
+                loader: self,
+                identifier,
+                sender: sender.clone(),
+            };
 
             let result = self.load_uncached(identifier).await;
 
@@ -140,10 +172,11 @@ impl Loader {
 
             // Removing before sending is safe: subscribers join under the same
             // lock, so anyone who got a receiver did so before the removal and is
-            // still attached.
-            if let Some(sender) = lock(&self.in_flight).remove(identifier) {
-                let _ = sender.send(result.clone());
-            }
+            // still attached. `remove_if_still_ours` rather than a plain
+            // remove-by-key so this can never delete a different leader's entry —
+            // see `LeaderGuard`'s docs for when that would otherwise happen.
+            leader_guard.remove_if_still_ours();
+            let _ = sender.send(result.clone());
 
             return result;
         }
@@ -498,6 +531,41 @@ mod tests {
         let (loader, _) = loader(ok_track);
         let error = loader.decode("not base64!!").unwrap_err();
         assert_eq!(error.severity, Severity::Common);
+    }
+
+    /// The bug: `LeaderGuard::drop` used to remove `in_flight[identifier]` by key
+    /// alone. If a new leader had already registered its own sender under the
+    /// same identifier — the timing a cancelled leader's guard can race — that
+    /// unconditional removal would delete the *new* leader's live sender before
+    /// it ever sends, forcing its followers to retry as leaders of their own
+    /// instead of getting the result that was already on its way.
+    #[test]
+    fn a_stale_leader_guard_does_not_remove_a_different_leaders_entry() {
+        let (loader, _) = loader(ok_track);
+        let identifier = "https://example.invalid/a.mp3";
+
+        let (sender_a, _) = broadcast::channel::<LoadResult>(1);
+        let (sender_b, _) = broadcast::channel::<LoadResult>(1);
+
+        lock(&loader.in_flight).insert(identifier.to_owned(), sender_a.clone());
+        let stale_guard = LeaderGuard {
+            loader: &loader,
+            identifier,
+            sender: sender_a,
+        };
+
+        // A new leader takes over the same key before the stale guard drops —
+        // exactly the situation `remove_if_still_ours` exists to detect.
+        lock(&loader.in_flight).insert(identifier.to_owned(), sender_b.clone());
+
+        drop(stale_guard);
+
+        assert!(
+            lock(&loader.in_flight)
+                .get(identifier)
+                .is_some_and(|current| current.same_channel(&sender_b)),
+            "a stale leader's guard must not remove a different leader's entry"
+        );
     }
 
     /// A manager whose loader thread blocks until released — lets a test cancel
