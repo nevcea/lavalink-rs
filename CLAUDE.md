@@ -77,11 +77,21 @@ Every commit follows [Conventional Commits v1.0.0](https://www.conventionalcommi
   audio into a real Discord voice channel. See `crates/test-bot/README.md` for setup
   and the event sequence to watch for per command.
 
+## Requirements
+
+- Rust 1.75+ (`rust-version` in the workspace `Cargo.toml`)
+- A C compiler and CMake, to build the vendored `libopus` (pulled in
+  transitively through `songbird`)
+- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) on `PATH`, optional — only needed
+  for the youtube/soundcloud/bandcamp/deezer sources. Detected once at startup
+  (`main.rs`); if it's missing, those sources are disabled rather than failing
+  the boot.
+
 ## Commands
 
 ```sh
 cargo build --workspace
-cargo test --workspace                       # all unit tests (38 across the tree)
+cargo test --workspace                       # all unit tests (299 across the tree)
 cargo test -p lavalink-server config::        # one module, e.g. config tests
 cargo test -p lavalink-server some_test_name  # one test by name substring
 cargo bench -p lavalink-server --bench filter # also: resample, pipeline
@@ -123,6 +133,10 @@ source → decode → resample → filter ──▶ ring ──▶ mixer pulls, 
 - **`engine.rs`** — assembles pump + ring + songbird's `RawAdapter` into one
   pipeline per track; the only surface the player actor calls into, and every
   method on it is non-blocking (flip an atomic, send on a channel, or spawn).
+  Wraps the pump thread's run loop in `catch_unwind`, turning one track's panic
+  into a `Failed` event instead of taking the node down — the reason the
+  workspace `Cargo.toml`'s release profile keeps `panic = "unwind"` rather than
+  the smaller/faster `"abort"`.
 - **`filter.rs`** — the DSP chain, ports of specific lavaplayer/lavadsp
   implementations where coefficients and update-loop shape are part of the
   contract, not just the algorithm. `timescale` is the one filter with no port
@@ -147,11 +161,16 @@ track or offsets the new one).
 
 ### Everything else in `crates/server/src/`
 
-- **`state.rs`** — `AppState`, built once in `main.rs`; `AppState::player` gets-or-
-  spawns a guild's actor, with construction happening outside the session's lock.
+- **`state.rs`** — `AppState`, built once in `main.rs`; `AppState::player`
+  gets-or-spawns a guild's actor via `Session::get_or_create_player`.
 - **`session.rs`** — one registry, one lock, one `Open ↔ Resumable{deadline}` state
   machine per session — replacing the original's two half-safe maps and a resume
-  handshake that can leak an uncancelled timeout.
+  handshake that can leak an uncancelled timeout. Within a session,
+  `Session::get_or_create_player` registers a guild's player and its voice
+  connection as one atomic entry (`GuildPlayer`), not two independently-updated
+  maps — two racing first-time requests for the same guild used to be able to
+  register a player from one and a voice connection built by the other, since
+  each was a separate `entry().or_insert()`.
 - **`sink.rs`** — the outbound WS queue: bounded, two lanes (essential
   events/`ready`, never dropped vs. coalesced `playerUpdate`/`stats` snapshots,
   latest-wins). A client that stops draining essentials gets closed with 1008
