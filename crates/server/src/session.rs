@@ -34,6 +34,12 @@ use crate::voice::VoiceConnection;
 /// The original's default, and what a session gets before any `PATCH /v4/sessions`.
 const DEFAULT_RESUME_TIMEOUT_SECS: u64 = 60;
 
+/// How long [`Session::shutdown`] waits on a single player's destroy before giving
+/// up on it and moving on. `PlayerActor`'s own contract is that its loop never
+/// awaits I/O, so a healthy destroy finishes near-instantly — this exists only to
+/// cap the cost of an actor that never will.
+const PLAYER_DESTROY_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
     Open,
@@ -191,10 +197,17 @@ impl Session {
     /// and a resume-deadline sweep (`ticker::shutdown_session`) — both need every
     /// actor, voice connection and pump thread gone, not just the session's own
     /// bookkeeping removed.
+    ///
+    /// Each player's destroy runs concurrently with the rest and is bounded by
+    /// `PLAYER_DESTROY_TIMEOUT`, so one wedged actor can only ever cost this
+    /// session that much time — not stall its own siblings, and not stall
+    /// `ticker::sweep_tick`'s loop, which calls this once per expired session with
+    /// nothing else bounding how long any single call may run.
     pub async fn shutdown(&self) {
-        for player in self.take_players() {
-            let _ = player.destroy().await;
-        }
+        let destroys = self.take_players().into_iter().map(|player| async move {
+            let _ = tokio::time::timeout(PLAYER_DESTROY_TIMEOUT, player.destroy()).await;
+        });
+        futures_util::future::join_all(destroys).await;
         self.sink.close();
     }
 
@@ -402,7 +415,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
-    use crate::audio::testing::RecordingEngine;
+    use crate::audio::testing::{EngineCall, RecordingEngine};
     use crate::player::PlayerActor;
     use crate::voice::VoiceConnection;
 
@@ -731,5 +744,59 @@ mod tests {
             registry.state(&session.id),
             Some(SessionState::Resumable { .. })
         ));
+    }
+
+    /// The bug this fix targets: `shutdown` used to await each player's
+    /// `destroy()` in sequence with nothing bounding either call, so one wedged
+    /// actor (here, one whose run loop is never spawned, so its command channel
+    /// is never drained) blocked every sibling's destroy too — and, since
+    /// `ticker::sweep_tick` calls this once per expired session with nothing else
+    /// bounding it, would have stalled sweeping for the whole node forever.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_does_not_let_one_wedged_player_block_its_siblings() {
+        let session = Session::new("s".into(), 1, None);
+
+        // A player whose actor loop never runs: `destroy()`'s command send
+        // succeeds (there's room in the channel) but its oneshot reply never
+        // arrives, so it can only ever be recovered by `PLAYER_DESTROY_TIMEOUT`.
+        let wedged_events: crate::player::EventSlot = Arc::new(std::sync::OnceLock::new());
+        let wedged_voice = Arc::new(VoiceConnection::new(1, 1, Arc::clone(&wedged_events)));
+        let (_wedged_actor, wedged_handle) = PlayerActor::new(
+            1,
+            Box::new(RecordingEngine::new()),
+            Arc::new(crate::sink::Sink::new()),
+            Duration::from_secs(10),
+        );
+        session
+            .get_or_create_player(1, || (wedged_handle, wedged_voice))
+            .unwrap();
+
+        // A healthy player alongside it, whose engine is inspected afterward to
+        // confirm its destroy actually completed rather than being starved by
+        // the wedged one.
+        let healthy_engine = RecordingEngine::new();
+        let healthy_events: crate::player::EventSlot = Arc::new(std::sync::OnceLock::new());
+        let healthy_voice = Arc::new(VoiceConnection::new(2, 1, Arc::clone(&healthy_events)));
+        let (healthy_actor, healthy_handle) = PlayerActor::new(
+            2,
+            Box::new(healthy_engine.clone()),
+            Arc::new(crate::sink::Sink::new()),
+            Duration::from_secs(10),
+        );
+        tokio::spawn(healthy_actor.run());
+        session
+            .get_or_create_player(2, || (healthy_handle, healthy_voice))
+            .unwrap();
+
+        let shutdown = tokio::time::timeout(Duration::from_secs(30), session.shutdown()).await;
+        assert!(
+            shutdown.is_ok(),
+            "shutdown must finish within PLAYER_DESTROY_TIMEOUT even with one wedged player, \
+             not hang forever"
+        );
+        assert!(
+            healthy_engine.calls().contains(&EngineCall::Shutdown),
+            "a healthy sibling's destroy must still complete, not be starved by the wedged one"
+        );
     }
 }
