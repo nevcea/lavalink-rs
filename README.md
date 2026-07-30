@@ -22,6 +22,17 @@ parts of the v4 feature set are deliberately not implemented, and why.
 - `crates/test-bot` (`lavalink-test-bot`) — a Discord bot that drives the node
   over its v4 API, for end-to-end testing. See `crates/test-bot/README.md`.
 
+## Features
+
+- REST + WS surface matching Lavalink v4: loading, playing, filters, player
+  updates, session resuming.
+- Sources: `http` and `local` built in; `youtube`, `soundcloud`, `bandcamp`,
+  `deezer` via `yt-dlp` (auto-disabled if `yt-dlp` isn't on `PATH`).
+- Filters: 9 of the 10 v4 filters (volume, equalizer, karaoke, tremolo,
+  vibrato, distortion, rotation, channelMix, lowPass). `timescale` is the one
+  deliberate omission — see `MAINTENANCE.md` for that and everything else
+  the node knowingly doesn't implement.
+
 ## Requirements
 
 - Rust 1.75+
@@ -41,6 +52,14 @@ cargo run -p lavalink-server --release
 ```
 
 See `application.yml.example` for the full set of options.
+
+## Connecting a client
+
+By default the node listens on port `2333` (`server.port`) with REST under
+`/v4/` and WebSocket at `/v4/websocket`, authenticated via the `Authorization`
+header set to `lavalink.server.password` (`youshallnotpass` in the example
+config). This is the same contract as upstream Lavalink v4, so any existing
+v4 client library works against this node unmodified.
 
 ## Development
 
