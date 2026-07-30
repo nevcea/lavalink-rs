@@ -35,9 +35,14 @@ use crate::player::state::{PlayerModel, VoiceConnection};
 use crate::sink::Sink;
 
 /// Bounded so a runaway producer applies backpressure to its caller rather than
-/// growing without limit. REST awaits a slot; a full queue means the actor is
-/// wedged, which the caller turns into 503.
+/// growing without limit. REST awaits a slot for up to [`SEND_TIMEOUT`]; past
+/// that the actor is considered wedged, which the caller turns into 503.
 const COMMAND_CAPACITY: usize = 64;
+
+/// How long [`PlayerHandle::send`] waits for room in a full queue before giving
+/// up. The actor loop never awaits I/O, so a healthy actor drains a full queue
+/// in microseconds — only a wedged one holds it open this long.
+const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How often the actor checks whether the current track has gone quiet.
 const STUCK_CHECK_INTERVAL: Duration = Duration::from_millis(500);
@@ -129,7 +134,16 @@ impl PlayerHandle {
     }
 
     pub async fn send(&self, command: Command) -> Result<(), PlayerGone> {
-        self.commands.send(command).await.map_err(|_| PlayerGone)
+        let command = match self.commands.try_send(command) {
+            Ok(()) => return Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(PlayerGone),
+            Err(mpsc::error::TrySendError::Full(command)) => command,
+        };
+
+        match tokio::time::timeout(SEND_TIMEOUT, self.commands.send(command)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) | Err(_) => Err(PlayerGone),
+        }
     }
 
     /// Non-blocking send, for callers that would rather skip than wait — the global
@@ -1012,6 +1026,32 @@ mod tests {
         harness.handle.snapshot().await.unwrap();
 
         assert_eq!(harness.handle.playing_since_ms(), first);
+    }
+
+    /// A full queue that never drains (a wedged actor) must not hang `send`
+    /// forever — `patch_player` maps `PlayerGone` to 503, which is only
+    /// reachable if `send` itself eventually gives up.
+    #[tokio::test(start_paused = true)]
+    async fn send_reports_the_player_gone_when_a_full_queue_never_drains() {
+        let sink = Arc::new(Sink::new());
+        let engine = RecordingEngine::new();
+        let (_actor, handle) = PlayerActor::new(
+            123,
+            Box::new(engine),
+            sink,
+            Duration::from_secs(10),
+        );
+        // _actor.run() is deliberately never spawned, so nothing ever drains
+        // the queue below — the same "wedged actor" shape as a real stall.
+
+        for _ in 0..COMMAND_CAPACITY {
+            handle.commands.try_send(Command::EmitUpdate).unwrap();
+        }
+
+        let result = tokio::time::timeout(Duration::from_secs(60), handle.send(Command::EmitUpdate))
+            .await
+            .expect("send should give up on its own well before this outer bound");
+        assert_eq!(result, Err(PlayerGone));
     }
 
     #[tokio::test]
