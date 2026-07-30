@@ -79,7 +79,8 @@ impl AppState {
         }
     }
 
-    /// Returns the guild's player, creating and spawning it if there is none.
+    /// Returns the guild's player and its voice connection, creating and spawning
+    /// them if there is none.
     ///
     /// Construction happens inside `build`, which `Session::get_or_create_player`
     /// runs at most once per guild under its own lock — nothing in `build` awaits,
@@ -88,17 +89,27 @@ impl AppState {
     /// caller alongside a voice connection from the other: see
     /// `Session::get_or_create_player`'s docs for what that used to cost.
     ///
+    /// The pair is returned together, not just the handle, so a caller can't
+    /// re-derive the voice connection with a second, independent `session.voice`
+    /// lookup later — doing so would reopen the exact race this pairing exists to
+    /// close, since a session teardown between the two lookups would silently
+    /// return a different (or no) answer the second time.
+    ///
     /// Returns `None` if the session was torn down (resume deadline swept, or an
     /// overflowing sink closed) while this call was reaching the actor build —
     /// see `Session::get_or_create_player`'s docs.
-    pub fn player(&self, session: &Arc<Session>, guild_id: u64) -> Option<PlayerHandle> {
+    pub fn player(
+        &self,
+        session: &Arc<Session>,
+        guild_id: u64,
+    ) -> Option<(PlayerHandle, Arc<VoiceConnection>)> {
         let config = Arc::clone(&self.config);
         let opener = Arc::clone(&self.opener);
         let sink = Arc::clone(&session.sink);
         let user_id = session.user_id;
         let runtime = tokio::runtime::Handle::current();
 
-        let built = session.get_or_create_player(guild_id, move || {
+        session.get_or_create_player(guild_id, move || {
             // The engine and the voice connection both report to an actor that
             // does not exist yet, so they share a slot that `PlayerActor::new`
             // fills in.
@@ -119,9 +130,7 @@ impl AppState {
             tokio::spawn(actor.run());
 
             (handle, voice)
-        });
-
-        built.map(|(handle, _voice)| handle)
+        })
     }
 }
 
@@ -179,8 +188,8 @@ mod tests {
         let state = state();
         let session = state.sessions.open(1, None);
 
-        let first = state.player(&session, 123).unwrap();
-        let second = state.player(&session, 123).unwrap();
+        let (first, _voice) = state.player(&session, 123).unwrap();
+        let (second, _voice) = state.player(&session, 123).unwrap();
         assert_eq!(first.guild_id, second.guild_id);
         assert_eq!(session.players().len(), 1);
     }
@@ -193,5 +202,18 @@ mod tests {
         state.player(&session, 1);
         state.player(&session, 2);
         assert_eq!(session.players().len(), 2);
+    }
+
+    /// The same call that returns the handle also returns its voice connection —
+    /// a second, independent `session.voice()` lookup is exactly the TOCTOU this
+    /// pairing exists to prevent (see `AppState::player`'s doc comment).
+    #[tokio::test]
+    async fn player_returns_its_own_voice_connection_paired() {
+        let state = state();
+        let session = state.sessions.open(1, None);
+
+        let (handle, voice) = state.player(&session, 123).unwrap();
+        assert_eq!(Arc::as_ptr(&voice), Arc::as_ptr(&session.voice(123).unwrap()));
+        assert_eq!(handle.guild_id, 123);
     }
 }
