@@ -268,6 +268,34 @@ mod tests {
         assert_eq!(body["path"], "/v4/sessions/whatever");
     }
 
+    /// `PATCH /v4/sessions/{id}` with a negative `timeout` must echo it back
+    /// unchanged — the original never rejects or clamps it
+    /// (`SessionRestHandler.kt`'s handler is a bare assignment), so a client
+    /// sending `-5` sees `-5` in the same response, not `0`.
+    #[tokio::test]
+    async fn a_negative_timeout_seconds_round_trips_unclamped() {
+        let state = test_state();
+        let session = state.sessions.open(1, None);
+        let session_id = session.id.clone();
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::PATCH)
+                    .uri(format!("/v4/sessions/{session_id}"))
+                    .header(header::AUTHORIZATION, "test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"timeout":-5}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["timeout"], -5);
+    }
+
     /// A JSON body sent with no `Content-Type` header must keep axum's own 415
     /// for that specific case, not the flat 400 every other body rejection
     /// gets here — the same status Spring's default gives it, which is what a

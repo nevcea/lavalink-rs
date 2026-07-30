@@ -21,11 +21,11 @@ pub async fn update(
         session.set_resuming(resuming);
     }
     if let Omissible::Present(timeout) = update.timeout_seconds {
-        session.set_resume_timeout_secs(timeout.max(0) as u64);
+        session.set_resume_timeout_secs(timeout);
     }
 
     Ok(Json(Session {
         resuming: session.resuming(),
-        timeout_seconds: session.resume_timeout_secs() as i64,
+        timeout_seconds: session.resume_timeout_secs(),
     }))
 }

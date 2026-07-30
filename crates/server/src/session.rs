@@ -21,7 +21,7 @@
 //! the connection is established, and until that happens the deadline stands.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,7 @@ use crate::sink::{SendError, Sink};
 use crate::voice::VoiceConnection;
 
 /// The original's default, and what a session gets before any `PATCH /v4/sessions`.
-const DEFAULT_RESUME_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_RESUME_TIMEOUT_SECS: i64 = 60;
 
 /// How long [`Session::shutdown`] waits on a single player's destroy before giving
 /// up on it and moving on. `PlayerActor`'s own contract is that its loop never
@@ -52,7 +52,13 @@ pub struct Session {
     pub client_name: Option<String>,
     pub sink: Arc<Sink>,
     resuming: AtomicBool,
-    resume_timeout_secs: AtomicU64,
+    /// Stored exactly as the client set it — including negative, which the
+    /// original never rejects or clamps (`SessionRestHandler.kt`'s handler is
+    /// a bare assignment). Only [`SessionRegistry::on_disconnect`]'s deadline
+    /// math needs a non-negative value, and clamps at that one use site
+    /// instead, so a negative value still round-trips unchanged through
+    /// `PATCH /v4/sessions/{id}`'s response.
+    resume_timeout_secs: AtomicI64,
     /// One entry per guild: the player and the voice connection its engine was
     /// actually built with, inserted together in a single step (see
     /// [`Session::get_or_create_player`]) rather than as two independent maps.
@@ -98,7 +104,7 @@ impl Session {
             client_name,
             sink: Arc::new(Sink::new()),
             resuming: AtomicBool::new(false),
-            resume_timeout_secs: AtomicU64::new(DEFAULT_RESUME_TIMEOUT_SECS),
+            resume_timeout_secs: AtomicI64::new(DEFAULT_RESUME_TIMEOUT_SECS),
             guilds: Mutex::new(HashMap::new()),
             alive: AtomicBool::new(true),
         }
@@ -112,11 +118,11 @@ impl Session {
         self.resuming.store(resuming, Ordering::Relaxed);
     }
 
-    pub fn resume_timeout_secs(&self) -> u64 {
+    pub fn resume_timeout_secs(&self) -> i64 {
         self.resume_timeout_secs.load(Ordering::Relaxed)
     }
 
-    pub fn set_resume_timeout_secs(&self, seconds: u64) {
+    pub fn set_resume_timeout_secs(&self, seconds: i64) {
         self.resume_timeout_secs.store(seconds, Ordering::Relaxed);
     }
 
@@ -307,7 +313,10 @@ impl SessionRegistry {
         }
 
         if entry.session.resuming() {
-            let timeout = Duration::from_secs(entry.session.resume_timeout_secs());
+            // A negative timeout has no real deadline to give — treated as
+            // already expired (0) rather than panicking `Duration::from_secs`
+            // on a value it can't represent.
+            let timeout = Duration::from_secs(entry.session.resume_timeout_secs().max(0) as u64);
             entry.state = SessionState::Resumable {
                 deadline: now + timeout,
             };
