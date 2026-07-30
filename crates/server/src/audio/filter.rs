@@ -712,11 +712,18 @@ impl RotationFilter {
                 f64::from(SAMPLE_RATE) / (config.rotation_hz * 2.0 * std::f64::consts::PI);
             1.0 / samples_per_cycle
         };
+        // An extreme client-supplied `rotationHz` overflows the multiplication
+        // above to `f64::INFINITY`, and a non-finite step turns `phase.sin()`
+        // into `NaN` forever after — the same class of defect `KaraokeFilter`
+        // guards `filterWidth` against. Falling back to disabled rather than
+        // reproducing the NaN sink: like tremolo's phase wrap, this is not
+        // something a client observes on the wire, only ever a defect.
+        let step = if step.is_finite() { step } else { 0.0 };
 
         Self {
             step,
             phase: 0.0,
-            enabled: config.rotation_hz != 0.0,
+            enabled: step != 0.0,
         }
     }
 }
@@ -1126,6 +1133,29 @@ mod tests {
         assert!(
             channels.iter().all(|c| c.iter().all(|s| s.is_finite())),
             "unclamped negative filterWidth produced non-finite output"
+        );
+    }
+
+    /// Unlike `vibrato`/`tremolo`'s per-sample phase increment, rotation's `step`
+    /// is derived once in `new()` from `rotationHz * 2 * PI`, which overflows to
+    /// `f64::INFINITY` for an extreme `rotationHz` — and `phase.sin()` is `NaN`
+    /// from the first sample on once `phase` itself goes non-finite.
+    #[test]
+    fn rotation_survives_unclamped_rotation_hz() {
+        let mut chain = FilterChain::new(&filters(r#"{"rotation":{"rotationHz":1e308}}"#), 2);
+        let mut channels = stereo(0.5, -0.3, 4800);
+        chain.process(&mut channels);
+        assert!(
+            channels.iter().all(|c| c.iter().all(|s| s.is_finite())),
+            "unclamped positive rotationHz produced non-finite output"
+        );
+
+        let mut chain = FilterChain::new(&filters(r#"{"rotation":{"rotationHz":-1e308}}"#), 2);
+        let mut channels = stereo(0.5, -0.3, 4800);
+        chain.process(&mut channels);
+        assert!(
+            channels.iter().all(|c| c.iter().all(|s| s.is_finite())),
+            "unclamped negative rotationHz produced non-finite output"
         );
     }
 
