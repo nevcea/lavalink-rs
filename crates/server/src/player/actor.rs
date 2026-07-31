@@ -142,12 +142,6 @@ impl PlayerHandle {
     }
 
     pub async fn send(&self, command: Command) -> Result<(), PlayerGone> {
-        let command = match self.commands.try_send(command) {
-            Ok(()) => return Ok(()),
-            Err(mpsc::error::TrySendError::Closed(_)) => return Err(PlayerGone),
-            Err(mpsc::error::TrySendError::Full(command)) => command,
-        };
-
         match tokio::time::timeout(SEND_TIMEOUT, self.commands.send(command)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(_)) | Err(_) => Err(PlayerGone),
