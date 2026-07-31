@@ -328,10 +328,26 @@ impl Read for RingReader {
         // `.max(1)` above), where a single sample can't fit — that's the one case
         // still routed through `leftover`.
         let written = if out.len() >= 4 {
-            for (chunk, sample) in out.chunks_exact_mut(4).zip(buffer.drain(..take)) {
-                chunk.copy_from_slice(&sample.to_le_bytes());
+            // Copied off `as_slices` rather than straight through `drain`: a
+            // `VecDeque`'s drain iterator carries the wraparound check into every
+            // step, so the conversion loop stays scalar however simple its body is.
+            // Over a contiguous `&[f32]` the same `to_le_bytes`-and-write is a shape
+            // the optimiser can widen — on a little-endian target it is a memcpy.
+            // Two segments because the head may sit anywhere in the ring; a ring that
+            // has been playing for any length of time is always split.
+            let (front, back) = buffer.as_slices();
+            let from_front = take.min(front.len());
+            let mut written = 0;
+            for source in [&front[..from_front], &back[..take - from_front]] {
+                for (chunk, sample) in out[written..].chunks_exact_mut(4).zip(source) {
+                    chunk.copy_from_slice(&sample.to_le_bytes());
+                }
+                written += source.len() * 4;
             }
-            take * 4
+            // Drops the samples just copied. `Drain` removes its range on drop, so
+            // this is the removal — nothing is left to iterate.
+            buffer.drain(..take);
+            written
         } else {
             let sample = buffer.pop_front().expect("buffer is non-empty here");
             let bytes = sample.to_le_bytes();
@@ -433,6 +449,42 @@ mod tests {
     }
 
     /// Whole-sample reads are the common case and are never split.
+    /// A read copies out of the deque's two contiguous segments and stitches them
+    /// into the caller's buffer, so the offset arithmetic between the two has to be
+    /// right. A freshly filled ring is one segment and would never exercise the
+    /// seam; a ring that has been playing for any length of time always straddles
+    /// it, so this walks the head all the way around several times.
+    #[test]
+    fn samples_stay_in_order_when_the_buffer_wraps() {
+        let (writer, mut reader, _position) = ring(20);
+        const CHUNK: usize = 500;
+        const PREFILL: usize = 900;
+
+        // A reserve the reader never catches up with, so the head keeps walking
+        // forward instead of meeting the tail and starting over at zero every round
+        // — which is also what a healthy pump keeps the ring in.
+        let mut next = 0usize;
+        let prefill: Vec<f32> = (0..PREFILL).map(|i| i as f32).collect();
+        assert_eq!(writer.try_write(&prefill).0, PREFILL);
+        next += PREFILL;
+
+        let mut wrapped = false;
+        let mut got = Vec::new();
+        for _ in 0..20 {
+            let chunk: Vec<f32> = (next..next + CHUNK).map(|i| i as f32).collect();
+            assert_eq!(writer.try_write(&chunk).0, CHUNK);
+            next += CHUNK;
+            // Checked while the samples are still in the ring: once the head has
+            // moved off zero, `as_slices` reports a non-empty second segment.
+            wrapped |= !lock(&reader.shared.buffer).as_slices().1.is_empty();
+            got.extend(read_samples(&mut reader, CHUNK));
+        }
+
+        assert!(wrapped, "the head never wrapped — the seam was never exercised");
+        let expected: Vec<f32> = (0..got.len()).map(|i| i as f32).collect();
+        assert_eq!(got, expected, "samples came back out of order across the seam");
+    }
+
     #[test]
     fn a_read_of_several_samples_returns_them_whole() {
         let (writer, mut reader, _) = ring(1000);
