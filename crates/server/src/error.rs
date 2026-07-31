@@ -96,9 +96,13 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        // Rendered without a path or trace; the middleware replaces this once
-        // it knows the request, which it does not have access to here.
-        let mut response = (self.status, Json(self.body("", None))).into_response();
+        // Deliberately bodyless. The path is not knowable here, and
+        // [`fill_error_path`] — the outermost layer in `rest::router`, so nothing
+        // reaches a client without passing through it — re-renders every response
+        // carrying this extension once it does know. Rendering a body here as well
+        // would serialize an `ErrorBody` and immediately throw it away on every
+        // error the node returns.
+        let mut response = self.status.into_response();
         response.extensions_mut().insert(self);
         response
     }
@@ -115,13 +119,19 @@ fn wants_trace(query: Option<&str>) -> bool {
         .any(|(key, value)| key == "trace" && value.eq_ignore_ascii_case("true"))
 }
 
-/// Re-renders error responses with the request path filled in.
+/// Renders error responses, with the request path filled in.
+///
+/// [`ApiError`]'s own `IntoResponse` leaves the body empty for this to fill, so this
+/// is where an error response actually gets its JSON — not a second rendering of one.
 pub async fn fill_error_path(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
     let trace_requested = wants_trace(request.uri().query());
-    let response = next.run(request).await;
+    let mut response = next.run(request).await;
 
-    let Some(error) = response.extensions().get::<ApiError>().cloned() else {
+    // Taken out rather than cloned: this is the outermost layer, so nothing after it
+    // reads the extension, and the error owns a `String` that would be copied for no
+    // one on every error response.
+    let Some(error) = response.extensions_mut().remove::<ApiError>() else {
         return response;
     };
     let trace = trace_requested.then(|| error.message.clone());
