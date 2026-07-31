@@ -162,10 +162,11 @@ pub struct RingWriter {
 impl RingWriter {
     /// Appends samples, blocking while the ring is full.
     ///
-    /// Returns `false` once the ring has been closed, which is the pump's signal to
-    /// stop decoding and exit. Built on [`Self::try_write`] and
-    /// [`Self::wait_for_space`] — see those for a caller (the pump's decode loop)
-    /// that needs to do other work between polls instead of blocking outright.
+    /// Test-only. The pump cannot park on a full ring — it has commands to drain —
+    /// so it drives [`Self::try_write`] and [`Self::wait_for_space`] itself
+    /// (`pump::write_interruptibly`). This is the same loop without the interruption,
+    /// which is all a test that just wants the samples in there needs.
+    #[cfg(test)]
     pub fn write(&self, mut samples: &[f32]) -> bool {
         while !samples.is_empty() {
             let (written, closed) = self.try_write(samples);

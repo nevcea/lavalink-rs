@@ -44,6 +44,21 @@
 //! recurrence was for. Against a filter chain that already costs well under 1% of
 //! one core per player (see `crates/server/benches/filter.rs`), this is the worst
 //! risk-per-microsecond change available here, so it stays as `sin`/`cos`.
+//!
+//! # Not verified: end-to-end equalizer output against the original
+//!
+//! The constants are not in question — `COEFFICIENTS_48000`, the 0.25/4.0 pair and
+//! both volume curves have been diffed against lavaplayer's `Equalizer.java` and
+//! `PcmVolumeProcessor.java` and lavadsp's converters, and that diff found two wrong
+//! digits and a missing output stage. What is still missing is confirmation over a
+//! real buffer, including the accumulated `f32` error a constant-by-constant reading
+//! cannot show.
+//!
+//! It stays missing because the corpus has to come from the original node — vectors
+//! written here would only test this code against itself. To capture it: run a real
+//! Lavalink v4 node with a single `equalizer` filter at known band gains over a
+//! fixed-content local file, and capture its RTP/Opus output — or, more directly,
+//! patch lavaplayer's `Equalizer.java` to dump its pre- and post-filter PCM buffers.
 
 use lavalink_protocol::filters::{
     Band, ChannelMix, Distortion, Filters, Karaoke, LowPass, Rotation, Tremolo, Vibrato,
@@ -164,10 +179,6 @@ impl FilterChain {
         }
 
         Self { stages }
-    }
-
-    pub fn empty(channels: usize) -> Self {
-        Self::new(&Filters::default(), channels)
     }
 
     /// Whether any filter would actually change the audio.
@@ -792,7 +803,7 @@ mod tests {
 
     #[test]
     fn an_empty_chain_is_disabled() {
-        assert!(!FilterChain::empty(2).is_enabled());
+        assert!(!FilterChain::new(&Filters::default(), 2).is_enabled());
     }
 
     #[test]
@@ -1359,27 +1370,4 @@ mod tests {
         assert!(!chain.is_enabled());
     }
 
-    /// Feeds a fixed PCM input through the equalizer and compares against output
-    /// captured from the original server.
-    ///
-    /// The constants themselves are no longer in question: `COEFFICIENTS_48000`, the
-    /// 0.25/4.0 pair and both volume curves have been diffed against lavaplayer's
-    /// `Equalizer.java` and `PcmVolumeProcessor.java` and lavadsp's converters, and
-    /// that diff found two wrong digits and a missing output stage. What this test
-    /// would add is end-to-end confirmation over a real buffer, including the
-    /// accumulated `f32` error that a constant-by-constant reading cannot show.
-    ///
-    /// Ignored until the vectors are captured — the corpus has to come from running
-    /// the original node, since numbers written here would only test this code
-    /// against itself. To capture it: run a real Lavalink v4 node with a single
-    /// `equalizer` filter set to known band gains, feed it a fixed-content local
-    /// file as the source, capture its RTP/Opus output (or, more directly, patch
-    /// lavaplayer's `Equalizer.java` to dump its pre-filter and post-filter PCM
-    /// buffers to `input.pcm` / `output.pcm`), and load both here with this
-    /// module's WAV helpers.
-    #[test]
-    #[ignore = "needs golden PCM captured from the original server"]
-    fn equalizer_matches_golden_vectors() {
-        unimplemented!("capture input.pcm / output.pcm from the original node first");
-    }
 }

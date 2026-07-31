@@ -58,15 +58,6 @@ fn bench_resample(c: &mut Criterion) {
     // the pass-through cost rather than any interpolation.
     bench_into(&mut group, "48000_stereo_passthrough", 48_000, CHANNELS);
 
-    // The allocating wrapper, on the one input that matters, purely so a regression
-    // in it is still visible — nothing on the playback path calls this.
-    group.bench_function(BenchmarkId::new("convert_allocating", "44100_stereo_to_48000"), |b| {
-        let mut resampler = Resampler::new(44_100, CHANNELS);
-        let input = interleaved(CHANNELS, FRAMES);
-        resampler.reset();
-        b.iter(|| black_box(resampler.process(black_box(&input))));
-    });
-
     group.finish();
 }
 

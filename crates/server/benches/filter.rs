@@ -60,7 +60,7 @@ fn bench_filter_chain(c: &mut Criterion) {
     group.throughput(Throughput::Elements(FRAMES as u64));
 
     group.bench_function(BenchmarkId::new("process", "no_filters"), |b| {
-        let mut chain = FilterChain::empty(CHANNELS);
+        let mut chain = FilterChain::new(&Filters::default(), CHANNELS);
         let source = planar(FRAMES);
         b.iter_batched(
             || source.clone(),

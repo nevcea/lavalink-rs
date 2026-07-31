@@ -61,8 +61,10 @@ impl Resampler {
     }
 
     /// Converts one buffer of interleaved source samples, allocating a fresh `Vec`
-    /// for the result. A thin wrapper over [`Self::process_into`] for callers (tests,
-    /// the bench) that don't need to reuse a buffer across calls.
+    /// for the result. A thin wrapper over [`Self::process_into`] that exists only so
+    /// the tests below can read a return value; nothing on the playback path allocates
+    /// per buffer, so this must not grow a production caller.
+    #[cfg(test)]
     pub fn process(&mut self, input: &[f32]) -> Vec<f32> {
         let mut out = Vec::new();
         self.process_into(input, &mut out);
