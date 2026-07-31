@@ -115,19 +115,24 @@ impl PlayerModel {
         self.last_progress = Some(now);
     }
 
-    /// Clears the current track. Returns whether there was one to clear, which is
-    /// also whether a `TrackEndEvent` is owed.
-    pub fn stop(&mut self) -> bool {
-        let had_track = self.track.is_some();
-        self.track = None;
+    /// Clears the current track and hands it back, `None` if there was none — which
+    /// is also whether a `TrackEndEvent` is owed.
+    ///
+    /// Returns the track rather than a bool because the caller needs it for that
+    /// event: taking it out here means the common path (stopping a player with no
+    /// track) moves nothing, where cloning `track` before the call cloned a whole
+    /// [`Track`] — eight strings and two JSON objects — on every stop, including the
+    /// ones that turn out to owe no event at all.
+    pub fn stop(&mut self) -> Option<Track> {
+        let track = self.track.take();
         self.end_time_ms = None;
-        self.playback = if had_track {
+        self.playback = if track.is_some() {
             Playback::Stopped
         } else {
             Playback::Idle
         };
         self.last_progress = None;
-        had_track
+        track
     }
 
     /// Applies `paused`. A no-op unless a track is loaded, matching the original,
@@ -229,7 +234,7 @@ mod tests {
     #[test]
     fn stopping_an_idle_player_owes_no_event() {
         let mut model = model();
-        assert!(!model.stop());
+        assert!(model.stop().is_none());
         assert_eq!(model.playback, Playback::Idle);
     }
 
@@ -237,7 +242,8 @@ mod tests {
     fn stopping_a_playing_player_owes_an_event_and_lands_in_stopped() {
         let mut model = model();
         model.play(track(), false, Instant::now());
-        assert!(model.stop());
+        // Handed back, not just signalled: the caller emits `TrackEndEvent` with it.
+        assert!(model.stop().is_some());
         assert_eq!(model.playback, Playback::Stopped);
         assert!(model.track.is_none());
     }

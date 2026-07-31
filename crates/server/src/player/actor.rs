@@ -548,13 +548,12 @@ impl PlayerActor {
 
     /// Ends the current track, emitting `TrackEndEvent` only if there was one.
     fn stop_track(&mut self, reason: TrackEndReason) {
-        let track = self.model.track.clone();
         self.engine.stop();
-        let had_track = self.model.stop();
+        let track = self.model.stop();
         self.position_ms.store(0, Ordering::Relaxed);
         self.stuck_reported = false;
 
-        if let (true, Some(track)) = (had_track, track) {
+        if let Some(track) = track {
             self.emit(EmittedEvent::TrackEnd {
                 guild_id: self.guild_id_string(),
                 track: Box::new(track),
