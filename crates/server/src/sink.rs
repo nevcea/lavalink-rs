@@ -196,7 +196,8 @@ impl Sink {
 mod tests {
     use super::*;
     use lavalink_protocol::message::{EmittedEvent, Message};
-    use lavalink_protocol::player::{PlayerState, Track, TrackInfo};
+    use crate::testing::track;
+    use lavalink_protocol::player::PlayerState;
 
     fn update(guild: &str, position: i64) -> Message {
         Message::PlayerUpdate {
@@ -213,22 +214,7 @@ mod tests {
     fn event(guild: &str) -> Message {
         Message::Event(EmittedEvent::TrackStart {
             guild_id: guild.to_owned(),
-            track: Box::new(Track::new(
-                "e".into(),
-                TrackInfo {
-                    identifier: "i".into(),
-                    is_seekable: true,
-                    author: "a".into(),
-                    length: 1,
-                    is_stream: false,
-                    position: 0,
-                    title: "t".into(),
-                    uri: None,
-                    source_name: "http".into(),
-                    artwork_url: None,
-                    isrc: None,
-                },
-            )),
+            track: Box::new(track("t")),
         })
     }
 

@@ -41,6 +41,8 @@ pub const CHANNELS: usize = 2;
 pub const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize / 50) * CHANNELS;
 
 /// How long a producer waits for space before re-checking whether it was stopped.
+/// Only [`RingWriter::write`] uses it; the pump polls on its own `COMMAND_POLL`.
+#[cfg(test)]
 const PRODUCER_POLL: Duration = Duration::from_millis(100);
 
 /// Frames sent and frames nulled, for `/v4/stats`' `frameStats`.

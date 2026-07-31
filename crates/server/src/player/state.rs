@@ -185,26 +185,7 @@ impl PlayerModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lavalink_protocol::player::TrackInfo;
-
-    fn track() -> Track {
-        Track::new(
-            "encoded".into(),
-            TrackInfo {
-                identifier: "id".into(),
-                is_seekable: true,
-                author: "author".into(),
-                length: 10_000,
-                is_stream: false,
-                position: 0,
-                title: "title".into(),
-                uri: None,
-                source_name: "http".into(),
-                artwork_url: None,
-                isrc: None,
-            },
-        )
-    }
+    use crate::testing::track;
 
     fn model() -> PlayerModel {
         PlayerModel::new(123)
@@ -233,7 +214,7 @@ mod tests {
     #[test]
     fn stopping_a_playing_player_owes_an_event_and_lands_in_stopped() {
         let mut model = model();
-        model.play(track(), false, Instant::now());
+        model.play(track("title"), false, Instant::now());
         // Handed back, not just signalled: the caller emits `TrackEndEvent` with it.
         assert!(model.stop().is_some());
         assert_eq!(model.playback, Playback::Stopped);
@@ -251,7 +232,7 @@ mod tests {
     fn pause_and_resume_round_trip() {
         let mut model = model();
         let now = Instant::now();
-        model.play(track(), false, now);
+        model.play(track("title"), false, now);
 
         model.set_paused(true, now);
         assert_eq!(model.playback, Playback::Paused);
@@ -266,7 +247,7 @@ mod tests {
     #[test]
     fn playing_while_disconnected_is_legal() {
         let mut model = model();
-        model.play(track(), false, Instant::now());
+        model.play(track("title"), false, Instant::now());
         model.connection = VoiceConnection::Disconnected;
 
         assert_eq!(model.playback, Playback::Playing);
@@ -297,7 +278,7 @@ mod tests {
     #[test]
     fn the_reported_track_carries_the_live_position() {
         let mut model = model();
-        model.play(track(), false, Instant::now());
+        model.play(track("title"), false, Instant::now());
         let snapshot = model.snapshot(4_200, 1);
         assert_eq!(snapshot.track.unwrap().info.position, 4_200);
     }
@@ -315,8 +296,8 @@ mod tests {
     fn replacing_a_track_keeps_the_player_loaded() {
         let mut model = model();
         let now = Instant::now();
-        model.play(track(), false, now);
-        model.play(track(), true, now);
+        model.play(track("title"), false, now);
+        model.play(track("title"), true, now);
         assert_eq!(model.playback, Playback::Paused);
         assert!(model.track.is_some());
     }

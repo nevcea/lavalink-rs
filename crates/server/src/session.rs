@@ -617,8 +617,8 @@ mod tests {
     /// silently until its deadline, however far off that still is.
     #[test]
     fn an_overflowing_resumable_session_is_swept_before_its_deadline() {
+        use crate::testing::track;
         use lavalink_protocol::message::{EmittedEvent, Message};
-        use lavalink_protocol::player::{Track, TrackInfo};
 
         let registry = SessionRegistry::new();
         let session = registry.open(1, None);
@@ -629,22 +629,7 @@ mod tests {
         let event = || {
             Message::Event(EmittedEvent::TrackStart {
                 guild_id: "1".into(),
-                track: Box::new(Track::new(
-                    "e".into(),
-                    TrackInfo {
-                        identifier: "i".into(),
-                        is_seekable: true,
-                        author: "a".into(),
-                        length: 1,
-                        is_stream: false,
-                        position: 0,
-                        title: "t".into(),
-                        uri: None,
-                        source_name: "http".into(),
-                        artwork_url: None,
-                        isrc: None,
-                    },
-                )),
+                track: Box::new(track("t")),
             })
         };
         while !session.sink.is_overflowing() {
@@ -666,8 +651,8 @@ mod tests {
     /// itself rather than trust the scan's now-stale verdict.
     #[test]
     fn a_session_resumed_between_scan_and_removal_is_not_torn_down() {
+        use crate::testing::track;
         use lavalink_protocol::message::{EmittedEvent, Message};
-        use lavalink_protocol::player::{Track, TrackInfo};
 
         let registry = SessionRegistry::new();
         let session = registry.open(1, None);
@@ -678,22 +663,7 @@ mod tests {
         let event = || {
             Message::Event(EmittedEvent::TrackStart {
                 guild_id: "1".into(),
-                track: Box::new(Track::new(
-                    "e".into(),
-                    TrackInfo {
-                        identifier: "i".into(),
-                        is_seekable: true,
-                        author: "a".into(),
-                        length: 1,
-                        is_stream: false,
-                        position: 0,
-                        title: "t".into(),
-                        uri: None,
-                        source_name: "http".into(),
-                        artwork_url: None,
-                        isrc: None,
-                    },
-                )),
+                track: Box::new(track("t")),
             })
         };
         while !session.sink.is_overflowing() {

@@ -55,6 +55,39 @@ pub mod ws;
 pub use config::Config;
 pub use state::AppState;
 
+/// Fixtures shared across this crate's test modules.
+///
+/// Not to be confused with [`audio::testing`], which holds fake collaborators for
+/// the player actor. This is only for values that several unrelated modules need to
+/// construct and none of them care about.
+#[cfg(test)]
+pub mod testing {
+    use lavalink_protocol::player::{Track, TrackInfo};
+
+    /// A fully-populated track, for tests that need one but do not care what is in
+    /// it. `title` is the one field callers routinely tell apart, so it is the only
+    /// parameter; anything asserting on the rest should build its own literal and
+    /// say why.
+    pub fn track(title: &str) -> Track {
+        Track::new(
+            "encoded".into(),
+            TrackInfo {
+                identifier: "id".into(),
+                is_seekable: true,
+                author: "author".into(),
+                length: 10_000,
+                is_stream: false,
+                position: 0,
+                title: title.into(),
+                uri: None,
+                source_name: "http".into(),
+                artwork_url: None,
+                isrc: None,
+            },
+        )
+    }
+}
+
 /// Locks a mutex, ignoring poisoning.
 ///
 /// Every mutex in this crate guards a plain container with no invariant a panic

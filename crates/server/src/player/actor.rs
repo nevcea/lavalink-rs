@@ -611,26 +611,7 @@ pub fn now_epoch_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::audio::testing::{EngineCall, RecordingEngine};
-    use lavalink_protocol::player::TrackInfo;
-
-    fn track(title: &str) -> Track {
-        Track::new(
-            "encoded".into(),
-            TrackInfo {
-                identifier: "id".into(),
-                is_seekable: true,
-                author: "author".into(),
-                length: 10_000,
-                is_stream: false,
-                position: 0,
-                title: title.into(),
-                uri: None,
-                source_name: "http".into(),
-                artwork_url: None,
-                isrc: None,
-            },
-        )
-    }
+    use crate::testing::track;
 
     struct Harness {
         handle: PlayerHandle,

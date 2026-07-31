@@ -123,8 +123,8 @@ struct State {
 const MAX_CONSECUTIVE_ERRORS: u32 = 32;
 
 /// How long `write_interruptibly` waits for ring space before checking for new
-/// commands again. Matches `ring::PRODUCER_POLL`'s cadence — this is the same
-/// wait, just interleaved with a command check instead of run in isolation.
+/// commands again. Long enough that an idle wait costs nothing, short enough that a
+/// pause or a seek is not sitting behind a full ring for a noticeable time.
 const COMMAND_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
