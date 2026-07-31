@@ -276,17 +276,24 @@ pub fn player_volume_multiplier(volume: i32) -> f32 {
 
 #[derive(Debug)]
 struct Equalizer {
-    /// Indexed by band; 0.0 means the band is flat.
-    gains: [f32; EQUALIZER_BAND_COUNT],
-    /// Indices into `gains`/`COEFFICIENTS_48000` with a non-zero gain, computed
-    /// once at construction. `process` walks only these: a zero-gain band's
-    /// biquad output is multiplied by `0.0` regardless of its internal state, and
-    /// gains never change after construction (the chain is rebuilt wholesale on
-    /// any filter change — `pump.rs`'s `PumpCommand::SetFilters`), so skipping a flat band
-    /// entirely is bit-exact, not an approximation.
-    active: Vec<usize>,
-    /// Per channel, per band: `[x0, x1, x2, y0, y1, y2]`.
-    history: Vec<[[f32; 6]; EQUALIZER_BAND_COUNT]>,
+    /// One entry per band with a non-zero gain, in ascending band order: that band's
+    /// coefficients and its gain, both copied out at construction.
+    ///
+    /// Flat bands are left out entirely. A zero-gain band's biquad output is
+    /// multiplied by `0.0` regardless of its internal state, and gains never change
+    /// after construction (the chain is rebuilt wholesale on any filter change —
+    /// `pump.rs`'s `PumpCommand::SetFilters`), so dropping one is bit-exact rather
+    /// than an approximation.
+    ///
+    /// Carrying the coefficients and the gain here, rather than band indices into
+    /// `COEFFICIENTS_48000` and a `[f32; 15]`, is what makes the inner loop
+    /// sequential: `process` runs per sample per band, so a layout that costs three
+    /// scattered indexed loads per band is paying for them 48 000 times a second per
+    /// channel.
+    active: Vec<(Coefficients, f32)>,
+    /// Per channel, one `[x0, x1, x2, y0, y1, y2]` per entry of `active` — parallel
+    /// to it, so the two iterate together.
+    history: Vec<Vec<[f32; 6]>>,
 }
 
 impl Equalizer {
@@ -310,14 +317,14 @@ impl Equalizer {
             }
         }
 
-        let active = (0..EQUALIZER_BAND_COUNT)
+        let active: Vec<(Coefficients, f32)> = (0..EQUALIZER_BAND_COUNT)
             .filter(|&band| gains[band] != 0.0)
+            .map(|band| (COEFFICIENTS_48000[band], gains[band]))
             .collect();
 
         Self {
-            gains,
+            history: vec![vec![[0.0; 6]; active.len()]; channels],
             active,
-            history: vec![[[0.0; 6]; EQUALIZER_BAND_COUNT]; channels],
         }
     }
 }
@@ -349,16 +356,13 @@ impl AudioFilter for Equalizer {
                 // does not clip; lavaplayer uses the same 0.25 factor.
                 let mut result = current * 0.25;
 
-                for &band in &self.active {
-                    let coefficients = &COEFFICIENTS_48000[band];
-                    let state = &mut history[band];
-
+                for ((coefficients, gain), state) in self.active.iter().zip(history.iter_mut()) {
                     state[X0] = current;
                     state[Y0] = coefficients.alpha * (state[X0] - state[X2])
                         + coefficients.gamma * state[Y1]
                         - coefficients.beta * state[Y2];
 
-                    result += state[Y0] * self.gains[band];
+                    result += state[Y0] * gain;
 
                     state[X2] = state[X1];
                     state[X1] = state[X0];
@@ -915,8 +919,8 @@ mod tests {
             ],
             1,
         );
-        assert_eq!(equalizer.gains[0], 99.0);
-        assert_eq!(equalizer.gains[1], -99.0);
+        let gains: Vec<f32> = equalizer.active.iter().map(|&(_, gain)| gain).collect();
+        assert_eq!(gains, vec![99.0, -99.0]);
     }
 
     #[test]
