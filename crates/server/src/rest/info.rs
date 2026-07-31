@@ -20,7 +20,6 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
 /// [`StatsData`] enforces that by construction.
 pub async fn stats(State(state): State<AppState>) -> Json<StatsData> {
     let sessions = state.sessions.all();
-    let players = crate::stats::count_players(&sessions);
-    let playing = crate::stats::count_playing(&sessions);
+    let (players, playing) = crate::stats::count(&crate::stats::rosters(&sessions));
     Json(state.stats.sample(players, playing))
 }

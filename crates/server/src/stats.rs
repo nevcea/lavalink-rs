@@ -11,6 +11,7 @@ use std::time::Instant;
 use lavalink_protocol::stats::{Cpu, FrameStats, Memory, StatsData};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+use crate::player::PlayerHandle;
 use crate::session::Session;
 
 /// Frames expected in one stats tick from a continuously-playing player: 50 fps
@@ -139,26 +140,32 @@ impl StatsCollector {
     }
 }
 
-/// Total players across the given sessions.
+/// Every session's player roster, in the same order as `sessions`.
 ///
-/// Shared by the stats tick and `GET /v4/stats` so the two cannot disagree about
-/// what the node is running.
-pub fn count_players(sessions: &[Arc<Session>]) -> i32 {
-    sessions
-        .iter()
-        .map(|session| session.players().len() as i32)
-        .sum()
+/// Taking a roster is not free — [`Session::players`] locks that session's guild map
+/// and clones a handle per player — so callers that need more than one number out of
+/// the same set of players collect once and pass the result around. The stats tick
+/// needs three (`players`, `playingPlayers`, and each session's frame samples) and
+/// used to walk for each of them.
+pub fn rosters(sessions: &[Arc<Session>]) -> Vec<Vec<PlayerHandle>> {
+    sessions.iter().map(|session| session.players()).collect()
 }
 
-/// Total players actually playing, across every session on the node — the
-/// original's `context.playingPlayers.size`, which filters on `player.isPlaying`
-/// with no minute-window gate (unlike `frameStats`' usability check).
-pub fn count_playing(sessions: &[Arc<Session>]) -> i32 {
-    sessions
+/// Total players, and of those the ones actually playing.
+///
+/// `playingPlayers` is the original's `context.playingPlayers.size`, which filters on
+/// `player.isPlaying` with no minute-window gate (unlike `frameStats`' usability
+/// check). Both counts live here, and both callers ([`crate::ticker`]'s stats tick and
+/// `GET /v4/stats`) go through it, so the two cannot disagree about what the node is
+/// running.
+pub fn count(rosters: &[Vec<PlayerHandle>]) -> (i32, i32) {
+    let players = rosters.iter().map(Vec::len).sum::<usize>() as i32;
+    let playing = rosters
         .iter()
-        .flat_map(|session| session.players())
+        .flatten()
         .filter(|player| player.playing_since_ms() != 0)
-        .count() as i32
+        .count() as i32;
+    (players, playing)
 }
 
 #[cfg(test)]
@@ -168,7 +175,7 @@ mod tests {
 
     #[test]
     fn counting_no_sessions_reports_no_players() {
-        assert_eq!(count_players(&[]), 0);
+        assert_eq!(count(&[]), (0, 0));
     }
 
     #[test]
@@ -177,7 +184,7 @@ mod tests {
         let sessions = vec![registry.open(1, None), registry.open(2, None)];
 
         // A session with no players still counts as a session, not as a player.
-        assert_eq!(count_players(&sessions), 0);
+        assert_eq!(count(&rosters(&sessions)), (0, 0));
     }
 
     #[test]
