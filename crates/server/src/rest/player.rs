@@ -91,7 +91,7 @@ pub async fn patch_player(
     let track_fields = resolve_track_fields(&update)?;
 
     if let Omissible::Present(filters) = &update.filters {
-        let invalid = filters.validate(&state.config.disabled_filters());
+        let invalid = filters.validate(&state.disabled_filters);
         if !invalid.is_empty() {
             return Err(ApiError::bad_request(format!(
                 "Following filters are disabled in the config: {}",

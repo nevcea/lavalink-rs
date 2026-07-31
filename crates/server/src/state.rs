@@ -37,6 +37,10 @@ pub struct AppState {
     pub info: Arc<Info>,
     /// Opens byte streams at playback time. Shared by every player.
     pub opener: Arc<StreamOpener>,
+    /// Filter names a `PATCH player` is rejected for naming. Fixed at startup, and
+    /// the complement of `info.filters` — computed here once so the two cannot
+    /// disagree, and so a request carrying filters does not rebuild the list.
+    pub disabled_filters: Arc<[String]>,
 }
 
 impl AppState {
@@ -70,6 +74,7 @@ impl AppState {
         };
 
         Self {
+            disabled_filters: config.disabled_filters().into(),
             config,
             sessions: Arc::new(SessionRegistry::new()),
             loader,
