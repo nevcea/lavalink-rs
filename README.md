@@ -61,17 +61,6 @@ header set to `lavalink.server.password` (`youshallnotpass` in the example
 config). This is the same contract as upstream Lavalink v4, so any existing
 v4 client library works against this node unmodified.
 
-## Development
-
-`dev` is the sole branch — it's also the default branch on GitHub. Commits
-follow [Conventional Commits](https://www.conventionalcommits.org/ko/v1.0.0/).
-See `CLAUDE.md` for the full workflow.
-
-```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets
-```
-
 ## License
 
 MIT, see `LICENSE.md`.
