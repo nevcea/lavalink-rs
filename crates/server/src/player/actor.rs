@@ -219,6 +219,10 @@ pub struct PlayerActor {
     /// Set while a `TrackStuckEvent` has been emitted for the current track, so we
     /// report it once rather than every tick.
     stuck_reported: bool,
+    /// `guild_id` as the wire wants it. Every event and every `playerUpdate` carries
+    /// it as a string and the value never changes, so it is formatted once here
+    /// rather than on each emit.
+    guild_id_str: String,
 }
 
 impl PlayerActor {
@@ -266,6 +270,7 @@ impl PlayerActor {
             playing_since_ms,
             stuck_threshold,
             stuck_reported: false,
+            guild_id_str: guild_id.to_string(),
         };
         (actor, handle)
     }
@@ -594,7 +599,7 @@ impl PlayerActor {
     }
 
     fn guild_id_string(&self) -> String {
-        self.model.guild_id.to_string()
+        self.guild_id_str.clone()
     }
 }
 

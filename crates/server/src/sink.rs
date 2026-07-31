@@ -117,8 +117,10 @@ impl Sink {
         if let Some(message) = inner.essential.pop_front() {
             return Some(message);
         }
-        let key = inner.snapshots.keys().next().cloned()?;
-        inner.snapshots.remove(&key)
+        // `pop_first`, not `keys().next().cloned()` then `remove`: the latter cloned
+        // the key `String` and searched the map twice to take the entry it had just
+        // found. Same entry either way — both take the first in `BTreeMap` order.
+        inner.snapshots.pop_first().map(|(_, message)| message)
     }
 
     /// Waits until [`Self::try_recv`] may return something. Cancellation-safe.
