@@ -25,16 +25,26 @@ pub struct Resampler {
     source_channels: usize,
     /// Fractional read position within the source stream, in frames.
     cursor: f64,
-    /// The tail of the previous buffer, retained here so an upsampling call can
-    /// interpolate across block boundaries. Also doubles as the working buffer for
-    /// the call in progress: `process_into` appends the new buffer's frames onto
-    /// the retained tail, reads from the combined slice, then drains the consumed
-    /// prefix back down to the new tail — no allocation once warmed up.
-    history: Vec<[f32; CHANNELS]>,
-    /// Scratch space for `fill_stereo_frames`, reused across calls for the same
-    /// reason.
+    /// The last frames of the previous buffer, so an upsampling call can interpolate
+    /// across a block boundary instead of guessing at the edge. Interpolation reads
+    /// one frame behind the cursor and two ahead, so three is all that is ever
+    /// needed, and a fixed array says so — this used to be a `Vec` that the whole
+    /// decoded packet was appended onto and then drained back down to three frames,
+    /// which cost a full-buffer copy per packet to carry three frames across.
+    prologue: [[f32; CHANNELS]; PROLOGUE_FRAMES],
+    /// How much of `prologue` is live. Below `PROLOGUE_FRAMES` only at the start of a
+    /// stream and after a [`Resampler::reset`].
+    prologue_len: usize,
+    /// The working buffer: [`Resampler::fill_stereo_frames`] writes the live
+    /// prologue followed by this call's converted frames, and the interpolation
+    /// loop reads straight out of it. Reused across calls, so a warmed-up pump
+    /// allocates nothing here.
     frames: Vec<[f32; CHANNELS]>,
 }
+
+/// Frames carried from one buffer to the next: one for the interpolator's left-hand
+/// neighbour, two for the right-hand pair it stops short of.
+const PROLOGUE_FRAMES: usize = 3;
 
 impl Resampler {
     pub fn new(source_rate: u32, source_channels: usize) -> Self {
@@ -42,7 +52,8 @@ impl Resampler {
             source_rate: source_rate.max(1),
             source_channels: source_channels.max(1),
             cursor: 0.0,
-            history: Vec::new(),
+            prologue: [[0.0; CHANNELS]; PROLOGUE_FRAMES],
+            prologue_len: 0,
             frames: Vec::new(),
         }
     }
@@ -57,7 +68,7 @@ impl Resampler {
     /// tail is from somewhere else in the track entirely.
     pub fn reset(&mut self) {
         self.cursor = 0.0;
-        self.history.clear();
+        self.prologue_len = 0;
     }
 
     /// Converts one buffer of interleaved source samples, allocating a fresh `Vec`
@@ -84,28 +95,31 @@ impl Resampler {
         // planar round-trip even when there was nothing to convert.
         if self.is_passthrough() {
             self.cursor = 0.0;
-            self.history.clear();
+            self.prologue_len = 0;
             let usable = input.len() - input.len() % CHANNELS;
             out.extend_from_slice(&input[..usable]);
             return;
         }
 
-        self.fill_stereo_frames(input);
-        if self.frames.is_empty() {
-            return;
-        }
-
+        // Channel conversion only: every frame is emitted as-is, so nothing is
+        // interpolated and nothing has to be carried across the boundary.
         if self.source_rate == SAMPLE_RATE {
+            self.fill_stereo_frames(input, 0);
             self.cursor = 0.0;
-            self.history.clear();
+            self.prologue_len = 0;
             out.extend(self.frames.iter().flatten());
             return;
         }
 
-        // Three frames of history plus this buffer; interpolation reads one behind
-        // and two ahead of the cursor.
-        self.history.append(&mut self.frames);
-        let source = &self.history;
+        // The carried prologue followed by this buffer, written in one pass so the
+        // interpolation below can read a single contiguous slice.
+        self.fill_stereo_frames(input, self.prologue_len);
+        if self.frames.len() <= self.prologue_len {
+            // No new frames. Leave the prologue and the cursor exactly as they were,
+            // so the next call with real input picks up where this one would have.
+            return;
+        }
+        let source = &self.frames;
 
         let step = f64::from(self.source_rate) / f64::from(SAMPLE_RATE);
         // `self.cursor` was already rebased onto the retained history at the end of
@@ -162,18 +176,21 @@ impl Resampler {
             cursor += step;
         }
 
-        // Keep enough tail for the next call, and re-express the cursor relative to
-        // it so no frame is played twice or skipped.
-        let keep = 3.min(self.history.len());
-        let dropped = self.history.len() - keep;
-        self.history.drain(..dropped);
+        // Carry the tail into the next call, and re-express the cursor relative to it
+        // so no frame is played twice or skipped.
+        let keep = PROLOGUE_FRAMES.min(self.frames.len());
+        let dropped = self.frames.len() - keep;
+        self.prologue[..keep].copy_from_slice(&self.frames[dropped..]);
+        self.prologue_len = keep;
         self.cursor = cursor - dropped as f64;
     }
 
-    /// Interleaved source channels to stereo frames, written into `self.frames`.
-    fn fill_stereo_frames(&mut self, input: &[f32]) {
+    /// Writes the first `prologue` frames of [`Self::prologue`] followed by `input`
+    /// converted to stereo frames, into `self.frames`.
+    fn fill_stereo_frames(&mut self, input: &[f32], prologue: usize) {
         let channels = self.source_channels;
         self.frames.clear();
+        self.frames.extend_from_slice(&self.prologue[..prologue]);
         self.frames
             .extend(input.chunks_exact(channels).map(|frame| match channels {
                 // Mono is duplicated rather than panned, matching every other player.
@@ -270,7 +287,7 @@ mod tests {
         let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS);
         resampler.process(&[0.5, -0.5, 0.25, -0.25]);
         assert!(resampler.frames.is_empty(), "fill_stereo_frames should not have run");
-        assert!(resampler.history.is_empty(), "the interpolation history should stay empty");
+        assert_eq!(resampler.prologue_len, 0, "no frame should have been carried");
     }
 
     /// A stray trailing sample (an odd-length buffer, which should not happen for
