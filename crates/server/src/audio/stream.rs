@@ -179,6 +179,7 @@ impl StreamOpener {
             self.proxy.clone(),
             self.connect_timeout,
             self.read_timeout,
+            MAX_REQUEST_DURATION,
             interrupt,
         )?))
     }
@@ -335,35 +336,17 @@ impl HttpMediaSource {
             proxy,
             CONNECT_TIMEOUT,
             READ_TIMEOUT,
+            MAX_REQUEST_DURATION,
             Arc::new(AtomicBool::new(false)),
         )
     }
 
     /// `connect_timeout` is `timeouts.connectTimeoutMs`; `read_timeout` is
     /// `timeouts.socketTimeoutMs` — an idle-read stall threshold (Apache's
-    /// `SO_TIMEOUT`), not an overall request timeout.
+    /// `SO_TIMEOUT`), not an overall request timeout. `request_duration` is
+    /// `MAX_REQUEST_DURATION` in production; only tests exercising it directly
+    /// pass anything else.
     fn open_with_timeouts(
-        url: &str,
-        user_agent: Option<&str>,
-        proxy: Option<reqwest::Proxy>,
-        connect_timeout: Duration,
-        read_timeout: Duration,
-        interrupt: Arc<AtomicBool>,
-    ) -> Result<Self, SourceError> {
-        Self::open_full(
-            url,
-            user_agent,
-            proxy,
-            connect_timeout,
-            read_timeout,
-            MAX_REQUEST_DURATION,
-            interrupt,
-        )
-    }
-
-    /// As [`Self::open_with_timeouts`], with `request_duration` also configurable
-    /// — only tests exercising it need anything other than the production default.
-    fn open_full(
         url: &str,
         user_agent: Option<&str>,
         proxy: Option<reqwest::Proxy>,
@@ -719,6 +702,7 @@ mod tests {
             None,
             CONNECT_TIMEOUT,
             Duration::from_millis(200),
+            MAX_REQUEST_DURATION,
             Arc::clone(&interrupt),
         )
         .unwrap();
@@ -803,6 +787,7 @@ mod tests {
             None,
             CONNECT_TIMEOUT,
             Duration::from_millis(200),
+            MAX_REQUEST_DURATION,
             Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
@@ -850,7 +835,7 @@ mod tests {
             std::thread::sleep(Duration::from_secs(5));
         });
 
-        let mut source = HttpMediaSource::open_full(
+        let mut source = HttpMediaSource::open_with_timeouts(
             &format!("http://{addr}"),
             None,
             None,
@@ -913,6 +898,7 @@ mod tests {
             None,
             CONNECT_TIMEOUT,
             Duration::from_millis(200),
+            MAX_REQUEST_DURATION,
             Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
