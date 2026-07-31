@@ -34,20 +34,6 @@ impl<T> Omissible<T> {
         matches!(self, Omissible::Present(_))
     }
 
-    pub fn as_ref(&self) -> Omissible<&T> {
-        match self {
-            Omissible::Omitted => Omissible::Omitted,
-            Omissible::Present(v) => Omissible::Present(v),
-        }
-    }
-
-    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Omissible<U> {
-        match self {
-            Omissible::Omitted => Omissible::Omitted,
-            Omissible::Present(v) => Omissible::Present(f(v)),
-        }
-    }
-
     /// The present value, or `None` when omitted. Mirrors Kotlin `ifPresent`.
     pub fn into_option(self) -> Option<T> {
         match self {
@@ -65,26 +51,6 @@ impl<T> Omissible<T> {
             self.into_option()
         } else {
             None
-        }
-    }
-}
-
-impl<T> Omissible<Option<T>> {
-    /// Present *and* non-null. Mirrors Kotlin `ifPresentAndNotNull`.
-    pub fn flatten(self) -> Option<T> {
-        match self {
-            Omissible::Present(Some(v)) => Some(v),
-            _ => None,
-        }
-    }
-}
-
-impl<T> From<Option<T>> for Omissible<T> {
-    /// Kotlin `T?.toOmissible()`: null collapses to omitted.
-    fn from(value: Option<T>) -> Self {
-        match value {
-            Some(v) => Omissible::Present(v),
-            None => Omissible::Omitted,
         }
     }
 }

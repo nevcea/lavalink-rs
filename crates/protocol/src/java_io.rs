@@ -37,10 +37,6 @@ impl<'a> DataInput<'a> {
         Self { bytes, offset: 0 }
     }
 
-    pub fn offset(&self) -> usize {
-        self.offset
-    }
-
     pub fn remaining(&self) -> &'a [u8] {
         &self.bytes[self.offset..]
     }
@@ -120,14 +116,6 @@ impl DataOutput {
 
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
-    }
-
-    pub fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
     }
 
     pub fn write_u8(&mut self, value: u8) {

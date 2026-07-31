@@ -93,12 +93,6 @@ pub enum EmittedEvent {
     },
 }
 
-impl From<EmittedEvent> for Message {
-    fn from(event: EmittedEvent) -> Self {
-        Message::Event(event)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TrackEndReason {
