@@ -31,7 +31,7 @@ pub struct Resampler {
     /// the retained tail, reads from the combined slice, then drains the consumed
     /// prefix back down to the new tail — no allocation once warmed up.
     history: Vec<[f32; CHANNELS]>,
-    /// Scratch space for `to_stereo_frames`, reused across calls for the same
+    /// Scratch space for `fill_stereo_frames`, reused across calls for the same
     /// reason.
     frames: Vec<[f32; CHANNELS]>,
 }
@@ -75,7 +75,7 @@ impl Resampler {
     pub fn process_into(&mut self, input: &[f32], out: &mut Vec<f32>) {
         out.clear();
 
-        // Already 48kHz stereo: `to_stereo_frames` plus a flatten below would be two
+        // Already 48kHz stereo: `fill_stereo_frames` plus a flatten below would be two
         // full-buffer copies for zero conversion. `is_passthrough` names the same
         // condition this used to check inline (`source_rate == SAMPLE_RATE`) without
         // also covering channel count, which meant this path ran through the
@@ -88,7 +88,7 @@ impl Resampler {
             return;
         }
 
-        self.to_stereo_frames(input);
+        self.fill_stereo_frames(input);
         if self.frames.is_empty() {
             return;
         }
@@ -117,6 +117,10 @@ impl Resampler {
         // How many frames the loop below will emit, so the pushes never re-grow.
         out.reserve((((usable - cursor).max(0.0) / step).ceil() as usize) * CHANNELS);
 
+        // `needless_range_loop`: `channel` is not indexing one slice, it is picking
+        // the same lane out of four separate frames. Iterating any one of them would
+        // not give the other three, so the index is the point.
+        #[allow(clippy::needless_range_loop)]
         while cursor < usable {
             let base = cursor.floor();
             let index = base as usize;
@@ -165,7 +169,7 @@ impl Resampler {
     }
 
     /// Interleaved source channels to stereo frames, written into `self.frames`.
-    fn to_stereo_frames(&mut self, input: &[f32]) {
+    fn fill_stereo_frames(&mut self, input: &[f32]) {
         let channels = self.source_channels;
         self.frames.clear();
         self.frames
@@ -229,13 +233,13 @@ mod tests {
     fn passthrough_does_not_touch_the_planar_scratch_buffers() {
         let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS);
         resampler.process(&[0.5, -0.5, 0.25, -0.25]);
-        assert!(resampler.frames.is_empty(), "to_stereo_frames should not have run");
+        assert!(resampler.frames.is_empty(), "fill_stereo_frames should not have run");
         assert!(resampler.history.is_empty(), "the interpolation history should stay empty");
     }
 
     /// A stray trailing sample (an odd-length buffer, which should not happen for
     /// interleaved stereo but is not this function's job to assume) is dropped
-    /// rather than copied half-formed, matching what `to_stereo_frames`'s
+    /// rather than copied half-formed, matching what `fill_stereo_frames`'s
     /// `chunks_exact` used to do on the slow path.
     #[test]
     fn passthrough_drops_an_incomplete_trailing_frame() {
