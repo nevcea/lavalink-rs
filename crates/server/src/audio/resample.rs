@@ -113,17 +113,44 @@ impl Resampler {
         // Stop two frames short: the last two have no right-hand neighbours yet, and
         // they become the next buffer's history instead of being guessed at.
         let usable = source.len().saturating_sub(2) as f64;
-        while cursor < usable {
-            let index = cursor.floor() as usize;
-            let t = (cursor - cursor.floor()) as f32;
 
-            for channel in 0..CHANNELS {
-                let at = |offset: isize| -> f32 {
-                    let i = index as isize + offset;
-                    let i = i.clamp(0, source.len() as isize - 1) as usize;
-                    source[i][channel]
-                };
-                out.push(catmull_rom(at(-1), at(0), at(1), at(2), t));
+        // How many frames the loop below will emit, so the pushes never re-grow.
+        out.reserve((((usable - cursor).max(0.0) / step).ceil() as usize) * CHANNELS);
+
+        while cursor < usable {
+            let base = cursor.floor();
+            let index = base as usize;
+            let t = (cursor - base) as f32;
+
+            if index == 0 {
+                // The one frame with no left-hand neighbour, so `p0` repeats `p1`.
+                // This is what the clamp used to produce, hoisted out of the inner
+                // loop: it is true for at most the first output frame of a buffer,
+                // and was being re-decided for every tap of every frame.
+                for channel in 0..CHANNELS {
+                    out.push(catmull_rom(
+                        source[0][channel],
+                        source[0][channel],
+                        source[1][channel],
+                        source[2][channel],
+                        t,
+                    ));
+                }
+            } else {
+                // `cursor < usable` means `index <= source.len() - 3`, so all four
+                // taps are in range on their own — the upper clamp never bound
+                // anything. Taking the window once lets the four reads share a
+                // single bounds check instead of paying one each.
+                let window = &source[index - 1..index + 3];
+                for channel in 0..CHANNELS {
+                    out.push(catmull_rom(
+                        window[0][channel],
+                        window[1][channel],
+                        window[2][channel],
+                        window[3][channel],
+                        t,
+                    ));
+                }
             }
 
             cursor += step;
@@ -314,5 +341,58 @@ mod tests {
     fn catmull_rom_is_linear_on_a_straight_line() {
         // Interpolating a ramp must give the ramp back.
         assert!((catmull_rom(0.0, 1.0, 2.0, 3.0, 0.5) - 1.5).abs() < 1e-6);
+    }
+
+    /// The clamp-inside-the-tap-read form the interpolation loop used to have.
+    ///
+    /// Kept verbatim as a reference because hoisting that clamp out is a claim about
+    /// *exact* output — the same four samples combined the same way, only reached
+    /// differently — and the tests above are all property checks (peak, length,
+    /// finiteness) that a small arithmetic drift would slip straight past.
+    fn clamped_reference(source_rate: u32, source_channels: usize, input: &[f32]) -> Vec<f32> {
+        let source: Vec<[f32; CHANNELS]> = input
+            .chunks_exact(source_channels)
+            .map(|frame| match source_channels {
+                1 => [frame[0], frame[0]],
+                _ => [frame[0], frame[1]],
+            })
+            .collect();
+
+        let step = f64::from(source_rate) / f64::from(SAMPLE_RATE);
+        let usable = source.len().saturating_sub(2) as f64;
+        let mut cursor = 0.0f64;
+        let mut out = Vec::new();
+
+        while cursor < usable {
+            let index = cursor.floor() as usize;
+            let t = (cursor - cursor.floor()) as f32;
+            for channel in 0..CHANNELS {
+                let at = |offset: isize| -> f32 {
+                    let i = index as isize + offset;
+                    let i = i.clamp(0, source.len() as isize - 1) as usize;
+                    source[i][channel]
+                };
+                out.push(catmull_rom(at(-1), at(0), at(1), at(2), t));
+            }
+            cursor += step;
+        }
+        out
+    }
+
+    #[test]
+    fn hoisting_the_clamp_changes_no_sample() {
+        // Each case is one buffer from a cold start, which is the only time the
+        // `index == 0` branch — the sole case the clamp ever actually bound — runs.
+        for (rate, channels) in [(44_100, 2), (22_050, 2), (44_100, 1), (96_000, 2)] {
+            let input: Vec<f32> = (0..4096 * channels)
+                .map(|i| ((i % 997) as f32 / 997.0) * 2.0 - 1.0)
+                .collect();
+            let got = Resampler::new(rate, channels).process(&input);
+            assert_eq!(
+                got,
+                clamped_reference(rate, channels, &input),
+                "{rate}Hz {channels}ch"
+            );
+        }
     }
 }
