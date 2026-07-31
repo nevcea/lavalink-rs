@@ -199,7 +199,12 @@ impl RingWriter {
         let mut buffer = lock(&self.shared.buffer);
         let room = self.shared.capacity.saturating_sub(buffer.len());
         let take = room.min(samples.len());
-        buffer.extend(samples[..take].iter().copied());
+        // `extend(&[f32])` and not `extend(iter().copied())`: only `Extend<&T> where
+        // T: Copy` specialises to a slice copy, and the `f32`-yielding form falls
+        // back to appending one element at a time with a wraparound check each. This
+        // runs with the lock held and the reader is on a 20ms deadline behind it, so
+        // the shape of this copy is the reader's problem too, not just the pump's.
+        buffer.extend(&samples[..take]);
         (take, false)
     }
 
