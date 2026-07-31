@@ -221,6 +221,40 @@ mod tests {
         out
     }
 
+    /// A ramp, so a frame carried over from somewhere else shows up as a jump
+    /// rather than hiding inside a periodic signal.
+    fn ramp(frames: usize) -> Vec<f32> {
+        (0..frames * CHANNELS)
+            .map(|i| ((i % 997) as f32 / 997.0) * 2.0 - 1.0)
+            .collect()
+    }
+
+    /// `reset` is what a seek calls, and a seek lands somewhere unrelated to where
+    /// the last buffer left off. Any frame or cursor offset surviving it would
+    /// interpolate the new position against the old one — a click at the start of
+    /// every seek.
+    ///
+    /// Stronger than `a_reset_clears_carried_state` below, which checks only that
+    /// the first output frame follows the new input: this asserts the reset
+    /// resampler is indistinguishable from a fresh one over a whole buffer, which is
+    /// what the carried `cursor` and the retained tail together have to guarantee.
+    #[test]
+    fn reset_leaves_nothing_of_the_previous_position_behind() {
+        let input = ramp(2_000);
+
+        let fresh = Resampler::new(44_100, CHANNELS).process(&input);
+
+        let mut resampler = Resampler::new(44_100, CHANNELS);
+        resampler.process(&ramp(3_000));
+        resampler.reset();
+        let after_reset = resampler.process(&input);
+
+        assert_eq!(
+            after_reset, fresh,
+            "a reset resampler must behave exactly like a new one"
+        );
+    }
+
     #[test]
     fn matching_format_is_passthrough() {
         let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS);
@@ -297,18 +331,48 @@ mod tests {
 
     /// The reason history is carried between calls: chunking the input must not
     /// change the output, or every decoder buffer boundary would click.
+    ///
+    /// The pump hands over whatever symphonia happened to decode, so chunk sizes are
+    /// not ours to choose — hence the sweep over sizes down to a single frame, well
+    /// past anything a real decoder produces. Get the `cursor - dropped` rebase
+    /// wrong and frames are duplicated or skipped at every boundary; at a realistic
+    /// packet size that is a click ten times a second.
+    ///
+    /// Two tolerances, both load-bearing:
+    ///
+    /// * **Length, ±1 frame.** The tail is held back two frames for the next call's
+    ///   right-hand interpolation neighbours, and where that lands depends on where
+    ///   the last boundary fell. The stream never gets those frames back either way.
+    /// * **Samples, 1e-4.** One-shot, the cursor climbs to the length of the whole
+    ///   input before its single rebase; chunked, it is rebased near zero every
+    ///   call, so `cursor += step` accumulates rounding differently. That is a
+    ///   ~1e-11 effect. A frame slip is a ~1e-1 effect, which is what this catches.
     #[test]
     fn chunking_does_not_change_the_result() {
-        let whole = resample_sine(44_100, 2, 0.2, 1 << 20);
-        let split = resample_sine(44_100, 2, 0.2, 512);
+        for (rate, channels) in [(44_100, 2), (44_100, 1), (22_050, 2), (96_000, 2)] {
+            let whole = resample_sine(rate, channels, 0.2, 1 << 20);
 
-        assert!((whole.len() as i64 - split.len() as i64).abs() <= CHANNELS as i64);
-        let compare = whole.len().min(split.len());
-        for (index, (a, b)) in whole[..compare].iter().zip(&split[..compare]).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-4,
-                "sample {index} differs: {a} vs {b}"
-            );
+            for chunk in [1, 2, 3, 5, 64, 512] {
+                let split = resample_sine(rate, channels, 0.2, chunk);
+                let case = format!("{rate}Hz/{channels}ch in {chunk}-frame chunks");
+
+                assert!(
+                    (whole.len() as i64 - split.len() as i64).abs() <= CHANNELS as i64,
+                    "{case}: {} samples against {} one-shot — more than the held-back \
+                     tail can explain, so a frame was dropped or duplicated",
+                    split.len(),
+                    whole.len()
+                );
+
+                let compare = whole.len().min(split.len());
+                for (index, (a, b)) in whole[..compare].iter().zip(&split[..compare]).enumerate() {
+                    assert!(
+                        (a - b).abs() < 1e-4,
+                        "{case}: sample {index} is {b} against {a} one-shot — far past \
+                         cursor rounding, so the samples are misaligned"
+                    );
+                }
+            }
         }
     }
 
