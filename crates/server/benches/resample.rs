@@ -8,15 +8,12 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use lavalink_server::audio::resample::Resampler;
 use lavalink_server::audio::ring::CHANNELS;
 
+mod common;
+use common::interleaved;
+
 /// One symphonia decode buffer's worth of frames, roughly — big enough that the
 /// per-call overhead around `process` doesn't dominate the measurement.
 const FRAMES: usize = 4096;
-
-fn interleaved(channels: usize, frames: usize) -> Vec<f32> {
-    (0..frames * channels)
-        .map(|i| ((i % 997) as f32 / 997.0) * 2.0 - 1.0)
-        .collect()
-}
 
 /// Times `process_into` with a reused output buffer, which is what the pump does
 /// (`pump.rs`'s decode loop hands it the same `pcm` every packet). The allocating

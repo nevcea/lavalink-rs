@@ -10,24 +10,11 @@ use lavalink_server::audio::filter::FilterChain;
 use lavalink_server::audio::pump::filter_interleaved;
 use lavalink_server::audio::ring::CHANNELS;
 
+mod common;
+use common::{interleaved, planar};
+
 /// 20ms at 48kHz — one ring write's worth of frames, the chain's natural unit.
 const FRAMES: usize = 960;
-
-fn planar(frames: usize) -> Vec<Vec<f32>> {
-    (0..CHANNELS)
-        .map(|_| {
-            (0..frames)
-                .map(|i| ((i % 997) as f32 / 997.0) * 2.0 - 1.0)
-                .collect()
-        })
-        .collect()
-}
-
-fn interleaved(frames: usize) -> Vec<f32> {
-    (0..frames * CHANNELS)
-        .map(|i| ((i % 997) as f32 / 997.0) * 2.0 - 1.0)
-        .collect()
-}
 
 /// A realistic single-filter case: a bass-boost equalizer, the filter clients set
 /// most often.
@@ -61,7 +48,7 @@ fn bench_filter_chain(c: &mut Criterion) {
 
     group.bench_function(BenchmarkId::new("process", "no_filters"), |b| {
         let mut chain = FilterChain::new(&Filters::default(), CHANNELS);
-        let source = planar(FRAMES);
+        let source = planar(CHANNELS, FRAMES);
         b.iter_batched(
             || source.clone(),
             |mut buffer| {
@@ -74,7 +61,7 @@ fn bench_filter_chain(c: &mut Criterion) {
 
     group.bench_function(BenchmarkId::new("process", "equalizer_only"), |b| {
         let mut chain = FilterChain::new(&equalizer_only(), CHANNELS);
-        let source = planar(FRAMES);
+        let source = planar(CHANNELS, FRAMES);
         b.iter_batched(
             || source.clone(),
             |mut buffer| {
@@ -87,7 +74,7 @@ fn bench_filter_chain(c: &mut Criterion) {
 
     group.bench_function(BenchmarkId::new("process", "all_filters"), |b| {
         let mut chain = FilterChain::new(&all_filters(), CHANNELS);
-        let source = planar(FRAMES);
+        let source = planar(CHANNELS, FRAMES);
         b.iter_batched(
             || source.clone(),
             |mut buffer| {
@@ -122,7 +109,7 @@ fn bench_filter_interleaved(c: &mut Criterion) {
             // The pump's own scratch, reused across buffers (`pump.rs`'s `planar`),
             // so this measures the transpose and not a per-buffer allocation.
             let mut scratch = vec![Vec::new(); CHANNELS];
-            let source = interleaved(FRAMES);
+            let source = interleaved(CHANNELS, FRAMES);
             b.iter_batched_ref(
                 || source.clone(),
                 |buffer| {

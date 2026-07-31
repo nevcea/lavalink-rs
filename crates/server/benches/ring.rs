@@ -14,6 +14,9 @@ use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use lavalink_server::audio::ring::{self, FrameCounters, RingReader, RingWriter, CHANNELS};
 
+mod common;
+use common::samples;
+
 /// 20ms of 48kHz stereo: 960 frames, 1920 samples, 3840 bytes. This is the buffer
 /// size songbird's mixer asks for, so it is the only read size worth measuring.
 const FRAME_SAMPLES: usize = 960 * CHANNELS;
@@ -27,12 +30,6 @@ fn ring_pair(buffer_ms: u32) -> (RingWriter, RingReader) {
         Arc::new(AtomicI64::new(0)),
         Arc::new(FrameCounters::default()),
     )
-}
-
-fn samples(count: usize) -> Vec<f32> {
-    (0..count)
-        .map(|i| ((i % 997) as f32 / 997.0) * 2.0 - 1.0)
-        .collect()
 }
 
 fn bench_ring_read(c: &mut Criterion) {
