@@ -288,6 +288,24 @@ impl Loader {
         }
     }
 
+    /// Drops every cache entry whose TTL has passed.
+    ///
+    /// [`Self::cached`] evicts too, but only the one identifier it was asked about,
+    /// so an entry nobody looks up a second time is never reached by it. Identifiers
+    /// come from the client and most are asked for exactly once — a queue is filled,
+    /// played, and never resolved again — so without this the map grows for the life
+    /// of the process, holding a full [`LoadResult`] (a playlist's whole `Vec<Track>`,
+    /// for a `loadtracks` of one) per identifier ever seen.
+    ///
+    /// `in_flight` is deliberately left alone. Those entries belong to their leader's
+    /// [`LeaderGuard`], which removes them by generation rather than by key; a sweep
+    /// clearing that map would drop a live leader's sender out from under the
+    /// followers waiting on it.
+    pub fn sweep_expired(&self) {
+        let now = Instant::now();
+        lock(&self.cache).retain(|_, entry| entry.expires_at > now);
+    }
+
     fn cached(&self, identifier: &str) -> Option<LoadResult> {
         let mut cache = lock(&self.cache);
         let entry = cache.get(identifier)?;
@@ -535,6 +553,28 @@ mod tests {
 
         loader.load("https://example.invalid/a.mp3").await;
         assert_eq!(loads.load(Ordering::SeqCst), 2);
+    }
+
+    /// The leak `sweep_expired` exists for: `cached` only evicts the identifier it
+    /// was asked about, so an entry that is never looked up again — the normal fate
+    /// of a queue's worth of identifiers — stayed in the map forever.
+    #[tokio::test]
+    async fn the_sweep_drops_expired_entries_that_are_never_looked_up_again() {
+        let (loader, _) = loader(ok_track);
+        loader.load("https://example.invalid/a.mp3").await;
+        loader.load("https://example.invalid/b.mp3").await;
+
+        lock(&loader.cache)
+            .get_mut("https://example.invalid/a.mp3")
+            .unwrap()
+            .expires_at = Instant::now() - Duration::from_secs(1);
+
+        loader.sweep_expired();
+
+        let cache = lock(&loader.cache);
+        assert!(!cache.contains_key("https://example.invalid/a.mp3"));
+        // Unexpired entries are untouched — the sweep is expiry, not a flush.
+        assert!(cache.contains_key("https://example.invalid/b.mp3"));
     }
 
     #[test]

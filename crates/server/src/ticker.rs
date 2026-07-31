@@ -61,13 +61,17 @@ async fn stats_tick(state: AppState) {
         interval.tick().await;
 
         let sessions = state.sessions.all();
-        let players = crate::stats::count_players(&sessions);
-        let playing = crate::stats::count_playing(&sessions);
+        // One walk of every session's roster, reused for all three numbers below.
+        // Each `Session::players` call takes that session's guild lock and clones a
+        // handle per player, so collecting once rather than per number is the whole
+        // point — this tick used to do it three times over the same players.
+        let rosters = crate::stats::rosters(&sessions);
+        let (players, playing) = crate::stats::count(&rosters);
 
         // Sampled once for the whole node, then shared by every session.
         let node = state.stats.sample(players, playing);
         let now_ms = crate::player::now_epoch_ms();
-        for session in sessions {
+        for (session, roster) in sessions.iter().zip(&rosters) {
             // Per session, not per node: the original's `StatsCollector.retrieveStats`
             // takes a `SocketContext` and only aggregates that session's own players,
             // unlike `players`/`playingPlayers`/`cpu`/`memory` above, which are the
@@ -75,18 +79,13 @@ async fn stats_tick(state: AppState) {
             // of usability — see `FrameCounters::take`'s docs — so a player that sits
             // just under the usability threshold does not have frames silently pile up
             // for next tick.
-            let samples: Vec<_> = session
-                .players()
-                .iter()
-                .map(|player| {
-                    let (sent, nulled) = player.take_frame_stats();
-                    let since = player.playing_since_ms();
-                    let usable =
-                        since != 0 && since <= now_ms - crate::stats::FRAME_STATS_USABLE_AFTER_MS;
-                    (sent, nulled, usable)
-                })
-                .collect();
-            let frame_stats = crate::stats::frame_stats(samples.into_iter());
+            let frame_stats = crate::stats::frame_stats(roster.iter().map(|player| {
+                let (sent, nulled) = player.take_frame_stats();
+                let since = player.playing_since_ms();
+                let usable =
+                    since != 0 && since <= now_ms - crate::stats::FRAME_STATS_USABLE_AFTER_MS;
+                (sent, nulled, usable)
+            }));
 
             let _ = session.send(Message::Stats(StatsEvent::from_node(node, frame_stats)));
         }
@@ -103,6 +102,11 @@ async fn sweep_tick(state: AppState) {
             tracing::info!(session = %session.id, "resume window expired");
             shutdown_session(&session).await;
         }
+        // Rides along here rather than getting a task of its own: it is the same
+        // "collect what has timed out" shape on the same cadence, and the loader's
+        // own expiry check only fires when an identifier happens to be looked up
+        // again, which for most identifiers never happens.
+        state.loader.sweep_expired();
     }
 }
 
