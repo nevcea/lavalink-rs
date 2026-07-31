@@ -291,7 +291,17 @@ impl PlayerActor {
                         None => self.voice_updates_closed = true,
                     }
                 }
-                _ = stuck_check.tick() => self.check_stuck(Instant::now()),
+                // Only armed while a track is actually running. `check_stuck` returns
+                // immediately for every other state, so an idle player was waking the
+                // runtime twice a second to decide it had nothing to do — multiplied
+                // by every player the node holds, playing or not. A disabled `select!`
+                // branch is never polled, so no timer is registered at all meanwhile.
+                //
+                // Re-arming is safe: `PlayerModel::set_paused` restamps `last_progress`
+                // on resume, so the first tick after a pause does not measure the pause.
+                _ = stuck_check.tick(), if self.model.playback.is_playing() => {
+                    self.check_stuck(Instant::now());
+                }
             }
         }
 
