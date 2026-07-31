@@ -295,10 +295,9 @@ impl State {
                 continue;
             }
 
-            // Taken out of `self` because `process_into`, `apply_volume` and
-            // `apply_filters` all take `&mut self` — a field can't also be passed
-            // to them by `&mut` while still attached. Moved back in below,
-            // regardless of which path out of the loop is taken.
+            // Taken out of `self` because `apply_volume` takes `&self` — a field
+            // can't also be passed to it by `&mut` while still attached. Moved back
+            // in below, regardless of which path out of the loop is taken.
             let mut pcm = std::mem::take(&mut self.pcm);
             self.resampler.process_into(&self.interleaved, &mut pcm);
             if pcm.is_empty() {
@@ -307,7 +306,7 @@ impl State {
             }
 
             self.apply_volume(&mut pcm);
-            self.apply_filters(&mut pcm);
+            filter_interleaved(&mut self.filters, &mut pcm, &mut self.planar);
 
             self.produced = true;
             if let ControlFlow::Stopped = self.write_interruptibly(writer, &pcm, commands) {
@@ -448,27 +447,6 @@ impl State {
         }
     }
 
-    /// The filter chain works on planar channels; the ring wants interleaved.
-    fn apply_filters(&mut self, samples: &mut [f32]) {
-        if !self.filters.is_enabled() {
-            return;
-        }
-
-        let frames = samples.len() / CHANNELS;
-        for (channel, plane) in self.planar.iter_mut().enumerate() {
-            plane.clear();
-            plane.extend((0..frames).map(|frame| samples[frame * CHANNELS + channel]));
-        }
-
-        self.filters.process(&mut self.planar);
-
-        for frame in 0..frames {
-            for (channel, plane) in self.planar.iter().enumerate() {
-                samples[frame * CHANNELS + channel] = plane[frame];
-            }
-        }
-    }
-
     fn fail(&self, error: SymphoniaError) -> PumpOutcome {
         PumpOutcome::Failed {
             exception: Exception::fault(
@@ -485,6 +463,35 @@ enum ControlFlow {
     /// discarding whatever the ring held before it.
     Continue { reset: bool },
     Stopped,
+}
+
+/// Runs the filter chain over an interleaved buffer, using `planar` as the
+/// transpose scratch (its capacity is reused, so this allocates nothing once warm).
+///
+/// The chain works on planar channels and the ring wants interleaved, so a buffer
+/// with any filter enabled pays two extra full passes on top of the DSP itself.
+/// That transpose is the pump's cost, not the chain's, which is why this lives here
+/// rather than in `filter.rs` — and why it is free-standing and public rather than a
+/// method on `State`: `benches/filter.rs` measures the chain *with* the transpose
+/// around it, which is the only shape playback actually runs.
+pub fn filter_interleaved(chain: &mut FilterChain, samples: &mut [f32], planar: &mut [Vec<f32>]) {
+    if !chain.is_enabled() {
+        return;
+    }
+
+    let frames = samples.len() / CHANNELS;
+    for (channel, plane) in planar.iter_mut().enumerate() {
+        plane.clear();
+        plane.extend((0..frames).map(|frame| samples[frame * CHANNELS + channel]));
+    }
+
+    chain.process(planar);
+
+    for frame in 0..frames {
+        for (channel, plane) in planar.iter().enumerate() {
+            samples[frame * CHANNELS + channel] = plane[frame];
+        }
+    }
 }
 
 /// Flattens any of symphonia's buffer types into interleaved `f32`, appended into
