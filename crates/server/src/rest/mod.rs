@@ -155,6 +155,29 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// The bug this fix targets: a non-UTF-8 (but present) `Authorization`
+    /// header used to be treated as "missing" (401) because
+    /// `HeaderValue::to_str()` fails silently on it — the original decodes
+    /// it as Latin-1 and reports "present but wrong" (403) instead.
+    #[tokio::test]
+    async fn a_non_utf8_authorization_header_is_403_not_401() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v4/info")
+                    .header(
+                        header::AUTHORIZATION,
+                        axum::http::HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
     /// An authenticated request to an unmatched path gets the Lavalink `Error`
     /// JSON shape, not axum's built-in empty-body 404.
     #[tokio::test]

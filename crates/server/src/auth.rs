@@ -23,14 +23,16 @@ pub async fn require_password(
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let provided = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
+    let provided = request.headers().get(AUTHORIZATION);
 
     match provided {
         None => Err(ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized")),
-        Some(provided) if matches(provided, &state.config.lavalink.server.password) => {
+        Some(provided)
+            if matches(
+                provided.as_bytes(),
+                state.config.lavalink.server.password.as_bytes(),
+            ) =>
+        {
             Ok(next.run(request).await)
         }
         Some(_) => Err(ApiError::new(StatusCode::FORBIDDEN, "Forbidden")),
@@ -39,14 +41,21 @@ pub async fn require_password(
 
 /// Constant time in the length of the shorter input.
 ///
-/// The lengths themselves are compared normally: whether two strings are the same
-/// length is not secret in any useful way, and pretending otherwise would mean
-/// hashing, which is more machinery than this needs.
-fn matches(provided: &str, expected: &str) -> bool {
+/// The lengths themselves are compared normally: whether two byte strings are
+/// the same length is not secret in any useful way, and pretending otherwise
+/// would mean hashing, which is more machinery than this needs.
+///
+/// Takes raw bytes, not `&str`: an `Authorization` header is present here
+/// whether or not its bytes happen to be valid UTF-8 (RFC 7230 allows
+/// `obs-text`, and the JVM decodes it as Latin-1 rather than rejecting it),
+/// so comparing bytes is what keeps a non-UTF-8 header "present but wrong"
+/// (403) instead of `HeaderValue::to_str()` silently failing and this
+/// treating it as "absent" (401).
+fn matches(provided: &[u8], expected: &[u8]) -> bool {
     if provided.len() != expected.len() {
         return false;
     }
-    provided.as_bytes().ct_eq(expected.as_bytes()).into()
+    provided.ct_eq(expected).into()
 }
 
 #[cfg(test)]
@@ -55,19 +64,27 @@ mod tests {
 
     #[test]
     fn the_right_password_is_accepted() {
-        assert!(matches("youshallnotpass", "youshallnotpass"));
+        assert!(matches(b"youshallnotpass", b"youshallnotpass"));
     }
 
     #[test]
     fn a_wrong_password_is_rejected() {
-        assert!(!matches("youshallnotpasx", "youshallnotpass"));
-        assert!(!matches("", "youshallnotpass"));
-        assert!(!matches("youshallnotpass ", "youshallnotpass"));
+        assert!(!matches(b"youshallnotpasx", b"youshallnotpass"));
+        assert!(!matches(b"", b"youshallnotpass"));
+        assert!(!matches(b"youshallnotpass ", b"youshallnotpass"));
     }
 
     #[test]
     fn a_shared_prefix_is_still_rejected() {
-        assert!(!matches("you", "youshallnotpass"));
-        assert!(!matches("youshallnotpassword", "youshallnotpass"));
+        assert!(!matches(b"you", b"youshallnotpass"));
+        assert!(!matches(b"youshallnotpassword", b"youshallnotpass"));
+    }
+
+    /// The bug this fix targets: a non-UTF-8 (but present) `Authorization`
+    /// header must still compare as "wrong", not be silently treated as
+    /// bytes that happen not to decode to anything comparable.
+    #[test]
+    fn non_utf8_bytes_are_compared_like_any_other_wrong_password() {
+        assert!(!matches(&[0xff, 0xfe, 0xfd], b"youshallnotpass"));
     }
 }
