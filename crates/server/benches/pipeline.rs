@@ -70,6 +70,12 @@ fn track_info(path: &std::path::Path) -> TrackInfo {
     }
 }
 
+/// A bass-boost equalizer — the filter clients set most often, and enough on its own
+/// to make the pump pay the interleaved↔planar transpose around the chain.
+fn equalizer() -> Filters {
+    serde_json::from_str(r#"{"equalizer":[{"band":0,"gain":0.5},{"band":1,"gain":0.3}]}"#).unwrap()
+}
+
 fn bench_pipeline(c: &mut Criterion) {
     // Includes the pid so a concurrent `cargo test` and `cargo bench` (both of
     // which write a fixed-name file under `pump.rs`'s tests, and this one) do not
@@ -82,39 +88,47 @@ fn bench_pipeline(c: &mut Criterion) {
     group.sample_size(20);
     group.throughput(Throughput::Elements(TRACK_SECONDS as u64));
 
-    group.bench_function(BenchmarkId::new("run", "5s_44100_stereo_wav"), |b| {
-        b.iter(|| {
-            let position = Arc::new(AtomicI64::new(0));
-            // Large enough to hold the whole track, so the pump is never blocked
-            // waiting on the ring — this measures decode+resample+filter alone.
-            let (writer, mut reader) =
-                ring::channel(
+    // Two cases, because the filter chain is not just extra arithmetic: turning any
+    // filter on also makes the pump transpose every buffer to planar and back
+    // (`pump::filter_interleaved`). The unfiltered case alone would hide that
+    // entirely, and it is the case most tracks with an equalizer actually run.
+    for (name, filters) in [
+        ("5s_44100_stereo_wav", Filters::default()),
+        ("5s_44100_stereo_wav_equalizer", equalizer()),
+    ] {
+        group.bench_function(BenchmarkId::new("run", name), |b| {
+            b.iter(|| {
+                let position = Arc::new(AtomicI64::new(0));
+                // Large enough to hold the whole track, so the pump is never blocked
+                // waiting on the ring — this measures decode+resample+filter alone.
+                let (writer, mut reader) = ring::channel(
                     (TRACK_SECONDS * 1000.0) as u32 + 1000,
                     Arc::clone(&position),
                     Arc::new(ring::FrameCounters::default()),
                 );
-            let (_commands_tx, commands_rx) = mpsc::channel();
+                let (_commands_tx, commands_rx) = mpsc::channel();
 
-            let config = PumpConfig {
-                info: track_info(&path),
-                start_position_ms: 0,
-                end_time_ms: None,
-                volume: 100,
-                filters: Filters::default(),
-                opener: Arc::new(StreamOpener::default()),
-                interrupt: Arc::new(AtomicBool::new(false)),
-            };
+                let config = PumpConfig {
+                    info: track_info(&path),
+                    start_position_ms: 0,
+                    end_time_ms: None,
+                    volume: 100,
+                    filters: filters.clone(),
+                    opener: Arc::new(StreamOpener::default()),
+                    interrupt: Arc::new(AtomicBool::new(false)),
+                };
 
-            let outcome = pump::run(config, writer, commands_rx, position, &|| {});
+                let outcome = pump::run(config, writer, commands_rx, position, &|| {});
 
-            // Drain so the reader's thread-local state doesn't accumulate across
-            // iterations; the ring itself is dropped with `reader` regardless.
-            let mut sink = [0u8; 4096];
-            while reader.read(&mut sink).unwrap_or(0) > 0 {}
+                // Drain so the reader's thread-local state doesn't accumulate across
+                // iterations; the ring itself is dropped with `reader` regardless.
+                let mut sink = [0u8; 4096];
+                while reader.read(&mut sink).unwrap_or(0) > 0 {}
 
-            outcome
+                outcome
+            });
         });
-    });
+    }
 
     group.finish();
     let _ = std::fs::remove_file(&path);

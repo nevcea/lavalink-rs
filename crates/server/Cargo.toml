@@ -54,6 +54,10 @@ tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 
 [[bench]]
+name = "ring"
+harness = false
+
+[[bench]]
 name = "resample"
 harness = false
 

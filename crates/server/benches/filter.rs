@@ -7,6 +7,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use lavalink_protocol::filters::Filters;
 use lavalink_server::audio::filter::FilterChain;
+use lavalink_server::audio::pump::filter_interleaved;
 use lavalink_server::audio::ring::CHANNELS;
 
 /// 20ms at 48kHz — one ring write's worth of frames, the chain's natural unit.
@@ -19,6 +20,12 @@ fn planar(frames: usize) -> Vec<Vec<f32>> {
                 .map(|i| ((i % 997) as f32 / 997.0) * 2.0 - 1.0)
                 .collect()
         })
+        .collect()
+}
+
+fn interleaved(frames: usize) -> Vec<f32> {
+    (0..frames * CHANNELS)
+        .map(|i| ((i % 997) as f32 / 997.0) * 2.0 - 1.0)
         .collect()
 }
 
@@ -94,5 +101,40 @@ fn bench_filter_chain(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_filter_chain);
+/// The same chain as above, but through `pump::filter_interleaved` — the entry
+/// point playback actually uses.
+///
+/// The pump holds PCM interleaved (that is what the ring and the mixer want) while
+/// every filter is a planar port, so a buffer with filters on pays a transpose in
+/// and a transpose back around `FilterChain::process`. `bench_filter_chain` above
+/// deliberately excludes that; this group is the honest per-buffer cost, and the
+/// gap between the two groups is what the transpose itself costs.
+fn bench_filter_interleaved(c: &mut Criterion) {
+    let mut group = c.benchmark_group("filter_interleaved");
+    group.throughput(Throughput::Elements(FRAMES as u64));
+
+    for (name, filters) in [
+        ("equalizer_only", equalizer_only()),
+        ("all_filters", all_filters()),
+    ] {
+        group.bench_function(BenchmarkId::new("process", name), |b| {
+            let mut chain = FilterChain::new(&filters, CHANNELS);
+            // The pump's own scratch, reused across buffers (`pump.rs`'s `planar`),
+            // so this measures the transpose and not a per-buffer allocation.
+            let mut scratch = vec![Vec::new(); CHANNELS];
+            let source = interleaved(FRAMES);
+            b.iter_batched_ref(
+                || source.clone(),
+                |buffer| {
+                    filter_interleaved(&mut chain, black_box(buffer), &mut scratch);
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_filter_chain, bench_filter_interleaved);
 criterion_main!(benches);
