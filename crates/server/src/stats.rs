@@ -6,7 +6,7 @@
 //! session gets the same snapshot; only `frameStats` is per-session.
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use lavalink_protocol::stats::{Cpu, FrameStats, Memory, StatsData};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
@@ -66,9 +66,31 @@ pub fn frame_stats(samples: impl Iterator<Item = (u32, u32, bool)>) -> Option<Fr
     })
 }
 
+/// How long a machine sample is reused before it is taken again.
+///
+/// Refreshing reads `/proc`, and it happens under a lock on a runtime worker
+/// thread — fine on the 60s stats tick, but `GET /v4/stats` shares the same path and
+/// a client may poll it as fast as it likes. Without this, a busy poller blocks a
+/// worker on file I/O and serializes against the tick.
+///
+/// A second is well under the tick interval, so the tick always takes a fresh
+/// sample and its numbers are unchanged. It is also above sysinfo's minimum useful
+/// interval between CPU refreshes: `cpu_usage` is a delta between the last two
+/// refreshes, so a client polling every 10ms was previously driving that delta into
+/// a window too short to mean anything. Capping the refresh rate makes those numbers
+/// better, not staler.
+const SAMPLE_TTL: Duration = Duration::from_secs(1);
+
+/// The system handle and the last sample taken from it, behind one lock so a reader
+/// cannot see the cache disagree with what produced it.
+struct Machine {
+    system: System,
+    last: Option<(Instant, Memory, Cpu)>,
+}
+
 pub struct StatsCollector {
     started_at: Instant,
-    system: Mutex<System>,
+    machine: Mutex<Machine>,
     pid: Pid,
     cores: i32,
 }
@@ -81,15 +103,40 @@ impl StatsCollector {
 
         Self {
             started_at,
-            system: Mutex::new(system),
+            machine: Mutex::new(Machine { system, last: None }),
             pid: Pid::from_u32(std::process::id()),
             cores,
         }
     }
 
-    /// Samples the node. Called once per stats tick, not once per session.
+    /// Samples the node. Called from the stats tick and from `GET /v4/stats`.
+    ///
+    /// The player counts and the uptime are always live; only the machine half is
+    /// rate-limited (see [`SAMPLE_TTL`]).
     pub fn sample(&self, players: i32, playing_players: i32) -> StatsData {
-        let mut system = crate::lock(&self.system);
+        let (memory, cpu) = self.machine();
+
+        StatsData {
+            // Always None here: `GET /v4/stats` omits the key entirely, and the
+            // websocket event attaches the per-session value itself.
+            frame_stats: None,
+            players,
+            playing_players,
+            uptime: self.started_at.elapsed().as_millis() as i64,
+            memory,
+            cpu,
+        }
+    }
+
+    fn machine(&self) -> (Memory, Cpu) {
+        let mut machine = crate::lock(&self.machine);
+        if let Some((taken_at, memory, cpu)) = machine.last {
+            if taken_at.elapsed() < SAMPLE_TTL {
+                return (memory, cpu);
+            }
+        }
+
+        let system = &mut machine.system;
         system.refresh_cpu_usage();
         system.refresh_memory();
         system.refresh_processes_specifics(
@@ -127,16 +174,8 @@ impl StatsCollector {
                 .unwrap_or(0.0),
         };
 
-        StatsData {
-            // Always None here: `GET /v4/stats` omits the key entirely, and the
-            // websocket event attaches the per-session value itself.
-            frame_stats: None,
-            players,
-            playing_players,
-            uptime: self.started_at.elapsed().as_millis() as i64,
-            memory,
-            cpu,
-        }
+        machine.last = Some((Instant::now(), memory, cpu));
+        (memory, cpu)
     }
 }
 
@@ -176,6 +215,32 @@ mod tests {
     #[test]
     fn counting_no_sessions_reports_no_players() {
         assert_eq!(count(&[]), (0, 0));
+    }
+
+    /// `GET /v4/stats` is client-driven at an unbounded rate and shares this path
+    /// with the 60s tick, so a second call in quick succession must not go back to
+    /// `/proc` — that read happens under a lock, on a runtime worker thread.
+    ///
+    /// Checks the recorded sample time rather than the reported numbers: two
+    /// uncached refreshes taken microseconds apart would very likely report the same
+    /// memory anyway, so equal output would not prove the cache did anything.
+    #[test]
+    fn a_second_sample_inside_the_ttl_does_not_refresh_again() {
+        let collector = StatsCollector::new(Instant::now());
+
+        collector.sample(1, 1);
+        let taken_at = crate::lock(&collector.machine).last.unwrap().0;
+
+        let second = collector.sample(2, 2);
+        assert_eq!(
+            crate::lock(&collector.machine).last.unwrap().0,
+            taken_at,
+            "a sample inside the TTL must reuse the previous one"
+        );
+
+        // Only the machine half is cached; what the caller passes in is not.
+        assert_eq!(second.players, 2);
+        assert_eq!(second.playing_players, 2);
     }
 
     #[test]
