@@ -17,21 +17,10 @@ reason there, it's more likely an actual bug.
 
 ## Git workflow
 
-Two long-lived branches:
-
-- **`dev`** — active development. Work here by default; commit here unless told
-  otherwise.
-- **`main`** — stable. Merges from `dev` only after the change has been tested
-  and verified (`cargo test --workspace` passing is the floor; anything touching
-  the audio path should also get a `test-bot` pass per its README before
-  merging). Never merge `dev` into `main` on your own initiative — that's a step
-  the user triggers explicitly.
-
-**Exception — low-risk edits may commit directly to `main`:** docs (README,
-CLAUDE.md, MAINTENANCE.md, comments), config examples, typo/formatting fixes,
-and other changes with no behavioral or logic impact. Anything touching code
-under `crates/*/src/` beyond a comment, or anything that changes behavior
-however small, still goes through `dev`.
+One long-lived branch, **`dev`** — it's also the repo's default branch on
+GitHub. Commit here directly; there is no separate `main` to merge into or
+protect. Before committing anything that touches the audio path, run
+`cargo test --workspace` and, when relevant, a `test-bot` pass per its README.
 
 ### Commit messages — Conventional Commits
 

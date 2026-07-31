@@ -63,8 +63,8 @@ v4 client library works against this node unmodified.
 
 ## Development
 
-`dev` is where active development happens; `main` only receives merges from
-`dev` after testing. Commits follow [Conventional Commits](https://www.conventionalcommits.org/ko/v1.0.0/).
+`dev` is the sole branch — it's also the default branch on GitHub. Commits
+follow [Conventional Commits](https://www.conventionalcommits.org/ko/v1.0.0/).
 See `CLAUDE.md` for the full workflow.
 
 ```sh
