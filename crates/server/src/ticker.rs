@@ -9,7 +9,6 @@
 //! threads lazily, so the original's count depends on load. The claim is structural:
 //! there is no per-session scheduler to grow.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lavalink_protocol::message::Message;
@@ -100,7 +99,7 @@ async fn sweep_tick(state: AppState) {
         interval.tick().await;
         for session in state.sessions.sweep_expired(Instant::now()) {
             tracing::info!(session = %session.id, "resume window expired");
-            shutdown_session(&session).await;
+            session.shutdown().await;
         }
         // Rides along here rather than getting a task of its own: it is the same
         // "collect what has timed out" shape on the same cadence, and the loader's
@@ -108,9 +107,4 @@ async fn sweep_tick(state: AppState) {
         // again, which for most identifiers never happens.
         state.loader.sweep_expired();
     }
-}
-
-/// Tears a session down: every player destroyed, then the sink closed.
-pub async fn shutdown_session(session: &Arc<crate::session::Session>) {
-    session.shutdown().await;
 }

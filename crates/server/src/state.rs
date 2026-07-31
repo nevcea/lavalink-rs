@@ -212,15 +212,20 @@ mod tests {
     }
 
     /// The same call that returns the handle also returns its voice connection —
-    /// a second, independent `session.voice()` lookup is exactly the TOCTOU this
-    /// pairing exists to prevent (see `AppState::player`'s doc comment).
+    /// a second, independent lookup of the connection by guild id is exactly the
+    /// TOCTOU this pairing exists to prevent, which is why no such accessor exists
+    /// on `Session` (see `AppState::player`'s doc comment).
     #[tokio::test]
     async fn player_returns_its_own_voice_connection_paired() {
         let state = state();
         let session = state.sessions.open(1, None);
 
         let (handle, voice) = state.player(&session, 123).unwrap();
-        assert_eq!(Arc::as_ptr(&voice), Arc::as_ptr(&session.voice(123).unwrap()));
+        // Looked up again through the same call, which is the only way to reach a
+        // registered voice connection — there is deliberately no accessor that
+        // returns one on its own.
+        let (_, again) = state.player(&session, 123).unwrap();
+        assert_eq!(Arc::as_ptr(&voice), Arc::as_ptr(&again));
         assert_eq!(handle.guild_id, 123);
     }
 }

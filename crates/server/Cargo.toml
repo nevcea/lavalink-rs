@@ -53,6 +53,18 @@ tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
 # instead of trusted by inspection.
 tower = { version = "0.5", features = ["util"] }
 
+# The lib and bin targets are built with libtest's harness, which rejects
+# criterion's flags — `cargo bench -- --save-baseline x` used to die on them before
+# reaching a single benchmark. Neither target has a `#[bench]` in it, so there is
+# nothing to lose by keeping them out of `cargo bench` entirely.
+[lib]
+bench = false
+
+[[bin]]
+name = "lavalink-server"
+path = "src/main.rs"
+bench = false
+
 [[bench]]
 name = "ring"
 harness = false

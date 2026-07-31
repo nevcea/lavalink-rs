@@ -24,9 +24,6 @@ use lavalink_protocol::player::{Player, PlayerState as WirePlayerState, Track, V
 pub enum Playback {
     /// Created, never given a track.
     Idle,
-    /// An identifier is being resolved. Holds nothing but a cancellation token —
-    /// the load itself happens outside the actor.
-    Loading,
     Playing,
     Paused,
     /// Had a track; does not any more.
@@ -36,11 +33,6 @@ pub enum Playback {
 impl Playback {
     pub fn is_playing(self) -> bool {
         matches!(self, Playback::Playing)
-    }
-
-    /// Whether a track is currently loaded, i.e. whether `track` is non-null.
-    pub fn has_track(self) -> bool {
-        matches!(self, Playback::Playing | Playback::Paused)
     }
 }
 
@@ -326,6 +318,6 @@ mod tests {
         model.play(track(), false, now);
         model.play(track(), true, now);
         assert_eq!(model.playback, Playback::Paused);
-        assert!(model.playback.has_track());
+        assert!(model.track.is_some());
     }
 }

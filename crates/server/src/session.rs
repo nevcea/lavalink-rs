@@ -178,10 +178,6 @@ impl Session {
         Some((guild.handle.clone(), Arc::clone(&guild.voice)))
     }
 
-    pub fn voice(&self, guild_id: u64) -> Option<Arc<VoiceConnection>> {
-        self.lock_guilds().get(&guild_id).map(|guild| Arc::clone(&guild.voice))
-    }
-
     pub fn remove_player(&self, guild_id: u64) -> Option<PlayerHandle> {
         self.lock_guilds().remove(&guild_id).map(|guild| guild.handle)
     }
@@ -200,7 +196,7 @@ impl Session {
 
     /// Destroys every player the session holds, then closes its sink. The one
     /// teardown routine, shared by an explicit close (`SessionRegistry::destroy`)
-    /// and a resume-deadline sweep (`ticker::shutdown_session`) — both need every
+    /// and a resume-deadline sweep (`ticker::sweep_tick`) — both need every
     /// actor, voice connection and pump thread gone, not just the session's own
     /// bookkeeping removed.
     ///
@@ -477,7 +473,6 @@ mod tests {
             "every caller must get back the same voice connection as the registered player"
         );
         assert_eq!(handle_1.guild_id, handle_2.guild_id);
-        assert!(Arc::ptr_eq(&session.voice(guild).unwrap(), &voice_1));
     }
 
     /// The race a slow `PATCH` could hit: `take_players` (a resume sweep or an

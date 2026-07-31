@@ -113,22 +113,14 @@ pub struct PlayerHandle {
     /// unrelated REST traffic sharing the same queue — see the channel's own
     /// docs on `PlayerActor`.
     voice_updates: mpsc::Sender<VoiceUpdate>,
-    /// Written by the audio engine's *consuming* side and read here without a lock.
-    /// Never written by the pump: the pump runs ahead by `frameBufferDurationMs`, so
-    /// its production count is not a playback position.
-    position_ms: Arc<AtomicI64>,
     /// Epoch ms when the current unbroken `Playing` period started, or `0` when not
     /// playing. Written only by the actor, in [`PlayerActor::sync_playing`]; read
-    /// here without a lock, the same arrangement as `position_ms`.
+    /// here without a lock.
     playing_since_ms: Arc<AtomicI64>,
     frames: Arc<FrameCounters>,
 }
 
 impl PlayerHandle {
-    pub fn position_ms(&self) -> i64 {
-        self.position_ms.load(Ordering::Relaxed)
-    }
-
     /// `0` if not currently playing. Used both for `/v4/stats`' `playingPlayers`
     /// and, gated by how long ago this was, for `frameStats`' usability.
     pub fn playing_since_ms(&self) -> i64 {
@@ -255,7 +247,6 @@ impl PlayerActor {
             guild_id,
             commands: tx,
             voice_updates: voice_tx,
-            position_ms: Arc::clone(&position_ms),
             playing_since_ms: Arc::clone(&playing_since_ms),
             frames,
         };

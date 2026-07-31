@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lavalink_protocol::encoded_track::{self, SourceTail};
-use lavalink_protocol::player::{Track, TrackInfo};
+use lavalink_protocol::encoded_track;
+use lavalink_protocol::player::Track;
 use lavalink_protocol::{Exception, LoadResult, Playlist, PlaylistInfo, Severity};
 use tokio::sync::{broadcast, Semaphore};
 
@@ -328,21 +328,21 @@ impl Loader {
 /// Turns a resolved source track into a wire track, encoding its identifier blob.
 fn encode(track: SourceTrack) -> Result<Track, Exception> {
     let SourceTrack { info, tail } = track;
-    encode_info(&info, &tail).map(|encoded| Track::new(encoded, info))
-}
-
-fn encode_info(info: &TrackInfo, tail: &SourceTail) -> Result<String, Exception> {
-    encoded_track::encode(info, tail).map_err(|error| {
-        Exception::fault(
-            format!("could not encode the track: {error}"),
-            error.to_string(),
-        )
-    })
+    encoded_track::encode(&info, &tail)
+        .map_err(|error| {
+            Exception::fault(
+                format!("could not encode the track: {error}"),
+                error.to_string(),
+            )
+        })
+        .map(|encoded| Track::new(encoded, info))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lavalink_protocol::encoded_track::SourceTail;
+    use lavalink_protocol::player::TrackInfo;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A manager that counts loads, so single-flight and caching are observable.

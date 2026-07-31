@@ -26,7 +26,6 @@ use lavalink_protocol::message::Message;
 use crate::error::ApiError;
 use crate::session::Session;
 use crate::state::AppState;
-use crate::ticker::shutdown_session;
 
 /// Sent when the client stops draining essential messages.
 const CLOSE_POLICY_VIOLATION: u16 = 1008;
@@ -122,7 +121,7 @@ async fn run(
     // The socket is gone. Either the session waits to be resumed or it is over.
     if let Some(session) = state.sessions.on_disconnect(&session.id, Instant::now()) {
         tracing::info!(session = %session.id, "session closed");
-        shutdown_session(&session).await;
+        session.shutdown().await;
     } else {
         tracing::info!(
             session = %session.id,
