@@ -51,6 +51,8 @@ const VERSION_WITH_URI: u8 = 2;
 /// First version carrying `artworkUrl` and `isrc`.
 const VERSION_WITH_ARTWORK_AND_ISRC: u8 = 3;
 const SIZE_MASK: u32 = 0x3FFF_FFFF;
+/// The leading `i32` carrying the flags and the payload size.
+const HEADER_BYTES: usize = 4;
 
 #[derive(Debug, Error)]
 pub enum CodecError {
@@ -231,7 +233,13 @@ pub fn encode_to_bytes(info: &TrackInfo, tail: &SourceTail, version: u8) -> Resu
         return Err(CodecError::UnsupportedVersion(version));
     }
 
+    // The 4-byte header declares the length of everything after it, which is not
+    // known until everything after it has been written. Reserve the space and patch
+    // it at the end: building the body separately and copying it in behind the
+    // header cost a full second copy of every track encoded.
     let mut body = DataOutput::new();
+    body.write_i32(0);
+
     let versioned = version > 1;
     if versioned {
         body.write_u8(version);
@@ -262,17 +270,17 @@ pub fn encode_to_bytes(info: &TrackInfo, tail: &SourceTail, version: u8) -> Resu
 
     body.write_i64(info.position);
 
-    let body = body.into_bytes();
-    let size = u32::try_from(body.len())
+    let mut out = body.into_bytes();
+    // The declared size excludes the header itself.
+    let payload = out.len() - HEADER_BYTES;
+    let size = u32::try_from(payload)
         .ok()
         .filter(|size| *size <= SIZE_MASK)
-        .ok_or_else(|| CodecError::Invalid(format!("track payload of {} bytes is too large", body.len())))?;
+        .ok_or_else(|| CodecError::Invalid(format!("track payload of {payload} bytes is too large")))?;
 
     let flags = if versioned { FLAG_VERSIONED } else { 0 };
-    let mut out = DataOutput::new();
-    out.write_i32((size | (flags << 30)) as i32);
-    out.write_raw(&body);
-    Ok(out.into_bytes())
+    out[..HEADER_BYTES].copy_from_slice(&(size | (flags << 30)).to_be_bytes());
+    Ok(out)
 }
 
 #[cfg(test)]
