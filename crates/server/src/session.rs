@@ -375,6 +375,12 @@ impl SessionRegistry {
         }
     }
 
+    /// Called from both passes of [`Self::sweep_expired`] with the registry lock
+    /// held, and `is_overflowing` takes that session's sink lock — so this nests
+    /// sink inside registry. That is the only place the two are held together, and
+    /// it fixes the order: nothing may take the registry lock while holding a sink
+    /// lock. `Sink`'s own methods never reach for the registry, which is what keeps
+    /// the rule easy to hold to.
     fn is_expired(entry: &Entry, now: Instant) -> bool {
         match entry.state {
             SessionState::Resumable { deadline } => {

@@ -108,7 +108,7 @@ struct State {
     /// settles into decoding without allocating. `interleaved` and `pcm` are taken
     /// out of `self` for the duration of a packet (see `decode_loop`) because they
     /// are passed by `&mut` to methods that themselves take `&mut self`; `planar`
-    /// does not need that dance since `apply_filters` only ever borrows it from
+    /// does not need that dance since `filter_interleaved` only ever borrows it from
     /// inside its own `&mut self`.
     interleaved: Vec<f32>,
     pcm: Vec<f32>,

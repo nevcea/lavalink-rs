@@ -207,11 +207,11 @@ fn disconnect_update(reason: Option<DisconnectReason>) -> VoiceUpdate {
             code: code.map(|code| code as i32).unwrap_or(0),
             by_remote: true,
         },
-        // Requested, or an ordinary teardown: not a websocket close, and emitting
-        // `WebSocketClosedEvent` for it would have clients trying to recover from
-        // something they asked for.
-        Some(DisconnectReason::Requested) | None => VoiceUpdate::Disconnected,
-        Some(_) => VoiceUpdate::Disconnected,
+        // Everything else — requested, an ordinary teardown, a failed attempt — is
+        // reported the same way. None of them are a websocket close, and emitting
+        // `WebSocketClosedEvent` for one would have clients trying to recover from
+        // something they asked for, or from a failure the code cannot describe.
+        _ => VoiceUpdate::Disconnected,
     }
 }
 

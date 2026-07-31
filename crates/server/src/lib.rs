@@ -55,6 +55,14 @@ pub mod ws;
 pub use config::Config;
 pub use state::AppState;
 
+/// Locks a mutex, ignoring poisoning.
+///
+/// Every mutex in this crate guards a plain container with no invariant a panic
+/// could half-break, so carrying on beats taking the whole node down with it.
+pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Fixtures shared across this crate's test modules.
 ///
 /// Not to be confused with [`audio::testing`], which holds fake collaborators for
@@ -86,12 +94,4 @@ pub mod testing {
             },
         )
     }
-}
-
-/// Locks a mutex, ignoring poisoning.
-///
-/// Every mutex in this crate guards a plain container with no invariant a panic
-/// could half-break, so carrying on beats taking the whole node down with it.
-pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }

@@ -282,7 +282,7 @@ struct Equalizer {
     /// once at construction. `process` walks only these: a zero-gain band's
     /// biquad output is multiplied by `0.0` regardless of its internal state, and
     /// gains never change after construction (the chain is rebuilt wholesale on
-    /// any filter change — `pump.rs`'s `apply_filters`), so skipping a flat band
+    /// any filter change — `pump.rs`'s `PumpCommand::SetFilters`), so skipping a flat band
     /// entirely is bit-exact, not an approximation.
     active: Vec<usize>,
     /// Per channel, per band: `[x0, x1, x2, y0, y1, y2]`.
