@@ -1,8 +1,9 @@
 //! `/version`, `/v4/info`, `/v4/stats`.
 
 use axum::extract::State;
+use axum::http::header::CONTENT_TYPE;
+use axum::response::IntoResponse;
 use axum::Json;
-use lavalink_protocol::info::Info;
 use lavalink_protocol::stats::StatsData;
 
 use crate::state::AppState;
@@ -12,8 +13,14 @@ pub async fn version(State(state): State<AppState>) -> String {
     state.info.version.semver.clone()
 }
 
-pub async fn info(State(state): State<AppState>) -> Json<Info> {
-    Json((*state.info).clone())
+/// `Info` never changes after startup, so this serves the bytes serialized
+/// once in `AppState::new` instead of re-serializing (and deep-cloning
+/// `Info`'s `Vec`/`String` fields) on every request.
+pub async fn info(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "application/json")],
+        (*state.info_json).clone(),
+    )
 }
 
 /// `frameStats` is always absent from this endpoint (`docs/api/rest.md:989`);

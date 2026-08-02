@@ -35,6 +35,10 @@ pub struct AppState {
     pub loader: Arc<Loader>,
     pub stats: Arc<StatsCollector>,
     pub info: Arc<Info>,
+    /// `info` serialized once at startup — `Info` never changes after this, so
+    /// `/v4/info` serves these bytes directly instead of re-serializing (and
+    /// deep-cloning `Info`'s `Vec`/`String` fields) on every request.
+    pub info_json: Arc<Vec<u8>>,
     /// Opens byte streams at playback time. Shared by every player.
     pub opener: Arc<StreamOpener>,
     /// Filter names a `PATCH player` is rejected for naming. Fixed at startup, and
@@ -73,6 +77,10 @@ impl AppState {
             plugins: Vec::new(),
         };
 
+        let info_json = Arc::new(
+            serde_json::to_vec(&info).expect("Info's fields are all plain JSON-safe types"),
+        );
+
         Self {
             disabled_filters: config.disabled_filters().into(),
             config,
@@ -80,6 +88,7 @@ impl AppState {
             loader,
             stats: Arc::new(StatsCollector::new(started_at)),
             info: Arc::new(info),
+            info_json,
             opener: Arc::new(opener),
         }
     }
