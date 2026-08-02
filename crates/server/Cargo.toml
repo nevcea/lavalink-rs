@@ -16,7 +16,6 @@ tracing.workspace = true
 
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net"] }
-tokio-util = "0.7"
 futures-util = "0.3"
 tower = "0.5"
 async-trait = "0.1"
