@@ -97,10 +97,12 @@ async fn sweep_tick(state: AppState) {
 
     loop {
         interval.tick().await;
-        for session in state.sessions.sweep_expired(Instant::now()) {
+        let expired = state.sessions.sweep_expired(Instant::now());
+        futures_util::future::join_all(expired.into_iter().map(|session| async move {
             tracing::info!(session = %session.id, "resume window expired");
             session.shutdown().await;
-        }
+        }))
+        .await;
         // Rides along here rather than getting a task of its own: it is the same
         // "collect what has timed out" shape on the same cadence, and the loader's
         // own expiry check only fires when an identifier happens to be looked up
