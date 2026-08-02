@@ -122,6 +122,12 @@ struct State {
 /// How many corrupt frames in a row before the track is given up on.
 const MAX_CONSECUTIVE_ERRORS: u32 = 32;
 
+/// A container-declared sample rate outside this range cannot be a real audio
+/// stream. Left unchecked, a degenerate value (e.g. `1`) makes the resampler's
+/// step size (`source_rate / 48000`) tiny, so a single ordinary packet reserves
+/// tens of millions of output frames on a thread with no memory bound.
+const SANE_SAMPLE_RATE_HZ: std::ops::RangeInclusive<u32> = 4_000..=384_000;
+
 /// How long `write_interruptibly` waits for ring space before checking for new
 /// commands again. Long enough that an idle wait costs nothing, short enough that a
 /// pause or a seek is not sitting behind a full ring for a noticeable time.
@@ -177,6 +183,12 @@ fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
         })?;
 
     let source_rate = params.sample_rate.unwrap_or(super::ring::SAMPLE_RATE);
+    if !SANE_SAMPLE_RATE_HZ.contains(&source_rate) {
+        return Err(Exception::common(
+            format!("The container declares an implausible sample rate: {source_rate}Hz"),
+            "implausible sample rate",
+        ));
+    }
     let source_channels = params
         .channels
         .map(|channels| channels.count())
@@ -1094,6 +1106,30 @@ mod tests {
     fn a_path_without_an_extension_gives_no_hint() {
         let track = info("http", Some("https://a.invalid/stream"), "s");
         assert_eq!(extension_hint(&track), None);
+    }
+
+    /// The bug this guards: an unchecked container-declared sample rate makes the
+    /// resampler's step size (`source_rate / 48000`) tiny, so one ordinary packet
+    /// would reserve tens of millions of output frames. A WAV declaring 1Hz must be
+    /// refused at `open`, not decoded.
+    #[test]
+    fn an_implausible_sample_rate_fails_without_having_started() {
+        let wav = TempWav::new("implausible-rate", 1, 1, 1.0);
+        let (outcome, delivered, _position) = play(PumpConfig {
+            info: wav.track(),
+            start_position_ms: 0,
+            end_time_ms: None,
+            volume: 100,
+            filters: Filters::default(),
+            opener: Arc::new(StreamOpener::default()),
+            interrupt: Arc::new(AtomicBool::new(false)),
+        });
+
+        assert!(
+            matches!(outcome, PumpOutcome::Failed { started: false, .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(delivered, 0);
     }
 
     #[test]
