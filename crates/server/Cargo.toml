@@ -24,7 +24,7 @@ serde_yaml = "0.9"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.10"
 subtle = "2"
-sysinfo = "0.32"
+sysinfo = "0.39"
 
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "stream"] }
 # Only the codecs/containers probe.rs's container_name() and the source managers
