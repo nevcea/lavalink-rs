@@ -1447,7 +1447,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -1718,7 +1718,7 @@ dependencies = [
  "songbird",
  "thiserror 1.0.69",
  "tokio",
- "tokio-tungstenite 0.26.2",
+ "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2633,7 +2633,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.42",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -2671,7 +2671,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -4084,8 +4084,12 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
+ "rustls 0.23.42",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tungstenite 0.29.0",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -4312,6 +4316,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
+ "rustls 0.23.42",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.19",
 ]
