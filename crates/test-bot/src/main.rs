@@ -70,7 +70,9 @@ impl EventHandler for Handler {
             return;
         }
         let Some(guild_id) = msg.guild_id else {
-            let _ = msg.reply(&ctx.http, "guild channels only").await;
+            if let Err(error) = msg.reply(&ctx.http, "guild channels only").await {
+                tracing::warn!(%error, "failed to send reply");
+            }
             return;
         };
 
@@ -84,7 +86,9 @@ impl EventHandler for Handler {
             .unwrap_or_else(|error| format!("`{error}`"));
 
         if !reply.is_empty() {
-            let _ = msg.reply(&ctx.http, reply).await;
+            if let Err(error) = msg.reply(&ctx.http, reply).await {
+                tracing::warn!(%error, "failed to send reply");
+            }
         }
     }
 }
