@@ -4,7 +4,9 @@
 //! arithmetic (see `audio::resample`'s module docs), so it is the one worth
 //! watching for a regression a refactor could introduce silently.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use lavalink_server::audio::resample::Resampler;
 use lavalink_server::audio::ring::CHANNELS;
 

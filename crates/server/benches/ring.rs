@@ -7,11 +7,12 @@
 //! the node is carrying — so it bounds concurrent-player capacity more directly
 //! than the decode side does.
 
+use std::hint::black_box;
 use std::io::Read as _;
 use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use lavalink_server::audio::ring::{self, FrameCounters, RingReader, RingWriter, CHANNELS};
 
 mod common;
