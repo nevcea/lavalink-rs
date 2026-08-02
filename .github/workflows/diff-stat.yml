@@ -1,0 +1,41 @@
+name: Diff Stat
+
+on:
+  pull_request_target:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  diffstat:
+    name: Line Diff vs dev
+    permissions:
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code from PR branch
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          # PR code is only diff-stat'd via git, never executed
+          allow-unsafe-pr-checkout: true
+          persist-credentials: false
+      - name: Compute diff stat against dev
+        run: |
+          git remote add upstream https://github.com/${{ github.repository }}
+          git fetch upstream dev
+          echo '### Diff stat vs `dev`' > diff_stat.md
+          echo '```' >> diff_stat.md
+          git diff --stat upstream/dev...${{ github.event.pull_request.head.sha }} -- crates/ >> diff_stat.md
+          echo '```' >> diff_stat.md
+      - name: Comment diff stat
+        uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ignore_empty: true
+          skip_unchanged: true
+          recreate: true
+          path: diff_stat.md
