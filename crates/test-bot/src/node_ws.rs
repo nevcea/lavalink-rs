@@ -47,7 +47,10 @@ async fn connect_once(
     headers.insert("User-Id", user_id.to_string().parse()?);
     // The node logs a warning when this is missing, and asking for it while not
     // sending it would be rude.
-    headers.insert("Client-Name", "lavalink-test-bot/0.1.0".parse()?);
+    headers.insert(
+        "Client-Name",
+        concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")).parse()?,
+    );
 
     let (stream, _) = tokio_tungstenite::connect_async(request).await?;
     tracing::info!("connected to the node websocket");
