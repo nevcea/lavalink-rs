@@ -35,8 +35,8 @@ pub enum NodeError {
 /// lives behind a lock that the websocket task writes and the command handlers read.
 pub struct Node {
     client: reqwest::Client,
-    host: String,
-    password: String,
+    pub(crate) host: String,
+    pub(crate) password: String,
     session_id: Arc<RwLock<Option<String>>>,
 }
 
@@ -48,16 +48,6 @@ impl Node {
             password: password.to_owned(),
             session_id: Arc::new(RwLock::new(None)),
         }
-    }
-
-    /// The websocket task builds its own URL from these rather than sharing the
-    /// REST client, because it needs a `ws://` scheme and its own header set.
-    pub fn host(&self) -> String {
-        self.host.clone()
-    }
-
-    pub fn password(&self) -> String {
-        self.password.clone()
     }
 
     /// Shared with the websocket task, which fills it in on `ready`.

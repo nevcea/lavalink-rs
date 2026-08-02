@@ -61,7 +61,7 @@ impl EventHandler for Handler {
         }
 
         let session = self.node.session_slot();
-        let (host, password) = (self.node.host(), self.node.password());
+        let (host, password) = (self.node.host.clone(), self.node.password.clone());
         tokio::spawn(node_ws::run(host, password, user_id, session));
     }
 

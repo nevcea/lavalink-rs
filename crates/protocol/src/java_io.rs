@@ -41,10 +41,6 @@ impl<'a> DataInput<'a> {
         &self.bytes[self.offset..]
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.offset >= self.bytes.len()
-    }
-
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let available = self.bytes.len() - self.offset;
         if available < n {
@@ -356,7 +352,7 @@ mod tests {
         assert!(input.read_bool().unwrap());
         assert_eq!(input.read_nullable_utf().unwrap(), None);
         assert_eq!(input.read_nullable_utf().unwrap().as_deref(), Some("uri"));
-        assert!(input.is_empty());
+        assert!(input.remaining().is_empty());
     }
 
     #[test]
