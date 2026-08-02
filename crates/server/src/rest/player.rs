@@ -153,6 +153,17 @@ pub async fn patch_player(
                 "Failed to connect to voice server",
             )
         })?;
+
+        // A `DELETE` landing in the window between `state.player()` above and this
+        // `await` already tore this guild's player down — `engine.shutdown()` calls
+        // `voice.leave()` — and nothing owns the connection this `connect` just
+        // re-established. Leave again rather than hand a patch to an actor that is
+        // no longer registered (and may not even be this same one, if a fresh
+        // player was already built in its place).
+        if session.player(guild_id).is_none() {
+            connection.leave().await;
+            return Err(ApiError::unavailable("The player is not accepting commands"));
+        }
     }
 
     let request = PatchRequest {
