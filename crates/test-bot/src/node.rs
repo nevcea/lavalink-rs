@@ -33,7 +33,6 @@ pub enum NodeError {
 ///
 /// The session id arrives asynchronously over the websocket (`op: "ready"`), so it
 /// lives behind a lock that the websocket task writes and the command handlers read.
-#[derive(Clone)]
 pub struct Node {
     client: reqwest::Client,
     host: String,
