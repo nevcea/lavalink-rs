@@ -45,7 +45,7 @@ songbird = { version = "0.6", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-criterion = { version = "0.5.1", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
 # Already in the tree transitively via axum; `util` just exposes `oneshot` so
 # router wiring (fallbacks, layer ordering) can be tested as real HTTP calls
