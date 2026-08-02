@@ -28,7 +28,7 @@ use lavalink_protocol::filters::Filters;
 use lavalink_protocol::player::TrackInfo;
 use lavalink_protocol::Exception;
 use symphonia::core::audio::{AudioBufferRef, Signal as _};
-use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
@@ -128,6 +128,25 @@ const MAX_CONSECUTIVE_ERRORS: u32 = 32;
 /// tens of millions of output frames on a thread with no memory bound.
 const SANE_SAMPLE_RATE_HZ: std::ops::RangeInclusive<u32> = 4_000..=384_000;
 
+/// Reads the sample rate and channel count the resampler needs, validating the
+/// rate. Shared between `open` and the `ResetRequired` path (a mid-stream format
+/// change, e.g. a chained Ogg segment at a different rate), so both build the
+/// resampler from the same source of truth instead of one trusting stale params.
+fn source_params(params: &CodecParameters) -> Result<(u32, usize), Exception> {
+    let source_rate = params.sample_rate.unwrap_or(super::ring::SAMPLE_RATE);
+    if !SANE_SAMPLE_RATE_HZ.contains(&source_rate) {
+        return Err(Exception::common(
+            format!("The container declares an implausible sample rate: {source_rate}Hz"),
+            "implausible sample rate",
+        ));
+    }
+    let source_channels = params
+        .channels
+        .map(|channels| channels.count())
+        .unwrap_or(CHANNELS);
+    Ok((source_rate, source_channels))
+}
+
 /// How long `write_interruptibly` waits for ring space before checking for new
 /// commands again. Long enough that an idle wait costs nothing, short enough that a
 /// pause or a seek is not sitting behind a full ring for a noticeable time.
@@ -182,17 +201,7 @@ fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
             )
         })?;
 
-    let source_rate = params.sample_rate.unwrap_or(super::ring::SAMPLE_RATE);
-    if !SANE_SAMPLE_RATE_HZ.contains(&source_rate) {
-        return Err(Exception::common(
-            format!("The container declares an implausible sample rate: {source_rate}Hz"),
-            "implausible sample rate",
-        ));
-    }
-    let source_channels = params
-        .channels
-        .map(|channels| channels.count())
-        .unwrap_or(CHANNELS);
+    let (source_rate, source_channels) = source_params(&params)?;
 
     let mut state = State {
         format,
@@ -260,10 +269,41 @@ impl State {
                     return PumpOutcome::Finished;
                 }
                 Err(SymphoniaError::ResetRequired) => {
-                    // The stream changed format mid-flight, which for us means the
-                    // decoder and the resampler are both stale.
+                    // The stream changed format mid-flight (a chained Ogg segment is
+                    // the common case), which for us means the decoder's state is
+                    // stale and the resampler's *configuration* — the source rate and
+                    // channel count `open` read once — is stale too, not just its
+                    // interpolation state. Rebuilding it from the track's current
+                    // codec params is what `resampler.reset()` alone did not do.
                     self.decoder.reset();
-                    self.resampler.reset();
+                    let params = self
+                        .format
+                        .tracks()
+                        .iter()
+                        .find(|track| track.id == self.track_id)
+                        .map(|track| track.codec_params.clone());
+                    let Some(params) = params else {
+                        writer.finish();
+                        return PumpOutcome::Failed {
+                            exception: Exception::fault(
+                                "The audio track disappeared after a format change",
+                                "track lost on reset",
+                            ),
+                            started: self.produced,
+                        };
+                    };
+                    match source_params(&params) {
+                        Ok((source_rate, source_channels)) => {
+                            self.resampler = Resampler::new(source_rate, source_channels);
+                        }
+                        Err(exception) => {
+                            writer.finish();
+                            return PumpOutcome::Failed {
+                                exception,
+                                started: self.produced,
+                            };
+                        }
+                    }
                     continue;
                 }
                 // The source gave up a stalled reconnect early because a command
@@ -1106,6 +1146,23 @@ mod tests {
     fn a_path_without_an_extension_gives_no_hint() {
         let track = info("http", Some("https://a.invalid/stream"), "s");
         assert_eq!(extension_hint(&track), None);
+    }
+
+    /// `open` and the `ResetRequired` path must agree on what a valid source rate
+    /// is — this is the one function both call into.
+    #[test]
+    fn source_params_reads_the_declared_rate_and_channels() {
+        let mut params = CodecParameters::new();
+        params.sample_rate = Some(44_100);
+        params.channels = Some(symphonia::core::audio::Channels::FRONT_LEFT);
+        assert_eq!(source_params(&params).unwrap(), (44_100, 1));
+    }
+
+    #[test]
+    fn source_params_rejects_an_implausible_rate() {
+        let mut params = CodecParameters::new();
+        params.sample_rate = Some(1);
+        assert!(source_params(&params).is_err());
     }
 
     /// The bug this guards: an unchecked container-declared sample rate makes the
