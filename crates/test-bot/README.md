@@ -21,6 +21,11 @@ features: `gateway` here, `driver` in the server.
 
 ## Running
 
+`scripts/dev.sh` (from the repo root) starts the node in the background, waits
+for it to come up, then runs the bot in the foreground — Ctrl+C stops both. It
+still needs `DISCORD_TOKEN` set (or in a `.env` file) and steps 2-3 below done
+once. Otherwise, to run each half by hand:
+
 1. Start the node:
 
    ```sh

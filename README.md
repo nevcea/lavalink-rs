@@ -26,8 +26,8 @@ parts of the v4 feature set are deliberately not implemented, and why.
 
 - REST + WS surface matching Lavalink v4: loading, playing, filters, player
   updates, session resuming.
-- Sources: `http` and `local` built in; `youtube`, `soundcloud`, `bandcamp`,
-  `deezer` via `yt-dlp` (auto-disabled if `yt-dlp` isn't on `PATH`).
+- Sources: `http`, `local`, and `getyarn.io` built in; `youtube`, `soundcloud`,
+  `bandcamp`, `deezer` via `yt-dlp` (auto-disabled if `yt-dlp` isn't on `PATH`).
 - Filters: 9 of the 10 v4 filters (volume, equalizer, karaoke, tremolo,
   vibrato, distortion, rotation, channelMix, lowPass). `timescale` is the one
   deliberate omission — see `MAINTENANCE.md` for that and everything else
