@@ -102,8 +102,10 @@ full-tree `cargo fmt` produces ~84 diff hunks and destroys at least one table
 the original Java source. Whatever file you touch — including a brand new one
 — match its surrounding style by hand instead.
 
-No CI config and no `rustfmt.toml`/`clippy.toml` exist in the repo; `cargo test` and
-`cargo clippy` are the checks to run yourself before calling something done.
+`.github/workflows/ci.yml` runs `cargo test --workspace` and `cargo clippy
+--workspace --all-targets -- -D warnings` on push to `dev` and on PRs — no
+`rustfmt.toml`/`clippy.toml` exist in the repo, so run `cargo test` and
+`cargo clippy` yourself before calling something done rather than waiting on CI.
 
 ## Architecture
 

@@ -53,6 +53,14 @@ cargo run -p lavalink-server --release
 
 See `application.yml.example` for the full set of options.
 
+## CI
+
+`.github/workflows/ci.yml` runs `cargo test --workspace` and
+`cargo clippy --workspace --all-targets -- -D warnings` on every push to `dev`
+and every PR. `.github/workflows/diff-stat.yml` posts a `crates/` line-diff
+summary on each PR. Dependency updates (`Cargo.toml` and Actions versions) are
+proposed weekly via `.github/dependabot.yml`.
+
 ## Connecting a client
 
 By default the node listens on port `2333` (`server.port`) with REST under
