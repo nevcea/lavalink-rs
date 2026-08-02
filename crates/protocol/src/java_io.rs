@@ -209,6 +209,12 @@ fn encode_modified_utf8_into(value: &str, out: &mut Vec<u8>) {
 }
 
 /// Inverse of [`encode_modified_utf8`]. On failure returns the offset of the bad byte.
+///
+/// Byte-for-byte re-encoding is only guaranteed for input `encode_modified_utf8`
+/// itself could have produced. An overlong sequence (e.g. `0xC1 0xA1` for `'a'`) is
+/// accepted, matching `DataInputStream.readUTF`'s lack of a shortest-form check, but
+/// normalised: it re-encodes shorter. See the surrogate caveat below for the other
+/// input this can't preserve.
 pub fn decode_modified_utf8(bytes: &[u8]) -> std::result::Result<String, usize> {
     // Modified UTF-8 and UTF-8 agree byte-for-byte over `0x00..=0x7F`, which is what
     // the overwhelming majority of these fields are. `\0` is the one ASCII character
@@ -253,8 +259,12 @@ pub fn decode_modified_utf8(bytes: &[u8]) -> std::result::Result<String, usize> 
         }
     }
 
-    // Unpaired surrogates are possible here — Java permits them, and a title that
-    // contains one must survive the round trip rather than be rejected.
+    // Unpaired surrogates are possible here — Java permits them — but a Rust
+    // `String` cannot hold one, so `from_utf16_lossy` replaces each with U+FFFD
+    // rather than preserving it. That is a real, accepted divergence from Java's
+    // `readUTF`, not a round trip: re-encoding a title that had one produces a
+    // different byte sequence (and a different length) than the input. See
+    // `encoded_track.rs`'s module docs for what "byte-for-byte" is scoped to.
     Ok(String::from_utf16_lossy(&units))
 }
 
