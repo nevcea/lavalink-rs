@@ -103,6 +103,29 @@ idle-read stall threshold) are both modelled, in `crates/server/src/config.rs`'s
 `Timeouts` and used by `audio/stream.rs`'s `StreamOpener`; this third key is
 unmappable, not merely unimplemented.
 
+## `bufferDurationMs` — not implemented
+
+This is lavaplayer's own decode-side buffer: how far `AudioPlayerManager` reads
+and holds PCM ahead of what it hands the caller, internal to a component this
+node does not have. It is not the same knob as `frameBufferDurationMs`, which
+this node does model (`crates/server/src/config.rs`'s `Timeouts`-adjacent
+fields, consumed by `audio/ring.rs`) and which governs the actual
+pump-to-mixer buffer in this pipeline. There is no lavaplayer decode stage
+here for `bufferDurationMs` to size, so the key is accepted and ignored like
+any other unmodelled one, the same way `opusEncodingQuality` is unmappable
+rather than merely unimplemented.
+
+## `useSeekGhosting` — not implemented
+
+Upstream's lavaplayer synthesizes silence frames while a seek re-buffers, so a
+client hears quiet instead of a stall during the gap. This node has no
+equivalent toggle, but it is not missing the underlying behavior: `ring.rs`
+already hands the mixer nulled frames whenever the pump has not produced real
+ones yet — the same mechanism a starved pump uses generally, not a seek
+special case — and does so unconditionally rather than behind a switch. So a
+seek here never stalls the output either; there is simply no config key
+because there is no code path that needs to be turned off.
+
 ## `soundcloudFilterOutPreviewTracks` — not implemented
 
 This key tells upstream to skip tracks SoundCloud marks with a `policy: SNIP`
