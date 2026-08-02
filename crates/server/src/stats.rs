@@ -99,7 +99,7 @@ impl StatsCollector {
     pub fn new(started_at: Instant) -> Self {
         let mut system = System::new();
         system.refresh_memory();
-        let cores = system.physical_core_count().unwrap_or(1) as i32;
+        let cores = System::physical_core_count().unwrap_or(1) as i32;
 
         Self {
             started_at,
@@ -143,7 +143,7 @@ impl StatsCollector {
             ProcessesToUpdate::Some(&[self.pid]),
             // Do not prune processes that vanished: we only ever ask about our own.
             false,
-            ProcessRefreshKind::new().with_cpu().with_memory(),
+            ProcessRefreshKind::nothing().with_cpu().with_memory(),
         );
 
         let process = system.process(self.pid);
