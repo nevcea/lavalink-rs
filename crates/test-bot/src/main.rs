@@ -25,7 +25,7 @@ use lavalink_protocol::{LoadResult, Omissible, Track};
 use serenity::all::{Context, EventHandler, GatewayIntents, GuildId, Message, Ready, ShardManager};
 use serenity::{async_trait, Client};
 use songbird::{SerenityInit, Songbird};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use node::{Node, NodeError};
 
@@ -40,7 +40,7 @@ struct Handler {
     filters: Mutex<HashMap<u64, Filters>>,
     /// Set once `main` has the built [`Client`] in hand — it does not exist yet when
     /// `Handler` is constructed. `!ping` reads the shard's heartbeat latency from it.
-    shard_manager: Arc<RwLock<Option<Arc<ShardManager>>>>,
+    shard_manager: Arc<OnceLock<Arc<ShardManager>>>,
     /// `ready` fires on every IDENTIFY, not just the first — a failed session resume
     /// re-triggers it. Without this guard, each re-identify would spawn another
     /// websocket task and register another session on the node.
@@ -396,7 +396,7 @@ impl Handler {
     /// The Discord gateway heartbeat latency for the shard this message arrived on —
     /// the same number the client logs on every `Ready`/`Resumed`, surfaced on demand.
     async fn gateway_latency(&self, ctx: &Context) -> String {
-        let Some(shard_manager) = self.shard_manager.read().await.clone() else {
+        let Some(shard_manager) = self.shard_manager.get().cloned() else {
             return "pong! (shard manager not ready yet)".into();
         };
         let latency = shard_manager
@@ -454,7 +454,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let songbird = Songbird::serenity();
     // `Handler` is moved into the builder below, before the `Client` (and its
     // `shard_manager`) exists — shared so it can be filled in afterwards.
-    let shard_manager_slot = Arc::new(RwLock::new(None));
+    let shard_manager_slot = Arc::new(OnceLock::new());
     let handler = Handler {
         node: Node::new(&host, &password),
         songbird: Arc::clone(&songbird),
@@ -475,7 +475,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .event_handler(handler)
         .register_songbird_with(songbird)
         .await?;
-    *shard_manager_slot.write().await = Some(Arc::clone(&client.shard_manager));
+    let _ = shard_manager_slot.set(Arc::clone(&client.shard_manager));
 
     tracing::info!(%host, "starting; node websocket opens once Discord confirms login");
     client.start().await?;
