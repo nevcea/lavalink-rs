@@ -70,13 +70,16 @@ impl Node {
         self.session_id.read().await.clone().ok_or(NodeError::NoSession)
     }
 
-    async fn send<T: serde::de::DeserializeOwned>(
+    /// Sends a request and checks the status, leaving the body's shape (or absence)
+    /// to the caller — a `DELETE` answers 204 with nothing, which [`send`] cannot
+    /// share since it always decodes JSON.
+    async fn request(
         &self,
         method: Method,
         path: &str,
         query: &[(&str, &str)],
         body: Option<&impl serde::Serialize>,
-    ) -> Result<T, NodeError> {
+    ) -> Result<reqwest::Response, NodeError> {
         let mut request = self
             .client
             .request(method, format!("http://{}{path}", self.host))
@@ -92,7 +95,17 @@ impl Node {
             let body = response.text().await.unwrap_or_default();
             return Err(NodeError::Status { status, body });
         }
-        Ok(response.json().await?)
+        Ok(response)
+    }
+
+    async fn send<T: serde::de::DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<&impl serde::Serialize>,
+    ) -> Result<T, NodeError> {
+        Ok(self.request(method, path, query, body).await?.json().await?)
     }
 
     pub async fn info(&self) -> Result<Info, NodeError> {
@@ -157,21 +170,13 @@ impl Node {
     /// `DELETE` answers 204 with no body, so it does not go through [`send`].
     pub async fn destroy_player(&self, guild_id: u64) -> Result<(), NodeError> {
         let session = self.session_id().await?;
-        let response = self
-            .client
-            .delete(format!(
-                "http://{}/v4/sessions/{session}/players/{guild_id}",
-                self.host
-            ))
-            .header("Authorization", &self.password)
-            .send()
-            .await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(NodeError::Status { status, body });
-        }
+        self.request(
+            Method::DELETE,
+            &format!("/v4/sessions/{session}/players/{guild_id}"),
+            &[],
+            NO_BODY,
+        )
+        .await?;
         Ok(())
     }
 }
