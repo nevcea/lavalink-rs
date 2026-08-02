@@ -127,6 +127,10 @@ impl StreamOpener {
                 let url = info.uri.clone().unwrap_or_else(|| info.identifier.clone());
                 self.open_http(&url, None, interrupt)
             }
+            // Unlike "http", `identifier` here is the direct CDN video URL and
+            // `uri` is the original getyarn.io page — the two are not
+            // interchangeable the way they are for a plain http(s) track.
+            "getyarn.io" => self.open_http(&info.identifier, None, interrupt),
             "youtube" | "soundcloud" | "bandcamp" => {
                 let kind = match info.source_name.as_str() {
                     "youtube" => SourceKind::YouTube,

@@ -1,14 +1,16 @@
 //! Source managers.
 //!
-//! Four of the original's nine (`twitch`, `vimeo` and `nico` are refused — see
-//! `MAINTENANCE.md` — and `getyarn` is not implemented), plus `deezer`, which is
-//! not one of the original nine at all: upstream ships it as a separate plugin.
-//! The trait is the seam anything further would slot into. Each manager answers
-//! two questions: does this identifier belong to me, and if so what track does it
-//! name.
+//! Three of the original's nine (`twitch`, `vimeo` and `nico`) are refused — see
+//! `MAINTENANCE.md` — plus `deezer`, which is not one of the original nine at
+//! all: upstream ships it as a separate plugin. The trait is the seam anything
+//! further would slot into. Each manager answers two questions: does this
+//! identifier belong to me, and if so what track does it name.
 //!
 //! [`youtube`], [`soundcloud`] and [`bandcamp`] are all thin: the URL shapes are
-//! theirs, and the extraction belongs to the shared [`ytdlp`] backend.
+//! theirs, and the extraction belongs to the shared [`ytdlp`] backend. [`getyarn`]
+//! is thin in a different way: unlike Twitch/Vimeo/Nico, getyarn.io's pages embed
+//! a direct non-HLS video URL in an Open Graph tag, so it needs neither yt-dlp
+//! nor a scraping crate — just one GET and two tag reads.
 //!
 //! [`deezer`] is a different shape entirely: Deezer's own API hands back metadata
 //! but never a full-length stream, so it resolves through Deezer's HTTP API at load
@@ -23,6 +25,7 @@
 
 pub mod bandcamp;
 pub mod deezer;
+pub mod getyarn;
 pub mod http;
 pub mod local;
 pub mod probe;
@@ -36,6 +39,7 @@ use lavalink_protocol::{Exception, Severity};
 
 pub use bandcamp::BandcampSource;
 pub use deezer::DeezerSource;
+pub use getyarn::GetyarnSource;
 pub use http::HttpSource;
 pub use local::LocalSource;
 pub use soundcloud::SoundCloudSource;

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lavalink_server::audio::source::{
-    configured_proxy, BandcampSource, DeezerSource, HttpSource, LocalSource, SoundCloudSource,
-    SourceManager, YouTubeSource, YtDlp,
+    configured_proxy, BandcampSource, DeezerSource, GetyarnSource, HttpSource, LocalSource,
+    SoundCloudSource, SourceManager, YouTubeSource, YtDlp,
 };
 use lavalink_server::audio::stream::StreamOpener;
 use lavalink_server::config::Config;
@@ -144,6 +144,17 @@ fn source_managers(
     }
     if config.lavalink.server.sources.local {
         managers.push(Arc::new(LocalSource::new()));
+    }
+    if config.lavalink.server.sources.getyarn {
+        // Must precede "http" below: getyarn.io URLs are https(s) too, and the
+        // generic http source would otherwise claim them first and fetch the
+        // page itself instead of the clip.
+        match GetyarnSource::new(proxy.clone()) {
+            Ok(source) => managers.push(Arc::new(source)),
+            Err(error) => {
+                tracing::error!(%error, "could not start the getyarn source; disabling it")
+            }
+        }
     }
     if config.lavalink.server.sources.http {
         match HttpSource::new(proxy) {

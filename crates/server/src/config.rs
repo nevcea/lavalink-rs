@@ -239,6 +239,8 @@ pub struct Sources {
     /// `audio::source::deezer` — so it is subject to the same yt-dlp detection as
     /// the sources above despite not using yt-dlp to load.
     pub deezer: bool,
+    /// Does not use yt-dlp — see `audio::source::getyarn`.
+    pub getyarn: bool,
 }
 
 impl Default for Sources {
@@ -251,6 +253,7 @@ impl Default for Sources {
             soundcloud: false,
             bandcamp: false,
             deezer: false,
+            getyarn: false,
         }
     }
 }

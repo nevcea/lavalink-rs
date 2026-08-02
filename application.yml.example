@@ -27,6 +27,9 @@ lavalink:
       soundcloud: false
       bandcamp: false
       deezer: false
+      # getyarn.io short clips. Does not need yt-dlp — its pages carry a direct
+      # video URL already.
+      getyarn: false
 
     # false leaves direct URLs and playlists claimed; only the search prefix
     # (ytsearch:/ytmsearch:, scsearch:) stops being claimed.
