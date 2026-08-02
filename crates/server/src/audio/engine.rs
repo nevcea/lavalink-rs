@@ -129,8 +129,16 @@ impl PipelineEngine {
 
     fn send_to_pump(&self, command: PumpCommand) {
         if let Some(active) = lock(&self.active).as_ref() {
-            active.interrupt.store(true, Ordering::Relaxed);
+            // Sent before the flag is set, not after: `drain_commands`'s `Empty`
+            // branch clears `interrupt` once it finds nothing to act on, and a
+            // channel `send` is visible to any `try_recv` that follows it. Setting
+            // the flag first left a window where `drain_commands` could observe
+            // `Empty` (this send hadn't landed yet), clear the flag, and then the
+            // command would arrive with nothing left to tell a stalled source a
+            // command was waiting — reinstating the full reconnect stall the flag
+            // exists to cut short.
             let _ = active.commands.send(command);
+            active.interrupt.store(true, Ordering::Relaxed);
         }
     }
 
