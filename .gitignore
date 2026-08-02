@@ -1,3 +1,4 @@
 /target
 application.yml
 .claude/
+.env
