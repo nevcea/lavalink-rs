@@ -4,7 +4,9 @@
 //! playing track (`audio::filter`'s module docs), so this answers "what does turning
 //! filters on cost" rather than anything about a single algorithm in isolation.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use lavalink_protocol::filters::Filters;
 use lavalink_server::audio::filter::FilterChain;
 use lavalink_server::audio::pump::filter_interleaved;
