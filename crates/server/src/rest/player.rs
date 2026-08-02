@@ -28,14 +28,13 @@ pub async fn list_players(
 ) -> Result<Json<Players>, ApiError> {
     let session = session(&state, &session_id)?;
 
-    let mut players = Vec::new();
-    for handle in session.players() {
-        // A player whose actor has gone is simply not listed, rather than failing
-        // the whole request.
-        if let Ok(player) = handle.snapshot().await {
-            players.push(player);
-        }
-    }
+    // A player whose actor has gone is simply not listed, rather than failing
+    // the whole request.
+    let snapshots = futures_util::future::join_all(
+        session.players().into_iter().map(|handle| async move { handle.snapshot().await }),
+    )
+    .await;
+    let players = snapshots.into_iter().filter_map(Result::ok).collect();
 
     Ok(Json(Players(players)))
 }
