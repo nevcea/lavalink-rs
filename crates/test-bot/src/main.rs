@@ -17,7 +17,7 @@ mod node;
 mod node_ws;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use lavalink_protocol::filters::{Band, Filters, LowPass};
 use lavalink_protocol::player::{PlayerUpdate, PlayerUpdateTrack, VoiceState};
@@ -41,6 +41,10 @@ struct Handler {
     /// Set once `main` has the built [`Client`] in hand — it does not exist yet when
     /// `Handler` is constructed. `!ping` reads the shard's heartbeat latency from it.
     shard_manager: Arc<RwLock<Option<Arc<ShardManager>>>>,
+    /// `ready` fires on every IDENTIFY, not just the first — a failed session resume
+    /// re-triggers it. Without this guard, each re-identify would spawn another
+    /// websocket task and register another session on the node.
+    ws_started: OnceLock<()>,
 }
 
 #[async_trait]
@@ -50,6 +54,11 @@ impl EventHandler for Handler {
     async fn ready(&self, _ctx: Context, ready: Ready) {
         let user_id = ready.user.id.get();
         tracing::info!(user = %ready.user.name, user_id, "logged in");
+
+        if self.ws_started.set(()).is_err() {
+            tracing::debug!("re-identify — node websocket task already running");
+            return;
+        }
 
         let session = self.node.session_slot();
         let (host, password) = (self.node.host(), self.node.password());
@@ -447,6 +456,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         songbird: Arc::clone(&songbird),
         filters: Mutex::new(HashMap::new()),
         shard_manager: Arc::clone(&shard_manager_slot),
+        ws_started: OnceLock::new(),
     };
 
     // `GUILD_VOICE_STATES` is what makes the caller's current voice channel
