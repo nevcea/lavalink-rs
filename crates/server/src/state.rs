@@ -45,6 +45,12 @@ pub struct AppState {
     /// the complement of `info.filters` — computed here once so the two cannot
     /// disagree, and so a request carrying filters does not rebuild the list.
     pub disabled_filters: Arc<[String]>,
+    /// Fires once when the node is asked to shut down, so `ws.rs`'s per-connection
+    /// pump loop can send a clean close frame instead of being cut off mid-stream
+    /// when the process exits (`axum::serve`'s graceful shutdown otherwise only
+    /// stops accepting new connections and waits for existing ones to end on
+    /// their own, which a healthy client never does by itself).
+    pub shutdown: tokio::sync::watch::Receiver<()>,
 }
 
 impl AppState {
@@ -53,6 +59,7 @@ impl AppState {
         loader: Loader,
         opener: StreamOpener,
         started_at: Instant,
+        shutdown: tokio::sync::watch::Receiver<()>,
     ) -> Self {
         let config = Arc::new(config);
         let loader = Arc::new(loader);
@@ -90,6 +97,7 @@ impl AppState {
             info: Arc::new(info),
             info_json,
             opener: Arc::new(opener),
+            shutdown,
         }
     }
 
@@ -167,6 +175,7 @@ mod tests {
             Loader::new(Vec::new()),
             StreamOpener::default(),
             Instant::now(),
+            tokio::sync::watch::channel(()).1,
         )
     }
 

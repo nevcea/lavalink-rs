@@ -76,7 +76,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_millis(timeouts.connect_timeout_ms),
         Duration::from_millis(timeouts.socket_timeout_ms),
     );
-    let state = AppState::new(config, loader, opener, started_at);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    let state = AppState::new(config, loader, opener, started_at, shutdown_rx);
 
     tracing::info!(
         sources = ?state.info.source_managers,
@@ -87,10 +88,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(serve(state))
+    runtime.block_on(serve(state, shutdown_tx))
 }
 
-async fn serve(state: AppState) -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(
+    state: AppState,
+    shutdown_tx: tokio::sync::watch::Sender<()>,
+) -> Result<(), Box<dyn std::error::Error>> {
     ticker::spawn(state.clone());
 
     let address = SocketAddr::new(state.config.server.address, state.config.server.port);
@@ -98,7 +102,7 @@ async fn serve(state: AppState) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(%address, "listening");
 
     axum::serve(listener, rest::router(state))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown_tx))
         .await?;
 
     Ok(())
@@ -168,7 +172,38 @@ fn source_managers(
     managers
 }
 
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+/// Waits for SIGINT or SIGTERM, whichever an orchestrator sends — `docker stop`,
+/// a Kubernetes pod eviction, and `systemctl stop` all send SIGTERM, not SIGINT,
+/// so `ctrl_c()` alone never caught them and `axum::serve`'s graceful shutdown
+/// never ran on a normal restart.
+///
+/// Fires `shutdown_tx` before returning: `axum::serve`'s own graceful shutdown
+/// only stops accepting new connections and waits for existing ones to end on
+/// their own, which an already-upgraded websocket never does by itself. Every
+/// `ws.rs` connection watches this same channel to send a clean close frame
+/// instead.
+async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<()>) {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "could not install a SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
     tracing::info!("shutting down");
+    let _ = shutdown_tx.send(());
 }

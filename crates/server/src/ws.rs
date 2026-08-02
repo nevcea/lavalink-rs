@@ -30,6 +30,10 @@ use crate::state::AppState;
 /// Sent when the client stops draining essential messages.
 const CLOSE_POLICY_VIOLATION: u16 = 1008;
 
+/// Sent to every connected client when the node is shutting down, so a restart
+/// closes the socket cleanly instead of the connection just dying with the process.
+const CLOSE_GOING_AWAY: u16 = 1001;
+
 /// The point at which a client is considered unresponsive. Below the sink's own
 /// capacity, so the session is closed deliberately rather than after messages have
 /// already been refused.
@@ -136,9 +140,23 @@ async fn run(
 /// Drives the socket until it closes.
 async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) {
     let (mut writer, mut reader) = socket.split();
+    let mut shutdown = state.shutdown.clone();
 
     loop {
         tokio::select! {
+            _ = shutdown.changed() => {
+                tracing::info!(session = %session.id, "node is shutting down; closing the session");
+                let _ = tokio::time::timeout(
+                    WRITE_TIMEOUT,
+                    writer.send(WsMessage::Close(Some(CloseFrame {
+                        code: CLOSE_GOING_AWAY,
+                        reason: "node is shutting down".into(),
+                    }))),
+                )
+                .await;
+                break;
+            }
+
             // v4 has no client-to-server messages; the original logs and ignores
             // them (`SocketServer.kt:172`). We still have to read, or close frames
             // and pings never arrive.

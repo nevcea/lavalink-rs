@@ -128,6 +128,7 @@ mod tests {
             crate::loader::Loader::new(Vec::new()),
             crate::audio::stream::StreamOpener::default(),
             std::time::Instant::now(),
+            tokio::sync::watch::channel(()).1,
         )
     }
 
