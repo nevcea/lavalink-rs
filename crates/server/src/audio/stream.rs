@@ -404,6 +404,17 @@ impl HttpMediaSource {
             .map_err(|error| SourceError::Io(error.to_string()))?;
 
         let status = response.status();
+
+        // A range request landing exactly at (or past) the end of the resource is a
+        // valid "nothing left to read" answer, not a failure — symphonia's probe now
+        // seeks near the end of the stream looking for trailing metadata (ID3v1/APE),
+        // which a seekable-but-short source can legitimately walk past the end of.
+        if offset > 0 && status == StatusCode::RANGE_NOT_SATISFIABLE {
+            self.position = offset;
+            *self.lock_reader() = None;
+            return Ok(());
+        }
+
         if !status.is_success() {
             return Err(match status {
                 StatusCode::NOT_FOUND | StatusCode::GONE => SourceError::NotFound,
@@ -631,6 +642,63 @@ mod tests {
         });
 
         format!("http://{addr}")
+    }
+
+    /// A server that answers the first request with the full body and Accept-Ranges,
+    /// and any subsequent `Range` request with `416 Range Not Satisfiable` — what a
+    /// real server sends when the requested range starts at or past the resource's
+    /// end.
+    fn spawn_server_that_416s_past_eof(full_body: &'static [u8]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                consume_request(&stream);
+
+                if attempt == 0 {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n\r\n",
+                        full_body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(full_body).unwrap();
+                } else {
+                    write!(
+                        stream,
+                        "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\n\r\n",
+                        full_body.len()
+                    )
+                    .unwrap();
+                }
+            }
+        });
+
+        format!("http://{addr}")
+    }
+
+    /// The bug this fix targets: symphonia 0.6's probe seeks near the end of a
+    /// seekable source looking for trailing metadata (ID3v1/APE tags). A seek to
+    /// (or past) the resource's actual end is answered by real servers with `416`,
+    /// which used to propagate straight out of `connect` as a hard failure —
+    /// surfacing as `Could not read the container: 416: Range Not Satisfiable`
+    /// even for an otherwise perfectly playable file. It must instead be treated
+    /// as "nothing left to read from here", the same as any other clean EOF.
+    #[test]
+    fn a_seek_past_eof_reads_as_empty_instead_of_failing() {
+        const BODY: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        let url = spawn_server_that_416s_past_eof(BODY);
+
+        let mut source = HttpMediaSource::open(&url, None, None).unwrap();
+        assert!(source.is_seekable());
+
+        source.seek(SeekFrom::End(0)).unwrap();
+
+        let mut buffer = [0u8; 4096];
+        let read = source.read(&mut buffer).unwrap();
+        assert_eq!(read, 0, "a seek past EOF must read as empty, not error");
     }
 
     /// The scenario from the bug report: a track that has already produced audio
