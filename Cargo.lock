@@ -1677,7 +1677,7 @@ dependencies = [
  "base64",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1698,7 +1698,7 @@ dependencies = [
  "subtle",
  "symphonia",
  "sysinfo",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "tokio",
  "tower",
  "tracing",
@@ -1716,7 +1716,7 @@ dependencies = [
  "serde_json",
  "serenity",
  "songbird",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tracing",
