@@ -52,11 +52,10 @@ async fn connect_once(
         concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")).parse()?,
     );
 
-    let (stream, _) = tokio_tungstenite::connect_async(request).await?;
+    let (mut stream, _) = tokio_tungstenite::connect_async(request).await?;
     tracing::info!("connected to the node websocket");
-    let (_write, mut read) = stream.split();
 
-    while let Some(frame) = read.next().await {
+    while let Some(frame) = stream.next().await {
         let text = match frame? {
             WsMessage::Text(text) => text,
             WsMessage::Close(frame) => {
