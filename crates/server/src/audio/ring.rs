@@ -416,7 +416,11 @@ impl Seek for RingReader {
     }
 }
 
-impl symphonia::core::io::MediaSource for RingReader {
+// Implemented against songbird's own vendored symphonia-core (currently 0.5.x,
+// re-exported as `songbird::input::core`), not this crate's own `symphonia`
+// dependency — `RawAdapter` requires the trait from songbird's copy specifically,
+// and the two are unrelated crate instances once their versions diverge.
+impl songbird::input::core::io::MediaSource for RingReader {
     /// Always false, and this is load-bearing.
     ///
     /// The mixer wraps this in its raw adapter and would otherwise be entitled to

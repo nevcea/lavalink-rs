@@ -27,13 +27,16 @@ use std::sync::Arc;
 use lavalink_protocol::filters::Filters;
 use lavalink_protocol::player::TrackInfo;
 use lavalink_protocol::Exception;
-use symphonia::core::audio::{AudioBufferRef, Signal as _};
-use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::audio::{Audio as _, GenericAudioBufferRef};
+use symphonia::core::codecs::audio::{
+    AudioCodecParameters, AudioDecoder, AudioDecoderOptions, CODEC_ID_NULL_AUDIO,
+};
+use symphonia::core::codecs::CodecParameters;
 use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 
 use super::filter::{player_volume_multiplier, FilterChain};
@@ -92,7 +95,7 @@ pub fn run(
 
 struct State {
     format: Box<dyn FormatReader>,
-    decoder: Box<dyn Decoder>,
+    decoder: Box<dyn AudioDecoder>,
     track_id: u32,
     resampler: Resampler,
     filters: FilterChain,
@@ -132,7 +135,7 @@ const SANE_SAMPLE_RATE_HZ: std::ops::RangeInclusive<u32> = 4_000..=384_000;
 /// rate. Shared between `open` and the `ResetRequired` path (a mid-stream format
 /// change, e.g. a chained Ogg segment at a different rate), so both build the
 /// resampler from the same source of truth instead of one trusting stale params.
-fn source_params(params: &CodecParameters) -> Result<(u32, usize), Exception> {
+fn source_params(params: &AudioCodecParameters) -> Result<(u32, usize), Exception> {
     let source_rate = params.sample_rate.unwrap_or(super::ring::SAMPLE_RATE);
     if !SANE_SAMPLE_RATE_HZ.contains(&source_rate) {
         return Err(Exception::common(
@@ -142,6 +145,7 @@ fn source_params(params: &CodecParameters) -> Result<(u32, usize), Exception> {
     }
     let source_channels = params
         .channels
+        .as_ref()
         .map(|channels| channels.count())
         .unwrap_or(CHANNELS);
     Ok((source_rate, source_channels))
@@ -164,16 +168,8 @@ fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
     }
 
     let stream = MediaSourceStream::new(source, Default::default());
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            stream,
-            &FormatOptions {
-                enable_gapless: true,
-                ..Default::default()
-            },
-            &MetadataOptions::default(),
-        )
+    let format = symphonia::default::get_probe()
+        .probe(&hint, stream, FormatOptions::default(), MetadataOptions::default())
         .map_err(|error| {
             Exception::common(
                 format!("Could not read the container: {error}"),
@@ -181,19 +177,21 @@ fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
             )
         })?;
 
-    let format = probed.format;
-    let track = format
+    let (track_id, params) = format
         .tracks()
         .iter()
-        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .find_map(|track| match &track.codec_params {
+            Some(CodecParameters::Audio(params)) if params.codec != CODEC_ID_NULL_AUDIO => {
+                Some((track.id, params.clone()))
+            }
+            _ => None,
+        })
         .ok_or_else(|| {
             Exception::common("The container has no audio track", "no audio track")
         })?;
 
-    let track_id = track.id;
-    let params = track.codec_params.clone();
     let decoder = symphonia::default::get_codecs()
-        .make(&params, &DecoderOptions::default())
+        .make_audio_decoder(&params, &AudioDecoderOptions::default())
         .map_err(|error| {
             Exception::common(
                 format!("Unsupported codec: {error}"),
@@ -261,10 +259,8 @@ impl State {
             }
 
             let packet = match self.format.next_packet() {
-                Ok(packet) => packet,
-                Err(SymphoniaError::IoError(error))
-                    if error.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
+                Ok(Some(packet)) => packet,
+                Ok(None) => {
                     writer.finish();
                     return PumpOutcome::Finished;
                 }
@@ -281,7 +277,10 @@ impl State {
                         .tracks()
                         .iter()
                         .find(|track| track.id == self.track_id)
-                        .map(|track| track.codec_params.clone());
+                        .and_then(|track| match &track.codec_params {
+                            Some(CodecParameters::Audio(params)) => Some(params.clone()),
+                            _ => None,
+                        });
                     let Some(params) = params else {
                         writer.finish();
                         return PumpOutcome::Failed {
@@ -321,7 +320,7 @@ impl State {
                 }
             };
 
-            if packet.track_id() != self.track_id {
+            if packet.track_id != self.track_id {
                 continue;
             }
 
@@ -465,7 +464,8 @@ impl State {
     /// forever, since nothing after this ever corrects it back.
     fn seek(&mut self, position_ms: i64) -> bool {
         let position_ms = position_ms.max(0) as u64;
-        let time = Time::new(position_ms / 1000, (position_ms % 1000) as f64 / 1000.0);
+        let time = Time::try_new((position_ms / 1000) as i64, (position_ms % 1000) as u32 * 1_000_000)
+            .expect("a millisecond remainder is always < 1_000_000_000ns");
 
         // Coarse mode where the container allows it: an exact seek re-decodes from
         // the previous keyframe, which on a long track is a noticeable stall for
@@ -548,50 +548,49 @@ pub fn filter_interleaved(chain: &mut FilterChain, samples: &mut [f32], planar: 
 
 /// Flattens any of symphonia's buffer types into interleaved `f32`, appended into
 /// `out` (cleared first) so a healthy decode loop never allocates here.
-fn to_interleaved(buffer: &AudioBufferRef<'_>, out: &mut Vec<f32>) {
-    use symphonia::core::sample::Sample as _;
+fn to_interleaved(buffer: &GenericAudioBufferRef<'_>, out: &mut Vec<f32>) {
+    use symphonia::core::audio::sample::{i24, u24, Sample as _};
 
     out.clear();
 
     macro_rules! interleave {
         ($buffer:expr, $convert:expr) => {{
-            let spec = $buffer.spec();
-            let channels = spec.channels.count();
+            let channels = $buffer.spec().channels().count();
             let frames = $buffer.frames();
             out.reserve(frames * channels);
             for frame in 0..frames {
                 for channel in 0..channels {
-                    out.push($convert($buffer.chan(channel)[frame]));
+                    out.push($convert($buffer.plane(channel).unwrap()[frame]));
                 }
             }
         }};
     }
 
     match buffer {
-        AudioBufferRef::F32(buffer) => interleave!(buffer, |sample: f32| sample),
-        AudioBufferRef::F64(buffer) => interleave!(buffer, |sample: f64| sample as f32),
-        AudioBufferRef::S32(buffer) => {
+        GenericAudioBufferRef::F32(buffer) => interleave!(buffer, |sample: f32| sample),
+        GenericAudioBufferRef::F64(buffer) => interleave!(buffer, |sample: f64| sample as f32),
+        GenericAudioBufferRef::S32(buffer) => {
             interleave!(buffer, |sample: i32| sample as f32 / i32::MAX as f32)
         }
-        AudioBufferRef::S24(buffer) => interleave!(buffer, |sample: symphonia::core::sample::i24| {
-            sample.inner() as f32 / 8_388_608.0
-        }),
-        AudioBufferRef::S16(buffer) => {
+        GenericAudioBufferRef::S24(buffer) => {
+            interleave!(buffer, |sample: i24| sample.0 as f32 / 8_388_608.0)
+        }
+        GenericAudioBufferRef::S16(buffer) => {
             interleave!(buffer, |sample: i16| sample as f32 / i16::MAX as f32)
         }
-        AudioBufferRef::S8(buffer) => {
+        GenericAudioBufferRef::S8(buffer) => {
             interleave!(buffer, |sample: i8| sample as f32 / i8::MAX as f32)
         }
-        AudioBufferRef::U32(buffer) => interleave!(buffer, |sample: u32| {
+        GenericAudioBufferRef::U32(buffer) => interleave!(buffer, |sample: u32| {
             (sample as f32 - u32::MID as f32) / u32::MID as f32
         }),
-        AudioBufferRef::U24(buffer) => interleave!(buffer, |sample: symphonia::core::sample::u24| {
-            (sample.inner() as f32 - 8_388_608.0) / 8_388_608.0
+        GenericAudioBufferRef::U24(buffer) => interleave!(buffer, |sample: u24| {
+            (sample.0 as f32 - 8_388_608.0) / 8_388_608.0
         }),
-        AudioBufferRef::U16(buffer) => interleave!(buffer, |sample: u16| {
+        GenericAudioBufferRef::U16(buffer) => interleave!(buffer, |sample: u16| {
             (sample as f32 - u16::MID as f32) / u16::MID as f32
         }),
-        AudioBufferRef::U8(buffer) => interleave!(buffer, |sample: u8| {
+        GenericAudioBufferRef::U8(buffer) => interleave!(buffer, |sample: u8| {
             (sample as f32 - u8::MID as f32) / u8::MID as f32
         }),
     }
@@ -823,15 +822,12 @@ mod tests {
     struct FailingSeekFormat(Box<dyn FormatReader>);
 
     impl FormatReader for FailingSeekFormat {
-        fn try_new(
-            _source: MediaSourceStream,
-            _options: &FormatOptions,
-        ) -> symphonia::core::errors::Result<Self> {
-            unreachable!("constructed directly in tests, not through probing")
+        fn format_info(&self) -> &symphonia::core::formats::FormatInfo {
+            self.0.format_info()
         }
 
-        fn cues(&self) -> &[symphonia::core::formats::Cue] {
-            self.0.cues()
+        fn media_info(&self) -> &symphonia::core::formats::MediaInfo {
+            self.0.media_info()
         }
 
         fn metadata(&mut self) -> symphonia::core::meta::Metadata<'_> {
@@ -852,11 +848,16 @@ mod tests {
             self.0.tracks()
         }
 
-        fn next_packet(&mut self) -> symphonia::core::errors::Result<symphonia::core::formats::Packet> {
+        fn next_packet(
+            &mut self,
+        ) -> symphonia::core::errors::Result<Option<symphonia::core::packet::Packet>> {
             self.0.next_packet()
         }
 
-        fn into_inner(self: Box<Self>) -> MediaSourceStream {
+        fn into_inner<'s>(self: Box<Self>) -> MediaSourceStream<'s>
+        where
+            Self: 's,
+        {
             self.0.into_inner()
         }
     }
@@ -871,15 +872,12 @@ mod tests {
     }
 
     impl FormatReader for InterruptOnceFormat {
-        fn try_new(
-            _source: MediaSourceStream,
-            _options: &FormatOptions,
-        ) -> symphonia::core::errors::Result<Self> {
-            unreachable!("constructed directly in tests, not through probing")
+        fn format_info(&self) -> &symphonia::core::formats::FormatInfo {
+            self.inner.format_info()
         }
 
-        fn cues(&self) -> &[symphonia::core::formats::Cue] {
-            self.inner.cues()
+        fn media_info(&self) -> &symphonia::core::formats::MediaInfo {
+            self.inner.media_info()
         }
 
         fn metadata(&mut self) -> symphonia::core::meta::Metadata<'_> {
@@ -898,7 +896,9 @@ mod tests {
             self.inner.tracks()
         }
 
-        fn next_packet(&mut self) -> symphonia::core::errors::Result<symphonia::core::formats::Packet> {
+        fn next_packet(
+            &mut self,
+        ) -> symphonia::core::errors::Result<Option<symphonia::core::packet::Packet>> {
             if !self.fired {
                 self.fired = true;
                 return Err(SymphoniaError::IoError(std::io::Error::new(
@@ -909,7 +909,10 @@ mod tests {
             self.inner.next_packet()
         }
 
-        fn into_inner(self: Box<Self>) -> MediaSourceStream {
+        fn into_inner<'s>(self: Box<Self>) -> MediaSourceStream<'s>
+        where
+            Self: 's,
+        {
             self.inner.into_inner()
         }
     }
@@ -1156,15 +1159,17 @@ mod tests {
     /// is — this is the one function both call into.
     #[test]
     fn source_params_reads_the_declared_rate_and_channels() {
-        let mut params = CodecParameters::new();
+        let mut params = AudioCodecParameters::new();
         params.sample_rate = Some(44_100);
-        params.channels = Some(symphonia::core::audio::Channels::FRONT_LEFT);
+        params.channels = Some(symphonia::core::audio::Channels::Positioned(
+            symphonia::core::audio::Position::FRONT_LEFT,
+        ));
         assert_eq!(source_params(&params).unwrap(), (44_100, 1));
     }
 
     #[test]
     fn source_params_rejects_an_implausible_rate() {
-        let mut params = CodecParameters::new();
+        let mut params = AudioCodecParameters::new();
         params.sample_rate = Some(1);
         assert!(source_params(&params).is_err());
     }
