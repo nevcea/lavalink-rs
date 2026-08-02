@@ -110,8 +110,10 @@ async fn run(
         }
     };
 
-    // `ready` is the first thing on the wire, before any queued replay.
-    let _ = session.send(Message::Ready {
+    // `ready` is the first thing on the wire, before any queued replay: a
+    // resumed session's essential lane can already hold a backlog from the
+    // reconnect window, and plain `send` would put this behind it.
+    let _ = session.send_first(Message::Ready {
         resumed,
         session_id: session.id.clone(),
     });

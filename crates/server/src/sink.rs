@@ -107,6 +107,30 @@ impl Sink {
         Ok(())
     }
 
+    /// Sends an essential message ahead of anything already queued.
+    ///
+    /// For `ready`: it must be the first frame a (re)connecting client reads, even
+    /// when a resumed session's essential lane already holds a replayed backlog —
+    /// `send` would put it behind that backlog instead.
+    pub fn send_first(&self, message: Message) -> Result<(), SendError> {
+        debug_assert!(
+            message.coalesce_key().is_none(),
+            "send_first is for the essential lane only"
+        );
+        {
+            let mut inner = self.lock();
+            if inner.closed {
+                return Err(SendError::Closed);
+            }
+            if inner.essential.len() >= ESSENTIAL_CAPACITY {
+                return Err(SendError::Overflow);
+            }
+            inner.essential.push_front(message);
+        }
+        self.notify.notify_one();
+        Ok(())
+    }
+
     /// Takes the next message to write, or `None` if there is nothing pending or the
     /// sink is paused or closed.
     pub fn try_recv(&self) -> Option<Message> {
@@ -232,6 +256,22 @@ mod tests {
         // The stale update for guild 1 is gone; guild 2 is untouched.
         positions.sort_unstable();
         assert_eq!(positions, vec![200, 300]);
+    }
+
+    /// The bug this guards: `Message::Ready` sent through plain `send` lands behind
+    /// whatever essentials a resumed session already queued for replay, so a
+    /// reconnecting client reads its backlog before `sessionId`/`resumed`.
+    #[test]
+    fn send_first_jumps_ahead_of_an_existing_backlog() {
+        let sink = Sink::new();
+        sink.send(event("1")).unwrap();
+        sink.send(event("2")).unwrap();
+
+        sink.send_first(event("ready")).unwrap();
+
+        assert_eq!(sink.try_recv(), Some(event("ready")));
+        assert_eq!(sink.try_recv(), Some(event("1")));
+        assert_eq!(sink.try_recv(), Some(event("2")));
     }
 
     #[test]

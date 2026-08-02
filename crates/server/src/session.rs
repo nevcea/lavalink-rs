@@ -130,6 +130,12 @@ impl Session {
         self.sink.send(message)
     }
 
+    /// As [`Session::send`], but ahead of anything already queued — see
+    /// [`Sink::send_first`].
+    pub fn send_first(&self, message: Message) -> Result<(), SendError> {
+        self.sink.send_first(message)
+    }
+
     pub fn player(&self, guild_id: u64) -> Option<PlayerHandle> {
         self.lock_guilds().get(&guild_id).map(|guild| guild.handle.clone())
     }
