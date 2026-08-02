@@ -24,7 +24,7 @@
 //! dedicated OS thread rather than the blocking pool, because it lives for the
 //! length of a track and would otherwise occupy a pool slot indefinitely.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -61,6 +61,13 @@ pub struct PipelineEngine {
     active: Arc<Mutex<Option<Active>>>,
     /// One per player, not one per track: see [`ring::FrameCounters`]'s docs.
     frames: Arc<ring::FrameCounters>,
+    /// The next generation to hand out. Lives on the engine, not derived from
+    /// whatever `stop_active` tears down — a full stop clears `active` to `None`,
+    /// so deriving the next generation from the outgoing one would restart the
+    /// count at 1 after every stop, letting a pump parked on a stalled source
+    /// (still holding the old generation) pass `is_current` for a later,
+    /// unrelated track that happens to reuse it.
+    next_generation: AtomicU64,
 }
 
 /// A running track.
@@ -116,6 +123,7 @@ impl PipelineEngine {
             events,
             active: Arc::new(Mutex::new(None)),
             frames: Arc::new(ring::FrameCounters::default()),
+            next_generation: AtomicU64::new(1),
         }
     }
 
@@ -135,10 +143,11 @@ impl PipelineEngine {
         let _ = events.try_send(Command::Engine(event));
     }
 
-    /// Tears down whatever is playing. Returns the generation that was cancelled.
-    fn stop_active(&self) -> u64 {
-        let previous = lock(&self.active).take();
-        let Some(previous) = previous else { return 0 };
+    /// Tears down whatever is playing.
+    fn stop_active(&self) {
+        let Some(previous) = lock(&self.active).take() else {
+            return;
+        };
 
         previous.interrupt.store(true, Ordering::Relaxed);
         // Dropping the sender is what unblocks a pump parked on a full ring.
@@ -148,7 +157,6 @@ impl PipelineEngine {
         if let Some(track) = previous.track {
             let _ = track.stop();
         }
-        previous.generation
     }
 }
 
@@ -167,7 +175,8 @@ impl Engine for PipelineEngine {
     }
 
     fn play(&self, request: PlayRequest) {
-        let generation = self.stop_active().wrapping_add(1);
+        self.stop_active();
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
 
         let (writer, reader) = ring::channel(
             self.buffer_ms,
@@ -400,5 +409,31 @@ mod tests {
     fn nothing_is_current_once_active_is_cleared() {
         let active: Mutex<Option<Active>> = Mutex::new(None);
         assert!(!is_current(&active, 1));
+    }
+
+    /// The bug this guards: deriving the next generation from the one being torn
+    /// down (`stop_active().wrapping_add(1)`) returns 0 once `active` is already
+    /// `None` — a full stop before the replacement track starts — so the next
+    /// `play` reused generation 1. A pump still parked on a stalled source from
+    /// the *first* generation-1 track would then pass `is_current` for whatever
+    /// later track happened to land on generation 1 again.
+    #[test]
+    fn a_generation_survives_a_full_stop_and_does_not_restart_at_one() {
+        let next_generation = AtomicU64::new(1);
+        let active: Mutex<Option<Active>> = Mutex::new(None);
+
+        let first = next_generation.fetch_add(1, Ordering::Relaxed);
+        *lock(&active) = Some(dummy_active(first));
+
+        // The pump for `first` is stuck retrying a stalled source and never
+        // observes the stop; `active` is cleared out from under it anyway.
+        *lock(&active) = None;
+
+        let second = next_generation.fetch_add(1, Ordering::Relaxed);
+        *lock(&active) = Some(dummy_active(second));
+
+        assert_ne!(second, first);
+        assert!(!is_current(&active, first));
+        assert!(is_current(&active, second));
     }
 }
