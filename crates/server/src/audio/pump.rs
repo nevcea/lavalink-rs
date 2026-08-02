@@ -667,7 +667,12 @@ mod tests {
     /// The reader here stands in for the mixer, which pulls on a 20ms clock. An
     /// unpaced reader outruns the decoder and gets starvation silence, which is
     /// correct behaviour but is not delivered audio — so each read is classified by
-    /// the ring's own frame counters and only real frames are counted.
+    /// `nulled` (whether *this* read was a starved one), not `sent`: `sent` counts
+    /// whole [`super::super::ring::FRAME_SAMPLES`] frames of real audio with a
+    /// carried remainder, so a partial real read (buffer briefly short of a whole
+    /// frame) may not tick it on the same call it happened. `nulled` stays a
+    /// reliable per-call flag here because every read in this loop asks for
+    /// exactly one frame, so a starved read's silence is never partial.
     fn play(config: PumpConfig) -> (PumpOutcome, usize, i64) {
         let position = Arc::new(AtomicI64::new(0));
         // Small buffer so the pump has to block and be woken, as it will in service.
@@ -691,13 +696,12 @@ mod tests {
                 break;
             }
 
-            let (sent, nulled) = reader.take_frame_stats();
-            if sent > 0 {
-                delivered += read / 4;
-            }
+            let (_, nulled) = reader.take_frame_stats();
             if nulled > 0 {
                 // Give the decoder a moment rather than spinning on an empty ring.
                 std::thread::sleep(Duration::from_millis(1));
+            } else {
+                delivered += read / 4;
             }
 
             reads += 1;

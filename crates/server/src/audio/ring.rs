@@ -27,7 +27,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -56,9 +56,37 @@ const PRODUCER_POLL: Duration = Duration::from_millis(100);
 pub struct FrameCounters {
     sent: AtomicU32,
     nulled: AtomicU32,
+    /// Samples handed to `record_sent`/`record_nulled` that did not complete a
+    /// whole [`FRAME_SAMPLES`]-sized frame by themselves — carried into the next
+    /// call rather than truncated away, the same shape as [`Shared`]'s own
+    /// `remainder_samples`. Without this, a `read()` counts as one frame
+    /// whatever its actual size: a ring drained in many small partial reads (a
+    /// starved buffer nearly caught up, or `out.len() < FRAME_SAMPLES * 4`)
+    /// would report far more frames than the 20ms of audio it actually moved.
+    sent_remainder: AtomicUsize,
+    nulled_remainder: AtomicUsize,
 }
 
 impl FrameCounters {
+    /// Counts `samples` toward `sent`, in units of whole [`FRAME_SAMPLES`] frames,
+    /// carrying any leftover forward.
+    fn record_sent(&self, samples: usize) {
+        Self::record(&self.sent, &self.sent_remainder, samples);
+    }
+
+    /// As [`Self::record_sent`], for silence handed back on a starved read.
+    fn record_nulled(&self, samples: usize) {
+        Self::record(&self.nulled, &self.nulled_remainder, samples);
+    }
+
+    fn record(counter: &AtomicU32, remainder: &AtomicUsize, samples: usize) {
+        let total = remainder.load(Ordering::Relaxed) + samples;
+        if let Ok(frames) = u32::try_from(total / FRAME_SAMPLES) {
+            counter.fetch_add(frames, Ordering::Relaxed);
+        }
+        remainder.store(total % FRAME_SAMPLES, Ordering::Relaxed);
+    }
+
     /// Reads and resets both counters. `/v4/stats` ticks drain every player's
     /// counters every tick regardless of whether that player's data ends up
     /// "usable" for the aggregate — matching the original, which resets on
@@ -323,7 +351,7 @@ impl Read for RingReader {
             // blocking the mixer, and account for it as a lost frame — exactly what
             // the original counts as `nulled`. No producer can be waiting on space
             // here (the buffer was empty), so there is nothing to `notify_all`.
-            self.shared.frames.nulled.fetch_add(1, Ordering::Relaxed);
+            self.shared.frames.record_nulled(silence / 4);
             out[..silence].fill(0);
             return Ok(silence);
         }
@@ -371,7 +399,7 @@ impl Read for RingReader {
         drop(buffer);
         self.shared.space.notify_all();
 
-        self.shared.frames.sent.fetch_add(1, Ordering::Relaxed);
+        self.shared.frames.record_sent(take);
 
         Ok(written)
     }
@@ -553,6 +581,31 @@ mod tests {
         // 480 cycles * 2 frames = 960 frames = 20ms at 48kHz, not the 10ms a
         // remainder dropped every cycle would report.
         assert_eq!(position.load(Ordering::Relaxed), 20);
+    }
+
+    /// The bug this guards: before the fix, `frameStats.sent` counted one frame
+    /// per `read()` call regardless of its size, so draining the same audio
+    /// across many small reads (a short read near the ring's own capacity, or a
+    /// consumer that just doesn't ask for a whole frame at once) inflated the
+    /// count far past what was actually delivered.
+    #[test]
+    fn frame_stats_count_samples_delivered_not_read_calls() {
+        let (writer, mut reader, _) = ring(4000);
+        writer.try_write(&vec![1.0; FRAME_SAMPLES * 3]);
+
+        let mut delivered = 0;
+        while delivered < FRAME_SAMPLES * 3 {
+            let chunk = read_samples(&mut reader, 10);
+            assert!(!chunk.is_empty(), "ran out of buffered audio early");
+            delivered += chunk.len();
+        }
+
+        let (sent, nulled) = reader.take_frame_stats();
+        assert_eq!(
+            (sent, nulled),
+            (3, 0),
+            "three frames' worth of samples were delivered across many small reads"
+        );
     }
 
     #[test]
