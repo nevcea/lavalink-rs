@@ -87,7 +87,7 @@ pub async fn patch_player(
     let session = session(&state, &session_id)?;
     let guild_id = parse_guild_id(&guild_id)?;
 
-    let track_fields = resolve_track_fields(&update)?;
+    let track_fields = resolve_track_fields(update.track, update.encoded_track, update.identifier)?;
 
     if let Omissible::Present(filters) = &update.filters {
         let invalid = filters.validate(&state.disabled_filters);
@@ -221,20 +221,24 @@ struct TrackFields {
     user_data: Omissible<lavalink_protocol::player::JsonObject>,
 }
 
-fn resolve_track_fields(update: &PlayerUpdate) -> Result<TrackFields, ApiError> {
-    let legacy_present = update.encoded_track.is_present() || update.identifier.is_present();
+fn resolve_track_fields(
+    track: Omissible<PlayerUpdateTrack>,
+    encoded_track: Omissible<Option<String>>,
+    identifier: Omissible<String>,
+) -> Result<TrackFields, ApiError> {
+    let legacy_present = encoded_track.is_present() || identifier.is_present();
 
-    if update.track.is_present() && legacy_present {
+    if track.is_present() && legacy_present {
         return Err(ApiError::bad_request(
             "Cannot specify both track and encodedTrack/identifier",
         ));
     }
 
-    let track = match &update.track {
-        Omissible::Present(track) => track.clone(),
+    let track = match track {
+        Omissible::Present(track) => track,
         Omissible::Omitted if legacy_present => PlayerUpdateTrack {
-            encoded: update.encoded_track.clone(),
-            identifier: update.identifier.clone(),
+            encoded: encoded_track,
+            identifier,
             user_data: Omissible::Omitted,
         },
         Omissible::Omitted => PlayerUpdateTrack::default(),
@@ -295,24 +299,27 @@ mod tests {
 
     #[test]
     fn the_modern_and_legacy_track_fields_cannot_be_mixed() {
-        let error = resolve_track_fields(&update(
-            r#"{"track":{"identifier":"x"},"identifier":"y"}"#,
-        ))
-        .unwrap_err();
+        let update = update(r#"{"track":{"identifier":"x"},"identifier":"y"}"#);
+        let error =
+            resolve_track_fields(update.track, update.encoded_track, update.identifier)
+                .unwrap_err();
         assert_eq!(error.message, "Cannot specify both track and encodedTrack/identifier");
     }
 
     #[test]
     fn encoded_and_identifier_cannot_be_mixed() {
+        let update = update(r#"{"track":{"encoded":"a","identifier":"b"}}"#);
         let error =
-            resolve_track_fields(&update(r#"{"track":{"encoded":"a","identifier":"b"}}"#))
+            resolve_track_fields(update.track, update.encoded_track, update.identifier)
                 .unwrap_err();
         assert_eq!(error.message, "Cannot specify both encodedTrack and identifier");
     }
 
     #[test]
     fn the_legacy_fields_are_still_honoured() {
-        let fields = resolve_track_fields(&update(r#"{"encodedTrack":"abc"}"#)).unwrap();
+        let update = update(r#"{"encodedTrack":"abc"}"#);
+        let fields =
+            resolve_track_fields(update.track, update.encoded_track, update.identifier).unwrap();
         assert_eq!(fields.encoded, Omissible::Present(Some("abc".into())));
         assert!(fields.identifier.is_omitted());
     }
@@ -321,10 +328,22 @@ mod tests {
     /// stop request, an absent field is "leave the track alone".
     #[test]
     fn a_null_encoded_track_is_distinguishable_from_an_absent_one() {
-        let cleared = resolve_track_fields(&update(r#"{"track":{"encoded":null}}"#)).unwrap();
+        let clear_update = update(r#"{"track":{"encoded":null}}"#);
+        let cleared = resolve_track_fields(
+            clear_update.track,
+            clear_update.encoded_track,
+            clear_update.identifier,
+        )
+        .unwrap();
         assert_eq!(cleared.encoded, Omissible::Present(None));
 
-        let untouched = resolve_track_fields(&update("{}")).unwrap();
+        let empty_update = update("{}");
+        let untouched = resolve_track_fields(
+            empty_update.track,
+            empty_update.encoded_track,
+            empty_update.identifier,
+        )
+        .unwrap();
         assert!(untouched.encoded.is_omitted());
     }
 
