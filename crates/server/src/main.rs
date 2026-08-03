@@ -22,9 +22,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let started_at = Instant::now();
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            // symphonia's probe logs a WARN every time it skips a leading ID3 tag or
+            // padding before the first frame sync — its normal, successful detection
+            // path for a large fraction of real MP3s, not a sign anything is wrong
+            // with how this node opened the stream. `error` still surfaces an actual
+            // probe failure, just not this expected, per-track noise.
+            EnvFilter::new("info,symphonia_core::formats::probe=error")
+        }))
         .init();
 
     let config_path = std::env::args()
