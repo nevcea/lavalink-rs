@@ -34,3 +34,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy --workspace --all-targets
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  msrv:
+    name: MSRV (1.75)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.75
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check --workspace
+        run: cargo check --workspace
