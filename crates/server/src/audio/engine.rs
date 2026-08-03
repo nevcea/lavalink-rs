@@ -39,6 +39,7 @@ use super::pump::{self, PumpCommand, PumpConfig};
 use super::ring::{self, CHANNELS, SAMPLE_RATE};
 use super::stream::StreamOpener;
 use super::{Engine, EngineEvent, PlayRequest};
+use crate::config::ResamplingQuality;
 use crate::lock;
 use crate::player::{Command, EventSlot};
 use crate::voice::SharedVoice;
@@ -51,6 +52,7 @@ pub struct PipelineEngine {
     guild_id: u64,
     position_ms: Arc<AtomicI64>,
     buffer_ms: u32,
+    resampling_quality: ResamplingQuality,
     voice: SharedVoice,
     opener: Arc<StreamOpener>,
     runtime: tokio::runtime::Handle,
@@ -108,6 +110,7 @@ impl PipelineEngine {
     pub fn new(
         guild_id: u64,
         buffer_ms: u32,
+        resampling_quality: ResamplingQuality,
         voice: SharedVoice,
         opener: Arc<StreamOpener>,
         events: EventSlot,
@@ -117,6 +120,7 @@ impl PipelineEngine {
             guild_id,
             position_ms: Arc::new(AtomicI64::new(0)),
             buffer_ms,
+            resampling_quality,
             voice,
             opener,
             runtime,
@@ -258,6 +262,7 @@ impl Engine for PipelineEngine {
             volume: request.volume,
             filters: request.filters.clone(),
             opener: Arc::clone(&self.opener),
+            resampling_quality: self.resampling_quality,
             interrupt,
         };
 

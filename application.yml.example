@@ -1,6 +1,6 @@
 # Same keys as Lavalink v4's application.yml. Keys for features this node does not
 # ship (plugins, ratelimit, metrics, sentry, logback, bufferDurationMs,
-# opusEncodingQuality, resamplingQuality, soundcloudFilterOutPreviewTracks,
+# opusEncodingQuality, soundcloudFilterOutPreviewTracks,
 # timeouts.connectionRequestTimeoutMs — see MAINTENANCE.md for why each is
 # unmodelled) are ignored rather than rejected, so an existing config file can be
 # used unchanged.
@@ -51,6 +51,12 @@ lavalink:
       rotation: true
       channelMix: true
       lowPass: true
+
+    # LOW (default) is a hand-written Catmull-Rom interpolator, free but with more
+    # high-frequency imaging than a proper band-limited resampler. MEDIUM/HIGH use
+    # a windowed-sinc resampler instead — closer to lavaplayer's own approach at
+    # those tiers, at real CPU cost per player. See MAINTENANCE.md.
+    resamplingQuality: LOW # LOW | MEDIUM | HIGH
 
     frameBufferDurationMs: 5000    # milliseconds of decoded audio buffered per player
     trackStuckThresholdMs: 10000   # silence before a TrackStuckEvent is emitted

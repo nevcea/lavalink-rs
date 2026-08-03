@@ -17,17 +17,24 @@ So it's refused rather than faked: `timescale` is absent from
 `IMPLEMENTED_FILTERS`, `/v4/info` doesn't advertise it, and a request naming it
 gets the original's 400. See `crates/server/src/audio/filter.rs`'s module docs.
 
-## `resamplingQuality` — not implemented
+## `resamplingQuality`
 
 lavaplayer offers three quality settings backed by a windowed-sinc
-implementation. This node resamples with Catmull-Rom interpolation instead:
-continuous in the first derivative, so no discontinuities, but with more
-high-frequency imaging than a proper band-limited resampler.
+implementation. `LOW` (lavaplayer's own default) stays on this node's original
+Catmull-Rom interpolation: continuous in the first derivative, so no
+discontinuities, but with more high-frequency imaging than a proper
+band-limited resampler — and free, being arithmetic rather than a filter bank.
+`MEDIUM`/`HIGH` route through `rubato::SincFixedIn`, a pure-Rust windowed-sinc
+resampler, at real CPU cost per player — the same trade lavaplayer itself
+makes at those tiers (`cargo bench -p lavalink-server --bench resample` has
+the numbers).
 
-That's a deliberate trade against the project's dependency budget, not a free
-one, so it's stated rather than hidden: `resamplingQuality` is not
-implemented, because pretending to offer three qualities when there is one
-would be worse than saying so. See `crates/server/src/audio/resample.rs`.
+`rubato` requires fixed-size planar input per call, while the pump hands over
+whatever symphonia decoded (variable size, interleaved); `SincEngine` (in
+`crates/server/src/audio/resample.rs`) bridges that the same way the
+Catmull-Rom path already bridges its own boundary problem — an accumulator
+carried across calls, cleared (along with rubato's own delay-line state via
+its `reset()`) on every seek so no stale samples survive one.
 
 ## Route planning / IP rotation — not implemented
 

@@ -3,17 +3,22 @@
 //! Everything reaching the ring must be 48kHz stereo. Sources are usually 44.1kHz,
 //! often mono, occasionally 5.1, so this sits between the decoder and the filters.
 //!
-//! # Why this is hand-written
+//! # `resamplingQuality`
 //!
-//! A resampling library would be better at this — lavaplayer offers three quality
-//! settings backed by a windowed-sinc implementation. What is here is Catmull-Rom
-//! interpolation: continuous in the first derivative, so no discontinuities, but
-//! with more high-frequency imaging than a proper band-limited resampler.
-//!
-//! That is a deliberate trade against the project's dependency budget, and it is a
-//! real trade, not a free one. It is honest about where it stands: the
-//! `resamplingQuality` config key is not implemented, because pretending to offer
-//! three qualities when there is one would be worse than saying so.
+//! lavaplayer offers three quality settings backed by a windowed-sinc
+//! implementation. `ResamplingQuality::Low` (lavaplayer's own default) stays on
+//! the hand-written Catmull-Rom interpolation below: continuous in the first
+//! derivative, so no discontinuities, but with more high-frequency imaging than a
+//! proper band-limited resampler — and, being arithmetic rather than a filter
+//! bank, free. `Medium`/`High` route through [`SincEngine`], a thin wrapper over
+//! `rubato::SincFixedIn`, matching lavaplayer's actual approach at those tiers.
+
+use rubato::{
+    Resampler as RubatoResampler, SincFixedIn, SincInterpolationParameters,
+    SincInterpolationType, WindowFunction,
+};
+
+use crate::config::ResamplingQuality;
 
 use super::ring::{CHANNELS, SAMPLE_RATE};
 
@@ -40,6 +45,13 @@ pub struct Resampler {
     /// loop reads straight out of it. Reused across calls, so a warmed-up pump
     /// allocates nothing here.
     frames: Vec<[f32; CHANNELS]>,
+    /// Set only when actual rate conversion is needed and `Medium`/`High` was
+    /// configured; `Low`, and any source that is already 48kHz, never construct
+    /// one. When present, it replaces the Catmull-Rom loop below entirely rather
+    /// than the two coexisting — `prologue`/`cursor` stay unused in that case,
+    /// since rubato carries its own delay-line state across calls instead of
+    /// needing the artificial neighbour padding Catmull-Rom does.
+    sinc: Option<SincEngine>,
 }
 
 /// Frames carried from one buffer to the next: one for the interpolator's left-hand
@@ -47,14 +59,19 @@ pub struct Resampler {
 const PROLOGUE_FRAMES: usize = 3;
 
 impl Resampler {
-    pub fn new(source_rate: u32, source_channels: usize) -> Self {
+    pub fn new(source_rate: u32, source_channels: usize, quality: ResamplingQuality) -> Self {
+        let source_rate = source_rate.max(1);
+        let needs_conversion = source_rate != SAMPLE_RATE;
+        let sinc = (needs_conversion && quality != ResamplingQuality::Low)
+            .then(|| SincEngine::new(quality, source_rate));
         Self {
-            source_rate: source_rate.max(1),
+            source_rate,
             source_channels: source_channels.max(1),
             cursor: 0.0,
             prologue: [[0.0; CHANNELS]; PROLOGUE_FRAMES],
             prologue_len: 0,
             frames: Vec::new(),
+            sinc,
         }
     }
 
@@ -69,6 +86,9 @@ impl Resampler {
     pub fn reset(&mut self) {
         self.cursor = 0.0;
         self.prologue_len = 0;
+        if let Some(sinc) = &mut self.sinc {
+            sinc.reset();
+        }
     }
 
     /// Converts one buffer of interleaved source samples, allocating a fresh `Vec`
@@ -108,6 +128,16 @@ impl Resampler {
             self.cursor = 0.0;
             self.prologue_len = 0;
             out.extend(self.frames.iter().flatten());
+            return;
+        }
+
+        // Sinc quality: no prologue, no manual cursor — `fill_stereo_frames` only
+        // needs to do the channel conversion (mono duplication, surround crop),
+        // and `SincEngine` owns everything about the rate conversion itself.
+        if self.sinc.is_some() {
+            self.fill_stereo_frames(input, 0);
+            let Resampler { frames, sinc, .. } = self;
+            sinc.as_mut().unwrap().process_into(frames, out);
             return;
         }
 
@@ -203,6 +233,122 @@ impl Resampler {
     }
 }
 
+/// Windowed-sinc resampling for [`ResamplingQuality::Medium`]/`High`, wrapping
+/// `rubato::SincFixedIn`. Never constructed for `Low` — that stays on the
+/// Catmull-Rom path above.
+///
+/// `Debug` is hand-rolled (not derived) because `SincFixedIn` itself has no
+/// `Debug` impl — its precomputed sinc filter table isn't something a `{:?}`
+/// on the owning [`Resampler`] needs to see anyway.
+struct SincEngine {
+    resampler: SincFixedIn<f32>,
+    /// Stereo frames already converted by [`Resampler::fill_stereo_frames`],
+    /// waiting for enough to submit one call to `resampler`
+    /// ([`rubato::Resampler::input_frames_next`] frames, fixed for the engine's
+    /// lifetime since the resample ratio is never changed after construction).
+    pending: Vec<[f32; CHANNELS]>,
+    /// Planar scratch reused across calls — `rubato` takes and returns
+    /// non-interleaved buffers, unlike everything else in this pipeline.
+    planar_in: Vec<Vec<f32>>,
+    planar_out: Vec<Vec<f32>>,
+}
+
+impl std::fmt::Debug for SincEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SincEngine").field("pending", &self.pending.len()).finish_non_exhaustive()
+    }
+}
+
+impl SincEngine {
+    fn new(quality: ResamplingQuality, source_rate: u32) -> Self {
+        let params = match quality {
+            // `Resampler::new` never constructs a `SincEngine` for `Low`.
+            ResamplingQuality::Low => unreachable!("Low stays on the Catmull-Rom path"),
+            // sinc_len/oversampling_factor scaled down from rubato's own
+            // documented "high quality" preset (256/256/Cubic/BlackmanHarris2);
+            // cheaper interpolation (`Linear`) too, since `Medium` exists
+            // specifically to cost less than `High`.
+            ResamplingQuality::Medium => sinc_params(128, 128, SincInterpolationType::Linear),
+            ResamplingQuality::High => sinc_params(256, 256, SincInterpolationType::Cubic),
+        };
+
+        let ratio = f64::from(SAMPLE_RATE) / f64::from(source_rate);
+        // `max_resample_ratio_relative: 1.0` — the ratio is fixed for the whole
+        // track, never ramped, so `input_frames_next()` stays constant too.
+        let resampler = SincFixedIn::<f32>::new(ratio, 1.0, params, 1024, CHANNELS)
+            .expect("static parameters and a positive ratio are always valid");
+        let chunk = resampler.input_frames_next();
+
+        Self {
+            resampler,
+            pending: Vec::with_capacity(chunk),
+            planar_in: (0..CHANNELS).map(|_| Vec::with_capacity(chunk)).collect(),
+            planar_out: vec![Vec::new(); CHANNELS],
+        }
+    }
+
+    fn reset(&mut self) {
+        RubatoResampler::reset(&mut self.resampler);
+        self.pending.clear();
+    }
+
+    /// Feeds newly-converted `frames` in, writing any fully-resampled output onto
+    /// `out` (interleaved). Frames short of a full chunk are held in `pending`
+    /// for the next call, the same carry-across-buffers shape the Catmull-Rom
+    /// path uses `prologue` for.
+    fn process_into(&mut self, frames: &[[f32; CHANNELS]], out: &mut Vec<f32>) {
+        self.pending.extend_from_slice(frames);
+
+        let chunk = self.resampler.input_frames_next();
+        let mut consumed = 0;
+        while self.pending.len() - consumed >= chunk {
+            for lane in &mut self.planar_in {
+                lane.clear();
+            }
+            for frame in &self.pending[consumed..consumed + chunk] {
+                for (channel, lane) in self.planar_in.iter_mut().enumerate() {
+                    lane.push(frame[channel]);
+                }
+            }
+            consumed += chunk;
+
+            let out_frames = self.resampler.output_frames_next();
+            for lane in &mut self.planar_out {
+                lane.clear();
+                lane.resize(out_frames, 0.0);
+            }
+            let (read, produced) = self
+                .resampler
+                .process_into_buffer(&self.planar_in, &mut self.planar_out, None)
+                .expect("input matches exactly what input_frames_next() asked for");
+            debug_assert_eq!(read, chunk);
+
+            for index in 0..produced {
+                for lane in &self.planar_out {
+                    out.push(lane[index]);
+                }
+            }
+        }
+
+        self.pending.drain(..consumed);
+    }
+}
+
+fn sinc_params(
+    sinc_len: usize,
+    oversampling_factor: usize,
+    interpolation: SincInterpolationType,
+) -> SincInterpolationParameters {
+    let window = WindowFunction::BlackmanHarris2;
+    SincInterpolationParameters {
+        sinc_len,
+        f_cutoff: rubato::calculate_cutoff(sinc_len, window),
+        oversampling_factor,
+        interpolation,
+        window,
+    }
+}
+
 /// Catmull-Rom spline through `p1` and `p2`, using `p0` and `p3` for the slopes.
 fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
     let t2 = t * t;
@@ -219,7 +365,17 @@ mod tests {
 
     /// Feeds a sine through the resampler in chunks and returns the output.
     fn resample_sine(source_rate: u32, channels: usize, seconds: f64, chunk: usize) -> Vec<f32> {
-        let mut resampler = Resampler::new(source_rate, channels);
+        resample_sine_quality(source_rate, channels, seconds, chunk, ResamplingQuality::Low)
+    }
+
+    fn resample_sine_quality(
+        source_rate: u32,
+        channels: usize,
+        seconds: f64,
+        chunk: usize,
+        quality: ResamplingQuality,
+    ) -> Vec<f32> {
+        let mut resampler = Resampler::new(source_rate, channels, quality);
         let total_frames = (source_rate as f64 * seconds) as usize;
 
         let mut input = Vec::with_capacity(total_frames * channels);
@@ -259,9 +415,9 @@ mod tests {
     fn reset_leaves_nothing_of_the_previous_position_behind() {
         let input = ramp(2_000);
 
-        let fresh = Resampler::new(44_100, CHANNELS).process(&input);
+        let fresh = Resampler::new(44_100, CHANNELS, ResamplingQuality::Low).process(&input);
 
-        let mut resampler = Resampler::new(44_100, CHANNELS);
+        let mut resampler = Resampler::new(44_100, CHANNELS, ResamplingQuality::Low);
         resampler.process(&ramp(3_000));
         resampler.reset();
         let after_reset = resampler.process(&input);
@@ -274,7 +430,7 @@ mod tests {
 
     #[test]
     fn matching_format_is_passthrough() {
-        let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS);
+        let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS, ResamplingQuality::Low);
         assert!(resampler.is_passthrough());
         assert_eq!(resampler.process(&[0.5, -0.5]), vec![0.5, -0.5]);
     }
@@ -284,7 +440,7 @@ mod tests {
     /// packet pays two full-buffer copies for a straight pass-through.
     #[test]
     fn passthrough_does_not_touch_the_planar_scratch_buffers() {
-        let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS);
+        let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS, ResamplingQuality::Low);
         resampler.process(&[0.5, -0.5, 0.25, -0.25]);
         assert!(resampler.frames.is_empty(), "fill_stereo_frames should not have run");
         assert_eq!(resampler.prologue_len, 0, "no frame should have been carried");
@@ -296,20 +452,20 @@ mod tests {
     /// `chunks_exact` used to do on the slow path.
     #[test]
     fn passthrough_drops_an_incomplete_trailing_frame() {
-        let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS);
+        let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS, ResamplingQuality::Low);
         assert_eq!(resampler.process(&[0.5, -0.5, 0.25]), vec![0.5, -0.5]);
     }
 
     #[test]
     fn mono_is_duplicated_to_both_channels() {
-        let mut resampler = Resampler::new(SAMPLE_RATE, 1);
+        let mut resampler = Resampler::new(SAMPLE_RATE, 1, ResamplingQuality::Low);
         assert!(!resampler.is_passthrough());
         assert_eq!(resampler.process(&[0.25, -0.75]), vec![0.25, 0.25, -0.75, -0.75]);
     }
 
     #[test]
     fn surround_is_cropped_to_the_front_pair() {
-        let mut resampler = Resampler::new(SAMPLE_RATE, 6);
+        let mut resampler = Resampler::new(SAMPLE_RATE, 6, ResamplingQuality::Low);
         let frame = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         assert_eq!(resampler.process(&frame), vec![1.0, 2.0]);
     }
@@ -395,7 +551,7 @@ mod tests {
 
     #[test]
     fn a_reset_clears_carried_state() {
-        let mut resampler = Resampler::new(44_100, 2);
+        let mut resampler = Resampler::new(44_100, 2, ResamplingQuality::Low);
         resampler.process(&vec![1.0; 4096]);
         resampler.reset();
 
@@ -407,15 +563,150 @@ mod tests {
 
     #[test]
     fn silence_stays_silent() {
-        let mut resampler = Resampler::new(44_100, 2);
+        let mut resampler = Resampler::new(44_100, 2, ResamplingQuality::Low);
         let out = resampler.process(&vec![0.0; 8192]);
         assert!(out.iter().all(|sample| *sample == 0.0));
     }
 
     #[test]
     fn an_empty_buffer_produces_nothing() {
-        let mut resampler = Resampler::new(44_100, 2);
+        let mut resampler = Resampler::new(44_100, 2, ResamplingQuality::Low);
         assert!(resampler.process(&[]).is_empty());
+    }
+
+    /// `Low`, and any source already at 48kHz, must never construct a
+    /// `SincEngine` — it's meant to be the zero-cost tier, not merely
+    /// unused-until-called.
+    #[test]
+    fn low_and_passthrough_never_construct_a_sinc_engine() {
+        assert!(Resampler::new(44_100, CHANNELS, ResamplingQuality::Low).sinc.is_none());
+        assert!(Resampler::new(SAMPLE_RATE, CHANNELS, ResamplingQuality::High).sinc.is_none());
+        assert!(Resampler::new(SAMPLE_RATE, 1, ResamplingQuality::High).sinc.is_none());
+    }
+
+    /// The inverse: real rate conversion at `Medium`/`High` must actually route
+    /// through `SincEngine`, not silently fall back to Catmull-Rom.
+    #[test]
+    fn medium_and_high_construct_a_sinc_engine_when_converting() {
+        assert!(Resampler::new(44_100, CHANNELS, ResamplingQuality::Medium).sinc.is_some());
+        assert!(Resampler::new(44_100, CHANNELS, ResamplingQuality::High).sinc.is_some());
+    }
+
+    #[test]
+    fn sinc_passthrough_short_circuits_regardless_of_quality() {
+        for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
+            let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS, quality);
+            assert!(resampler.is_passthrough());
+            assert_eq!(resampler.process(&[0.5, -0.5]), vec![0.5, -0.5]);
+        }
+    }
+
+    #[test]
+    fn sinc_mono_is_duplicated_to_both_channels() {
+        for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
+            let mut resampler = Resampler::new(SAMPLE_RATE, 1, quality);
+            // No rate conversion at `SAMPLE_RATE`, so this exercises
+            // `fill_stereo_frames` only — `SincEngine` is never built here (see
+            // `low_and_passthrough_never_construct_a_sinc_engine`).
+            assert_eq!(resampler.process(&[0.25, -0.75]), vec![0.25, 0.25, -0.75, -0.75]);
+        }
+    }
+
+    #[test]
+    fn sinc_output_length_tracks_the_rate_ratio() {
+        for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
+            let out = resample_sine_quality(44_100, 2, 2.0, 1024, quality);
+            let frames = out.len() / CHANNELS;
+            // Sinc filters carry a startup/output delay (`output_delay()`) on top
+            // of the ordinary rate-ratio rounding a chunked accumulator adds, so
+            // this needs more slack than the Catmull-Rom version of this test —
+            // a couple of hundred frames at 48kHz is a few milliseconds.
+            assert!(
+                (frames as i64 - 2 * i64::from(SAMPLE_RATE)).abs() < 2000,
+                "{quality:?}: expected about {} frames, got {frames}",
+                2 * SAMPLE_RATE
+            );
+        }
+    }
+
+    #[test]
+    fn sinc_upsampling_preserves_the_waveform() {
+        for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
+            let out = resample_sine_quality(44_100, 2, 0.5, 1024, quality);
+            assert!(!out.is_empty());
+            assert!(out.iter().all(|sample| sample.is_finite()));
+
+            let peak = out.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
+            assert!((0.8..=1.2).contains(&peak), "{quality:?}: peak was {peak}");
+        }
+    }
+
+    #[test]
+    fn sinc_downsampling_works_too() {
+        for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
+            let out = resample_sine_quality(96_000, 2, 0.5, 4096, quality);
+            let frames = out.len() / CHANNELS;
+            let expected = (SAMPLE_RATE as f64 * 0.5) as i64;
+            assert!(
+                (frames as i64 - expected).abs() < 2000,
+                "{quality:?}: got {frames} frames"
+            );
+        }
+    }
+
+    /// Unlike the Catmull-Rom path (which needs a `±1 frame` / `1e-4` tolerance,
+    /// see `chunking_does_not_change_the_result`), `SincEngine` accumulates raw
+    /// stereo frames across calls with no per-call boundary effects at all —
+    /// `rubato` only ever sees fixed, buffer-call-independent chunks — so
+    /// chunking must reproduce the *exact* same output, not merely a close one,
+    /// up to whatever the final incomplete chunk holds back.
+    #[test]
+    fn sinc_chunking_does_not_change_the_result() {
+        for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
+            for (rate, channels) in [(44_100, 2), (44_100, 1), (22_050, 2), (96_000, 2)] {
+                let whole = resample_sine_quality(rate, channels, 0.2, 1 << 20, quality);
+
+                for chunk in [1, 2, 3, 5, 64, 512] {
+                    let split = resample_sine_quality(rate, channels, 0.2, chunk, quality);
+                    let case = format!("{quality:?} {rate}Hz/{channels}ch in {chunk}-frame chunks");
+
+                    let compare = whole.len().min(split.len());
+                    assert_eq!(
+                        &whole[..compare],
+                        &split[..compare],
+                        "{case}: chunking changed already-resampled output"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sinc_reset_leaves_nothing_of_the_previous_position_behind() {
+        for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
+            let input = ramp(2_000);
+
+            let fresh = Resampler::new(44_100, CHANNELS, quality).process(&input);
+
+            let mut resampler = Resampler::new(44_100, CHANNELS, quality);
+            resampler.process(&ramp(3_000));
+            resampler.reset();
+            let after_reset = resampler.process(&input);
+
+            assert_eq!(
+                after_reset, fresh,
+                "{quality:?}: a reset resampler must behave exactly like a new one"
+            );
+        }
+    }
+
+    #[test]
+    fn sinc_silence_stays_silent() {
+        for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
+            let mut resampler = Resampler::new(44_100, 2, quality);
+            let out = resampler.process(&vec![0.0; 8192]);
+            assert!(out.iter().all(|sample| *sample == 0.0), "{quality:?}");
+        }
     }
 
     #[test]
@@ -474,7 +765,7 @@ mod tests {
             let input: Vec<f32> = (0..4096 * channels)
                 .map(|i| ((i % 997) as f32 / 997.0) * 2.0 - 1.0)
                 .collect();
-            let got = Resampler::new(rate, channels).process(&input);
+            let got = Resampler::new(rate, channels, ResamplingQuality::Low).process(&input);
             assert_eq!(
                 got,
                 clamped_reference(rate, channels, &input),

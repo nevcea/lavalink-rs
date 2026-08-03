@@ -103,6 +103,19 @@ pub struct Lavalink {
     pub server: ServerConfig,
 }
 
+/// lavaplayer's `AudioConfiguration.ResamplingQuality`. `Low` is lavaplayer's own
+/// default and is backed by the existing Catmull-Rom resampler (unchanged, zero
+/// extra cost); `Medium`/`High` route through `rubato`'s windowed-sinc resampler —
+/// see `audio/resample.rs`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum ResamplingQuality {
+    #[default]
+    Low,
+    Medium,
+    High,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ServerConfig {
@@ -112,6 +125,7 @@ pub struct ServerConfig {
     pub filters: BTreeMap<String, bool>,
     /// Milliseconds of decoded audio buffered per player.
     pub frame_buffer_duration_ms: u32,
+    pub resampling_quality: ResamplingQuality,
     /// How long a player may produce no audio before `TrackStuckEvent`.
     pub track_stuck_threshold_ms: u64,
     /// Seconds between `playerUpdate` messages.
@@ -136,6 +150,7 @@ impl Default for ServerConfig {
             sources: Sources::default(),
             filters: BTreeMap::new(),
             frame_buffer_duration_ms: 5000,
+            resampling_quality: ResamplingQuality::default(),
             track_stuck_threshold_ms: 10_000,
             player_update_interval: 5,
             http_config: HttpConfig::default(),

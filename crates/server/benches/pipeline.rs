@@ -115,6 +115,7 @@ fn bench_pipeline(c: &mut Criterion) {
                     volume: 100,
                     filters: filters.clone(),
                     opener: Arc::new(StreamOpener::default()),
+                    resampling_quality: lavalink_server::config::ResamplingQuality::Low,
                     interrupt: Arc::new(AtomicBool::new(false)),
                 };
 

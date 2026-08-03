@@ -29,6 +29,7 @@ use lavalink_server::audio::pump::{self, PumpConfig};
 use lavalink_server::audio::ring::{self, FrameCounters, FRAME_SAMPLES};
 use lavalink_server::audio::source::YtDlp;
 use lavalink_server::audio::stream::StreamOpener;
+use lavalink_server::config::ResamplingQuality;
 
 /// `frameBufferDurationMs`' default (`config.rs`), so the ring is the size service
 /// actually runs with — a smaller one would park the pump far sooner and change the
@@ -88,6 +89,7 @@ fn main() {
                 volume: 100,
                 filters: Filters::default(),
                 opener,
+                resampling_quality: ResamplingQuality::Low,
                 interrupt: Arc::new(AtomicBool::new(false)),
             };
             pump::run(config, writer, pump_commands, pump_position, &|| {})

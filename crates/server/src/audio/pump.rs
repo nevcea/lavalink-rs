@@ -44,6 +44,7 @@ use super::resample::Resampler;
 use super::ring::{RingWriter, CHANNELS};
 use super::stream::StreamOpener;
 use super::PumpOutcome;
+use crate::config::ResamplingQuality;
 
 /// Commands the pump accepts while a track is running.
 #[derive(Debug)]
@@ -62,6 +63,7 @@ pub struct PumpConfig {
     pub volume: i32,
     pub filters: Filters,
     pub opener: Arc<StreamOpener>,
+    pub resampling_quality: ResamplingQuality,
     /// Set (by the engine) whenever a [`PumpCommand`] is enqueued, and checked
     /// by a stalled HTTP source between reconnect attempts so a waiting command
     /// cuts the retry short instead of waiting out the whole budget. Cleared
@@ -98,6 +100,10 @@ struct State {
     decoder: Box<dyn AudioDecoder>,
     track_id: u32,
     resampler: Resampler,
+    /// Carried from `PumpConfig` so the `ResetRequired` rebuild (a mid-stream
+    /// format change) can reconstruct the resampler with the same quality
+    /// tier it started with.
+    resampling_quality: ResamplingQuality,
     filters: FilterChain,
     volume: f32,
     end_time_ms: Option<i64>,
@@ -205,7 +211,8 @@ fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
         format,
         decoder,
         track_id,
-        resampler: Resampler::new(source_rate, source_channels),
+        resampler: Resampler::new(source_rate, source_channels, config.resampling_quality),
+        resampling_quality: config.resampling_quality,
         filters: FilterChain::new(&config.filters, CHANNELS),
         volume: player_volume_multiplier(config.volume),
         end_time_ms: config.end_time_ms,
@@ -293,7 +300,8 @@ impl State {
                     };
                     match source_params(&params) {
                         Ok((source_rate, source_channels)) => {
-                            self.resampler = Resampler::new(source_rate, source_channels);
+                            self.resampler =
+                                Resampler::new(source_rate, source_channels, self.resampling_quality);
                         }
                         Err(exception) => {
                             writer.finish();
@@ -741,6 +749,7 @@ mod tests {
             volume: 100,
             filters: Filters::default(),
             opener: Arc::new(StreamOpener::default()),
+            resampling_quality: ResamplingQuality::Low,
             interrupt: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1248,6 +1257,7 @@ mod tests {
             volume: 100,
             filters: Filters::default(),
             opener: Arc::new(StreamOpener::default()),
+            resampling_quality: ResamplingQuality::Low,
             interrupt: Arc::new(AtomicBool::new(false)),
         });
 
@@ -1280,6 +1290,7 @@ mod tests {
                 volume: 100,
                 filters: Filters::default(),
                 opener: Arc::new(StreamOpener::default()),
+                resampling_quality: ResamplingQuality::Low,
                 interrupt: Arc::new(AtomicBool::new(false)),
             },
             writer,
@@ -1316,6 +1327,7 @@ mod tests {
                 volume: 100,
                 filters: Filters::default(),
                 opener: Arc::new(StreamOpener::default()),
+                resampling_quality: ResamplingQuality::Low,
                 interrupt: Arc::new(AtomicBool::new(false)),
             },
             writer,

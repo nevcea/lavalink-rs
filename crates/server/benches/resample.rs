@@ -1,14 +1,19 @@
-//! Throughput of the hand-rolled Catmull-Rom resampler.
+//! Throughput of `audio::resample`'s three `resamplingQuality` tiers.
 //!
-//! This is the one piece of the pipeline that trades a dependency for its own
-//! arithmetic (see `audio::resample`'s module docs), so it is the one worth
-//! watching for a regression a refactor could introduce silently.
+//! `Low` is the hand-rolled Catmull-Rom resampler — the one piece of the
+//! pipeline that trades a dependency for its own arithmetic (see
+//! `audio::resample`'s module docs) — worth watching for a regression a
+//! refactor could introduce silently. `Medium`/`High` are `rubato`'s
+//! windowed-sinc resampler, expected to cost more per the same trade
+//! lavaplayer itself makes at those tiers; benchmarked here so that cost is
+//! visible rather than assumed.
 
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use lavalink_server::audio::resample::Resampler;
 use lavalink_server::audio::ring::CHANNELS;
+use lavalink_server::config::ResamplingQuality;
 
 mod common;
 use common::interleaved;
@@ -29,9 +34,9 @@ const FRAMES: usize = 4096;
 /// the reset path every iteration would report the one case that never recurs in
 /// steady-state playback.
 fn bench_into(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-              name: &str, source_rate: u32, source_channels: usize) {
+              name: &str, source_rate: u32, source_channels: usize, quality: ResamplingQuality) {
     group.bench_function(BenchmarkId::new("convert", name), |b| {
-        let mut resampler = Resampler::new(source_rate, source_channels);
+        let mut resampler = Resampler::new(source_rate, source_channels, quality);
         let input = interleaved(source_channels, FRAMES);
         let mut out = Vec::new();
         resampler.reset();
@@ -49,13 +54,21 @@ fn bench_resample(c: &mut Criterion) {
     group.throughput(Throughput::Elements(FRAMES as u64));
 
     // The common case per the module docs: a 44.1kHz stereo source going to 48kHz.
-    bench_into(&mut group, "44100_stereo_to_48000", 44_100, CHANNELS);
+    bench_into(&mut group, "44100_stereo_to_48000", 44_100, CHANNELS, ResamplingQuality::Low);
     // Also common: a mono source, which is widened to stereo on top of the rate
     // conversion.
-    bench_into(&mut group, "44100_mono_to_48000_stereo", 44_100, 1);
+    bench_into(&mut group, "44100_mono_to_48000_stereo", 44_100, 1, ResamplingQuality::Low);
     // The no-op path: source already matches the ring's format, so this measures
-    // the pass-through cost rather than any interpolation.
-    bench_into(&mut group, "48000_stereo_passthrough", 48_000, CHANNELS);
+    // the pass-through cost rather than any interpolation. Quality is irrelevant
+    // here — `Resampler::new` never builds a `SincEngine` when no rate conversion
+    // is needed — but `Low` is passed for consistency with the other cases.
+    bench_into(&mut group, "48000_stereo_passthrough", 48_000, CHANNELS, ResamplingQuality::Low);
+
+    // The `rubato`-backed tiers, same source shape as the first case above, so the
+    // three numbers are directly comparable: this is the cost lavaplayer itself
+    // pays for `Medium`/`High`, not a Catmull-Rom regression.
+    bench_into(&mut group, "44100_stereo_to_48000_medium", 44_100, CHANNELS, ResamplingQuality::Medium);
+    bench_into(&mut group, "44100_stereo_to_48000_high", 44_100, CHANNELS, ResamplingQuality::High);
 
     group.finish();
 }

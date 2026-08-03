@@ -146,6 +146,7 @@ impl AppState {
             let engine: Box<dyn Engine> = Box::new(PipelineEngine::new(
                 guild_id,
                 config.lavalink.server.frame_buffer_duration_ms,
+                config.lavalink.server.resampling_quality,
                 Arc::clone(&voice),
                 opener,
                 events,

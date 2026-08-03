@@ -57,6 +57,12 @@ songbird = { version = "0.6", default-features = false, features = [
     "rustls",
     "tungstenite",
 ] }
+# Windowed-sinc resampling for `resamplingQuality` (LOW/MEDIUM/HIGH map to
+# SincInterpolationParameters presets in audio/resample.rs). `fft_resampler`,
+# the only default feature, pulls in realfft/num-complex for a resampler
+# variant this node doesn't use — only the sinc/fast asynchronous resamplers
+# are needed here.
+rubato = { version = "0.16", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
