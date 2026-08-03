@@ -72,7 +72,7 @@ Every commit follows [Conventional Commits v1.0.0](https://www.conventionalcommi
 
 ## Requirements
 
-- Rust 1.75+ (`rust-version` in the workspace `Cargo.toml`)
+- Rust 1.95+ (`rust-version` in the workspace `Cargo.toml`)
 - A C compiler and CMake, to build the vendored `libopus` (pulled in
   transitively through `songbird`)
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) on `PATH`, optional — only needed

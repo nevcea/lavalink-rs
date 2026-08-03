@@ -35,7 +35,7 @@ parts of the v4 feature set are deliberately not implemented, and why.
 
 ## Requirements
 
-- Rust 1.75+
+- Rust 1.95+
 - A C compiler and CMake, to build the vendored `libopus` (pulled in
   transitively through `songbird`)
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) on `PATH`, optional — only
