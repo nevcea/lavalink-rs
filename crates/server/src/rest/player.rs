@@ -266,7 +266,7 @@ fn validate_voice(voice: &VoiceState) -> Result<(), ApiError> {
         || voice
             .channel_id
             .as_ref()
-            .map_or(true, |id| id.trim().is_empty());
+            .is_none_or(|id| id.trim().is_empty());
 
     if blank {
         return Err(ApiError::bad_request(
