@@ -27,6 +27,14 @@ fn equalizer_only() -> Filters {
 
 /// Every implemented filter enabled at once — the worst case the chain can be
 /// asked to run per buffer.
+///
+/// Every value here has to be one its filter's `is_enabled` accepts, which is not
+/// the same as "present in the request": `distortion` at all-zero offsets and
+/// unit scales, and `channelMix` at the identity matrix, are both *neutral*, so
+/// `FilterChain::process` skips them and they contribute nothing to the number.
+/// That silently left the two out of this case — including `distortion`, the only
+/// stage with three transcendentals per sample — so the values below are
+/// deliberately off-neutral.
 fn all_filters() -> Filters {
     serde_json::from_str(
         r#"{
@@ -35,9 +43,9 @@ fn all_filters() -> Filters {
             "karaoke": {"level":1.0,"monoLevel":1.0,"filterBand":220.0,"filterWidth":100.0},
             "tremolo": {"frequency":5.0,"depth":0.5},
             "vibrato": {"frequency":5.0,"depth":0.5},
-            "distortion": {"sinOffset":0.0,"sinScale":1.0,"cosOffset":0.0,"cosScale":1.0,"tanOffset":0.0,"tanScale":1.0,"offset":0.0,"scale":1.0},
+            "distortion": {"sinOffset":0.0,"sinScale":2.0,"cosOffset":0.0,"cosScale":2.0,"tanOffset":0.0,"tanScale":2.0,"offset":0.0,"scale":1.0},
             "rotation": {"rotationHz":0.2},
-            "channelMix": {"leftToLeft":1.0,"leftToRight":0.0,"rightToLeft":0.0,"rightToRight":1.0},
+            "channelMix": {"leftToLeft":0.8,"leftToRight":0.2,"rightToLeft":0.2,"rightToRight":0.8},
             "lowPass": {"smoothing":20.0}
         }"#,
     )
