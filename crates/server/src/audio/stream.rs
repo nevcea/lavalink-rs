@@ -409,7 +409,17 @@ impl HttpMediaSource {
         // valid "nothing left to read" answer, not a failure — symphonia's probe now
         // seeks near the end of the stream looking for trailing metadata (ID3v1/APE),
         // which a seekable-but-short source can legitimately walk past the end of.
-        if offset > 0 && status == StatusCode::RANGE_NOT_SATISFIABLE {
+        //
+        // Only past an end we actually know, though. A 416 for a range that is *within*
+        // the length the first response declared means the resource changed underneath
+        // us — an expired or rotated CDN URL, the same situation the length check
+        // further down catches — and swallowing that as a clean EOF ends the track
+        // mid-way as `finished`, with nothing anywhere saying why. It falls through to
+        // the failure below instead. A source whose length is unknown can never reach
+        // here: `Seek` refuses a seek from the end of one, so nothing asks for a range
+        // past an end it cannot name.
+        let past_known_end = self.length.is_some_and(|length| offset >= length);
+        if offset > 0 && status == StatusCode::RANGE_NOT_SATISFIABLE && past_known_end {
             self.position = offset;
             *self.lock_reader() = None;
             return Ok(());
@@ -699,6 +709,74 @@ mod tests {
         let mut buffer = [0u8; 4096];
         let read = source.read(&mut buffer).unwrap();
         assert_eq!(read, 0, "a seek past EOF must read as empty, not error");
+    }
+
+    /// The bug this fix targets: `connect` treated *every* `416` at a non-zero
+    /// offset as a clean end of stream, which is only true past the end of the
+    /// resource. A resume for a range well inside the declared length gets a `416`
+    /// when the URL has expired or the resource rotated — googlevideo's do, hours
+    /// after yt-dlp hands them over — and swallowing that as EOF ends the track
+    /// as `finished` part way through, with no error anywhere to explain the
+    /// truncation. It has to surface as a failure instead.
+    #[test]
+    fn a_416_inside_the_declared_length_is_a_failure_not_an_end_of_stream() {
+        const BODY: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        const CUT_AT: usize = 10;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            // One initial response plus every reconnect the retry budget allows.
+            for attempt in 0..=MAX_RECONNECT_ATTEMPTS {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                consume_request(&stream);
+
+                if attempt == 0 {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n\r\n",
+                        BODY.len()
+                    )
+                    .unwrap();
+                    // Short of what Content-Length promised: the connection drops
+                    // mid-body and the source tries to resume from CUT_AT.
+                    stream.write_all(&BODY[..CUT_AT]).unwrap();
+                } else {
+                    write!(
+                        stream,
+                        "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\n\r\n",
+                        BODY.len()
+                    )
+                    .unwrap();
+                }
+            }
+        });
+
+        let mut source = HttpMediaSource::open(&format!("http://{addr}"), None, None).unwrap();
+        assert_eq!(source.byte_len(), Some(BODY.len() as u64));
+
+        let mut collected = Vec::new();
+        let mut buffer = [0u8; 4096];
+        let mut saw_error = false;
+        loop {
+            match source.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => collected.extend_from_slice(&buffer[..read]),
+                Err(_) => {
+                    saw_error = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            saw_error,
+            "a 416 at byte {CUT_AT} of a {}-byte resource must fail, not read as a \
+             clean end of stream after only {} bytes",
+            BODY.len(),
+            collected.len()
+        );
     }
 
     /// The scenario from the bug report: a track that has already produced audio
