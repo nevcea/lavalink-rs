@@ -482,19 +482,18 @@ impl HttpMediaSource {
 fn total_length(response: &Response) -> Option<u64> {
     let headers = response.headers();
 
-    if let Some(range) = headers.get(CONTENT_RANGE).and_then(|v| v.to_str().ok()) {
-        // "bytes 200-1000/67589"
-        if let Some((_, total)) = range.rsplit_once('/') {
-            if let Ok(total) = total.trim().parse::<u64>() {
-                return Some(total);
-            }
-        }
-    }
-
     headers
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse().ok())
+        .get(CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        // "bytes 200-1000/67589"
+        .and_then(|range| range.rsplit_once('/'))
+        .and_then(|(_, total)| total.trim().parse().ok())
+        .or_else(|| {
+            headers
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok())
+        })
 }
 
 impl Read for HttpMediaSource {

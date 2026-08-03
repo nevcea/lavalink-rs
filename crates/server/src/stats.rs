@@ -42,15 +42,12 @@ pub const FRAME_STATS_USABLE_AFTER_MS: i64 = 60_000;
 /// `None` when there are no usable players — the original does not divide by
 /// zero either, and a session with nothing playing has no frame data to report.
 pub fn frame_stats(samples: impl Iterator<Item = (u32, u32, bool)>) -> Option<FrameStats> {
-    let (mut sent, mut nulled, mut usable_players) = (0u64, 0u64, 0u64);
-    for (player_sent, player_nulled, usable) in samples {
-        if !usable {
-            continue;
-        }
-        sent += u64::from(player_sent);
-        nulled += u64::from(player_nulled);
-        usable_players += 1;
-    }
+    let (sent, nulled, usable_players) = samples.filter(|(_, _, usable)| *usable).fold(
+        (0u64, 0u64, 0u64),
+        |(sent, nulled, count), (player_sent, player_nulled, _)| {
+            (sent + u64::from(player_sent), nulled + u64::from(player_nulled), count + 1)
+        },
+    );
 
     if usable_players == 0 {
         return None;

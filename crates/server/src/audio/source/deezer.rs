@@ -85,9 +85,10 @@ impl DeezerSource {
             .text()
             .map_err(|error| SourceError::Io(error.to_string()))?;
 
-        let value: Value = serde_json::from_str(&text).map_err(|error| SourceError::Unplayable {
+        let unplayable = |error: serde_json::Error| SourceError::Unplayable {
             reason: format!("could not read deezer's response: {error}"),
-        })?;
+        };
+        let value: Value = serde_json::from_str(&text).map_err(unplayable)?;
 
         if let Some(error) = value.get("error") {
             let message = error
@@ -103,9 +104,7 @@ impl DeezerSource {
             });
         }
 
-        serde_json::from_value(value).map_err(|error| SourceError::Unplayable {
-            reason: format!("could not read deezer's response: {error}"),
-        })
+        serde_json::from_value(value).map_err(unplayable)
     }
 
     fn load_track(&self, id: &str) -> Result<SourceLoad, SourceError> {

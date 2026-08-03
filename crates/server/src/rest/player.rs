@@ -138,7 +138,7 @@ pub async fn patch_player(
     // `AppState::player`'s pairing exists to close.
     let (handle, connection) = state
         .player(&session, guild_id)
-        .ok_or_else(|| ApiError::unavailable("The player is not accepting commands"))?;
+        .ok_or_else(player_gone)?;
 
     // Connecting happens here, awaited, before the actor is told anything, so a
     // failure can become a status code. The original wraps this in
@@ -161,7 +161,7 @@ pub async fn patch_player(
         // player was already built in its place).
         if session.player(guild_id).is_none() {
             connection.leave().await;
-            return Err(ApiError::unavailable("The player is not accepting commands"));
+            return Err(player_gone());
         }
     }
 
@@ -181,7 +181,11 @@ pub async fn patch_player(
         .patch(request)
         .await
         .map(Json)
-        .map_err(|_| ApiError::unavailable("The player is not accepting commands"))
+        .map_err(|_| player_gone())
+}
+
+fn player_gone() -> ApiError {
+    ApiError::unavailable("The player is not accepting commands")
 }
 
 /// 204, and this one really is 204 — unlike `PATCH`, whose `@ResponseStatus`

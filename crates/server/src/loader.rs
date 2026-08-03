@@ -237,14 +237,11 @@ impl Loader {
             );
         }
 
-        let result = match rx.await {
-            Ok(result) => result,
-            // The thread panicked. Report it as ours, and let everything else carry
-            // on: one bad load must not take the node with it.
-            Err(_) => Err(SourceError::Internal(
-                "the loader thread panicked".to_owned(),
-            )),
-        };
+        // The thread panicked. Report it as ours, and let everything else carry
+        // on: one bad load must not take the node with it.
+        let result = rx
+            .await
+            .unwrap_or_else(|_| Err(SourceError::Internal("the loader thread panicked".to_owned())));
 
         match result {
             Ok(SourceLoad::Track(track)) => match encode(track) {

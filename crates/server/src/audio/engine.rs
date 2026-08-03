@@ -291,16 +291,10 @@ impl Engine for PipelineEngine {
                     pump::run(config, writer, pump_commands, position_ms, &on_progress)
                 }));
 
-                let outcome = match outcome {
-                    Ok(outcome) => outcome,
-                    Err(_) => super::PumpOutcome::Failed {
-                        exception: Exception::fault(
-                            "The audio pipeline panicked",
-                            "pump panic",
-                        ),
-                        started: true,
-                    },
-                };
+                let outcome = outcome.unwrap_or_else(|_| super::PumpOutcome::Failed {
+                    exception: Exception::fault("The audio pipeline panicked", "pump panic"),
+                    started: true,
+                });
 
                 if let Some(events) = &events {
                     let event = match outcome {
