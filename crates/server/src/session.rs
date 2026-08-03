@@ -419,7 +419,7 @@ impl SessionRegistry {
 /// (`SocketServer.kt:57,88`). Clients treat it as opaque, but keeping the alphabet
 /// avoids surprising anything that validates it.
 fn generate_session_id() -> String {
-    use rand::RngExt as _;
+    use rand::Rng as _;
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let mut rng = rand::rng();
     (0..16)
