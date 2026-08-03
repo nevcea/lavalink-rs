@@ -820,4 +820,44 @@ mod tests {
         assert_eq!(sent, 1, "ring A's healthy read");
         assert_eq!(nulled, 1, "ring B's starved read, on the same shared counter");
     }
+
+    /// The bug this guards (#9): songbird builds its codec registry with
+    /// `symphonia::default::register_enabled_codecs`, and its own `symphonia`
+    /// dependency enables **no features at all** — by design, so the downstream
+    /// crate picks the codec set. Which means the PCM decoder that songbird's
+    /// `RawAdapter` path needs (`RawReader` declares `CODEC_TYPE_PCM_F32LE`) only
+    /// exists in that registry if *we* enable `pcm` on the same symphonia version
+    /// songbird resolved. That happened by accident for as long as our own
+    /// symphonia was 0.5.x too, and stopped the instant we moved to 0.6: two
+    /// versions are two unrelated crates, so nothing unified any more.
+    ///
+    /// Nothing about it fails loudly. `LiveInput::promote` just finds no decoder
+    /// for the track, the mixer never pulls a frame, the ring fills, the pump
+    /// parks on a full ring — and because the position counter is advanced on the
+    /// *read* side, `position` sits at 0 until `TrackStuckEvent` fires. That is
+    /// the whole of #9, and it is invisible to every test that stops at the ring.
+    ///
+    /// So this asserts the one thing that actually matters at the boundary: the
+    /// registry songbird will use at runtime can decode what we hand it.
+    #[test]
+    fn songbird_can_promote_the_ring_into_a_playable_input() {
+        use songbird::input::codecs::{get_codec_registry, get_probe};
+        use songbird::input::{Input, RawAdapter};
+
+        let (writer, reader, _position) = ring(1000);
+        writer.write(&vec![0.0; FRAME_SAMPLES * 2]);
+
+        let input: Input = RawAdapter::new(reader, SAMPLE_RATE, CHANNELS as u32).into();
+        let Input::Live(live, _) = input else {
+            panic!("a RawAdapter is already a live input");
+        };
+
+        let promoted = live.promote(get_codec_registry(), get_probe());
+        assert!(
+            promoted.is_ok(),
+            "songbird cannot decode our raw f32 PCM: {:?} — its registry is missing \
+             the symphonia `pcm` codec, see this test's docs",
+            promoted.err()
+        );
+    }
 }

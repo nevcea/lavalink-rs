@@ -34,6 +34,21 @@ symphonia = { version = "0.6", default-features = false, features = [
     "mp3", "flac", "aac", "vorbis", "pcm",
     "isomp4", "mkv", "ogg", "wav",
 ] }
+# Never imported — this exists purely so Cargo's feature unification reaches
+# *songbird's* symphonia, which is a different major version from ours and
+# therefore a different crate entirely.
+#
+# songbird builds its codec registry with `symphonia::default::register_enabled_codecs`
+# and enables no features on its own symphonia dependency, deliberately: the
+# downstream crate is expected to pick the codec set, and unification carries it
+# across. The mixer's `RawAdapter` path needs the PCM decoder specifically
+# (`RawReader` declares `CODEC_TYPE_PCM_F32LE`), so without this the registry has
+# only Opus, `LiveInput::promote` finds no decoder for our ring, and the mixer
+# silently never pulls a frame — see #9 and
+# `ring.rs`'s `songbird_can_promote_the_ring_into_a_playable_input`, which fails
+# the moment this line goes away. This used to be satisfied by accident, back when
+# our own symphonia was also 0.5.x.
+symphonia-songbird = { package = "symphonia", version = "0.5", default-features = false, features = ["pcm"] }
 # `driver` only — no gateway client. Lavalink receives voice state and voice server
 # updates from its own client over REST, which is exactly the standalone driver's
 # input, so serenity/twilight are not needed. `tungstenite` is the websocket backend
