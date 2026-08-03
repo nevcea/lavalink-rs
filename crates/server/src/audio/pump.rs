@@ -558,9 +558,29 @@ fn to_interleaved(buffer: &GenericAudioBufferRef<'_>, out: &mut Vec<f32>) {
             let channels = $buffer.spec().channels().count();
             let frames = $buffer.frames();
             out.reserve(frames * channels);
-            for frame in 0..frames {
+
+            // `plane` resolves a channel's slice out of an `Option`, so calling it
+            // from inside the frame loop re-resolves the same `channels` slices
+            // once per *sample* — `frames * channels` lookups to reach the same
+            // handful of slices. Each plane is resolved once here instead.
+            //
+            // Stereo gets its own arm because it is what almost everything decodes
+            // to, and because reading the pair in step keeps both the loads and the
+            // pushes sequential; the general arm has to write with a stride, which
+            // is why it is not worth using for the case that does not need it.
+            if channels == 2 {
+                let (left, right) = $buffer.plane_pair(0, 1).unwrap();
+                for frame in 0..frames {
+                    out.push($convert(left[frame]));
+                    out.push($convert(right[frame]));
+                }
+            } else {
+                out.resize(frames * channels, 0.0);
                 for channel in 0..channels {
-                    out.push($convert($buffer.plane(channel).unwrap()[frame]));
+                    let plane = $buffer.plane(channel).unwrap();
+                    for frame in 0..frames {
+                        out[frame * channels + channel] = $convert(plane[frame]);
+                    }
                 }
             }
         }};
@@ -747,6 +767,46 @@ mod tests {
         // can exceed it, because silence delivered during a starved moment is time
         // the listener really experienced.
         assert!(position >= 480, "expected at least 480ms, got {position}");
+    }
+
+    /// Both of `to_interleaved`'s arms — the stereo one and the general one — have
+    /// to agree on frame-major order, and both have to keep dividing by `i16::MAX`.
+    ///
+    /// The divisor is the reason this asserts on exact values rather than shape.
+    /// symphonia ships `copy_to_vec_interleaved`, which does everything this
+    /// function does and skips the per-sample plane lookup, but it scales 16-bit
+    /// samples by 32768 rather than 32767 — so adopting it would quietly rescale
+    /// every sample of every 16-bit source. This test is what catches that.
+    #[test]
+    fn to_interleaved_is_frame_major_for_every_channel_count() {
+        use symphonia::core::audio::{AudioBuffer, AudioMut as _, AudioSpec, Channels};
+
+        const FRAMES: usize = 4;
+
+        // 1 and 3 take the general arm, 2 takes the stereo one.
+        for channels in [1usize, 2, 3] {
+            let spec = AudioSpec::new(48_000, Channels::Discrete(channels as u16));
+            let mut buffer = AudioBuffer::<i16>::new(spec, FRAMES);
+            buffer.render_silence(Some(FRAMES));
+            for channel in 0..channels {
+                let plane = buffer.plane_mut(channel).unwrap();
+                for (frame, sample) in plane.iter_mut().enumerate() {
+                    // Distinct per (frame, channel), so a transposed or off-by-one
+                    // result cannot coincidentally match.
+                    *sample = (frame * 10 + channel) as i16;
+                }
+            }
+
+            let mut out = Vec::new();
+            to_interleaved(&GenericAudioBufferRef::S16(&buffer), &mut out);
+
+            let expected: Vec<f32> = (0..FRAMES)
+                .flat_map(|frame| {
+                    (0..channels).map(move |channel| (frame * 10 + channel) as f32 / 32_767.0)
+                })
+                .collect();
+            assert_eq!(out, expected, "channels = {channels}");
+        }
     }
 
     #[test]
