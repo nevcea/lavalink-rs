@@ -49,8 +49,12 @@ once. Otherwise, to run each half by hand:
    DISCORD_TOKEN=… cargo run -p lavalink-test-bot
    ```
 
+   or put `DISCORD_TOKEN=…` in a `.env` file in the repo root (or wherever you run
+   the command from) and just `cargo run -p lavalink-test-bot` — it loads `.env`
+   itself now, no export needed.
+
    `LAVALINK_HOST` (default `localhost:2333`) and `LAVALINK_PASSWORD` (default
-   `youshallnotpass`) override the node it points at.
+   `youshallnotpass`) override the node it points at; both can live in `.env` too.
 
 ## Commands
 

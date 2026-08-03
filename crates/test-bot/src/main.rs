@@ -439,6 +439,11 @@ const HELP: &str = "\
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Loads `.env` from the current directory if present; a real env var always
+    // wins over one set there. Missing entirely is fine — just falls through to
+    // `DISCORD_TOKEN` below, which reports the actual problem.
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

@@ -9,6 +9,8 @@ license.workspace = true
 [dependencies]
 lavalink-protocol = { path = "../protocol" }
 
+dotenvy = "0.15"
+
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
