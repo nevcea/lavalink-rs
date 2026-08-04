@@ -133,13 +133,22 @@ struct Shared {
     /// the mixer gets round to dropping it, and any read it services meanwhile —
     /// including a starved one, which refreshes the position too — would otherwise
     /// write *this* track's base and consumed frames over the live one's.
-    owns_position: AtomicBool,
+    ///
+    /// A `Mutex`, not an `AtomicBool`: `refresh_position` holds it across its whole
+    /// check-then-store, and `detach_position` takes it too, so the two can never
+    /// interleave. Two independent atomics let a `refresh_position` pass the check
+    /// a moment before `detach_position` flipped it, then get preempted before its
+    /// store — long enough for the engine to build the replacement ring and write
+    /// the new track's position, which this call's now-stale store would then
+    /// overwrite.
+    owns_position: Mutex<bool>,
     frames: Arc<FrameCounters>,
 }
 
 impl Shared {
     fn refresh_position(&self) {
-        if !self.owns_position.load(Ordering::Relaxed) {
+        let owns = lock(&self.owns_position);
+        if !*owns {
             return;
         }
         let frames = self.consumed_frames.load(Ordering::Relaxed);
@@ -182,7 +191,7 @@ pub fn channel(
         remainder_samples: AtomicI64::new(0),
         base_position_ms: AtomicI64::new(0),
         position_ms,
-        owns_position: AtomicBool::new(true),
+        owns_position: Mutex::new(true),
         frames,
     });
 
@@ -283,7 +292,7 @@ impl RingWriter {
     /// still alive inside songbird's `Input` until the mixer drops it. See
     /// [`Shared::owns_position`].
     pub fn detach_position(&self) {
-        self.shared.owns_position.store(false, Ordering::Relaxed);
+        *lock(&self.shared.owns_position) = false;
     }
 
     /// Discards buffered audio and restarts the position counter at `position_ms`.
@@ -838,6 +847,54 @@ mod tests {
             7_000,
             "a superseded ring must not report over the live track's position"
         );
+    }
+
+    /// `detach_position` (the engine, synchronously, before the replacement ring
+    /// exists) must never lose a race against a `refresh_position` already in
+    /// flight on this ring's reader: by the time `detach_position` returns, no
+    /// read still in flight when it was called may write `position_ms` afterward.
+    /// Regression test for the race where the two were separate atomics with no
+    /// lock tying the check in `refresh_position` to its own store, letting a
+    /// `detach_position` land in the gap between them and get overwritten by a
+    /// read that read `true` a moment before.
+    ///
+    /// Mirrors how the real caller uses these two: `detach_position` returns
+    /// before the replacement ring is even created, so nothing the old ring's
+    /// reader does is allowed to land after that point.
+    #[test]
+    fn a_racing_detach_and_read_never_clobbers_a_later_write() {
+        for _ in 0..2_000 {
+            let (writer, mut reader, position) = ring(1000);
+            writer.write(&vec![0.0; SAMPLE_RATE as usize * CHANNELS]);
+
+            let keep_reading = Arc::new(AtomicBool::new(true));
+            let reader_thread = std::thread::spawn({
+                let keep_reading = Arc::clone(&keep_reading);
+                move || {
+                    let mut out = vec![0u8; FRAME_SAMPLES * 4];
+                    // Real audio, then starvation once it runs out — either kind of
+                    // read still refreshes the position, so the loop keeps racing
+                    // `detach_position` for as long as the main thread wants.
+                    while keep_reading.load(Ordering::Relaxed) {
+                        let _ = reader.read(&mut out);
+                    }
+                }
+            });
+
+            writer.detach_position();
+            // What the engine does immediately after detaching, before the
+            // replacement ring is created: nothing from the old ring may still be
+            // in flight past this point, so this write must be the last one seen.
+            position.store(7_000, Ordering::Relaxed);
+            keep_reading.store(false, Ordering::Relaxed);
+            reader_thread.join().unwrap();
+
+            assert_eq!(
+                position.load(Ordering::Relaxed),
+                7_000,
+                "a detached ring's in-flight read overwrote the live track's position"
+            );
+        }
     }
 
     /// A concurrent `reset` (the pump, after a seek) must never have its rebase
