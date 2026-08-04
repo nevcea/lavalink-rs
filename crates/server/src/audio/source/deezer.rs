@@ -320,7 +320,7 @@ impl DeezerTrack {
                     .artist
                     .and_then(|artist| artist.name)
                     .unwrap_or_else(|| "Unknown artist".to_owned()),
-                length: self.duration.map(|seconds| seconds * 1000).unwrap_or(0),
+                length: self.duration.map(|seconds| seconds.saturating_mul(1000)).unwrap_or(0),
                 is_stream: false,
                 position: 0,
                 title: self.title.unwrap_or_else(|| "Unknown title".to_owned()),
