@@ -13,6 +13,7 @@
 //! move the bot into a voice channel and receives the credentials, then hands them to
 //! the *node*, which is what actually speaks voice. Nothing here touches audio.
 
+mod commands;
 mod node;
 mod node_ws;
 
@@ -23,14 +24,14 @@ use lavalink_protocol::filters::{Band, Filters, LowPass};
 use lavalink_protocol::player::{Player, PlayerUpdate, PlayerUpdateTrack, VoiceState};
 use lavalink_protocol::{LoadResult, Omissible, Track};
 use serenity::all::{
-    CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
-    EditInteractionResponse, EventHandler, GatewayIntents, GuildId, Interaction, Ready,
-    ResolvedOption, ResolvedValue, ShardManager,
+    CommandInteraction, Context, EditInteractionResponse, EventHandler, GatewayIntents, GuildId,
+    Interaction, Ready, ShardManager,
 };
 use serenity::{async_trait, Client};
 use songbird::{SerenityInit, Songbird};
 use tokio::sync::Mutex;
 
+use commands::{commands, opt_f64, opt_i64, opt_str};
 use node::{Node, NodeError};
 
 struct Handler {
@@ -397,75 +398,6 @@ impl Handler {
             None => "pong! (gateway latency not measured yet)".into(),
         }
     }
-}
-
-/// Every slash command this bot registers, guild-scoped in `ready`.
-fn commands() -> Vec<CreateCommand> {
-    use CommandOptionType::{Integer, Number, String as Str};
-
-    vec![
-        CreateCommand::new("join").description("move the bot into your voice channel"),
-        CreateCommand::new("leave").description("destroy the player and leave"),
-        CreateCommand::new("play").description("load and play a track").add_option(
-            CreateCommandOption::new(Str, "query", "url, ytsearch:…, scsearch:…, or a local path")
-                .required(true),
-        ),
-        CreateCommand::new("search").description("load without playing").add_option(
-            CreateCommandOption::new(Str, "query", "same syntax as /play").required(true),
-        ),
-        CreateCommand::new("stop").description("stop the current track"),
-        CreateCommand::new("pause").description("pause playback"),
-        CreateCommand::new("resume").description("resume playback"),
-        CreateCommand::new("seek").description("seek to a position").add_option(
-            CreateCommandOption::new(Number, "seconds", "position in seconds").required(true),
-        ),
-        CreateCommand::new("volume").description("set player volume").add_option(
-            CreateCommandOption::new(Integer, "amount", "0-1000")
-                .required(true)
-                .min_int_value(0)
-                .max_int_value(1000),
-        ),
-        CreateCommand::new("np").description("now playing"),
-        CreateCommand::new("players").description("node-wide player list"),
-        CreateCommand::new("eq")
-            .description("set an equalizer band")
-            .add_option(
-                CreateCommandOption::new(Integer, "band", "0-14")
-                    .required(true)
-                    .min_int_value(0)
-                    .max_int_value(14),
-            )
-            .add_option(CreateCommandOption::new(Number, "gain", "-0.25 to 1.0").required(true)),
-        CreateCommand::new("lowpass").description("set the low-pass filter").add_option(
-            CreateCommandOption::new(Number, "smoothing", "smoothing factor").required(true),
-        ),
-        CreateCommand::new("clearfilters").description("clear all filters"),
-        CreateCommand::new("filters").description("show the current filter chain"),
-        CreateCommand::new("ping").description("gateway latency"),
-        CreateCommand::new("info").description("node version and capabilities"),
-        CreateCommand::new("stats").description("node-wide stats"),
-    ]
-}
-
-fn opt_str<'a>(options: &[ResolvedOption<'a>], name: &str) -> Option<&'a str> {
-    options.iter().find(|o| o.name == name).and_then(|o| match o.value {
-        ResolvedValue::String(s) => Some(s),
-        _ => None,
-    })
-}
-
-fn opt_i64(options: &[ResolvedOption<'_>], name: &str) -> Option<i64> {
-    options.iter().find(|o| o.name == name).and_then(|o| match o.value {
-        ResolvedValue::Integer(v) => Some(v),
-        _ => None,
-    })
-}
-
-fn opt_f64(options: &[ResolvedOption<'_>], name: &str) -> Option<f64> {
-    options.iter().find(|o| o.name == name).and_then(|o| match o.value {
-        ResolvedValue::Number(v) => Some(v),
-        _ => None,
-    })
 }
 
 fn describe(track: &Track) -> String {
