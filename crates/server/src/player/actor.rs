@@ -392,6 +392,14 @@ impl PlayerActor {
         }
 
         if let Some(position) = request.position.take_if(track_untouched) {
+            // The original clamps rather than rejects a negative seek target
+            // (LocalAudioTrackExecutor.setPosition: timecode < 0 becomes 0)
+            // instead of erroring, and this has to happen before the value
+            // reaches engine.seek: pump.rs's own seek clamps only what it hands
+            // the demuxer, not the unclamped value drain_commands separately
+            // hands writer.reset to rebase the ring's reported position, which
+            // would otherwise report negative for the next few seconds.
+            let position = position.max(0);
             if self.model.track.is_some() {
                 self.engine.seek(position);
                 // The optimistic value goes out now: the original reports the
@@ -441,7 +449,12 @@ impl PlayerActor {
                     Omissible::Omitted => false,
                 };
 
-                let position = request.position.into_option().unwrap_or(0);
+                // Same clamp as the seek path above, and for the same reason:
+                // pump.rs's start_position_ms only skips seeking on a non-positive
+                // value, it does not clamp one, so an unclamped negative here would
+                // reach writer.reset and rebase the ring's reported position
+                // negative for the life of the track.
+                let position = request.position.into_option().unwrap_or(0).max(0);
                 let end_time = request.end_time.into_option().flatten();
                 let mut track = *track;
                 if let Omissible::Present(user_data) = request.user_data {
@@ -848,6 +861,31 @@ mod tests {
             .contains(&EngineCall::Seek { position_ms: 42_000 }));
     }
 
+    /// The original clamps a negative seek target to 0 rather than rejecting it
+    /// (LocalAudioTrackExecutor.setPosition), and this port has to clamp before
+    /// the value reaches the engine: pump.rs's own seek only clamps what it
+    /// hands the demuxer, not what drain_commands separately hands
+    /// writer.reset to rebase the ring's reported position — an unclamped
+    /// negative there would report a negative position for the next few
+    /// seconds of playback.
+    #[tokio::test]
+    async fn a_negative_seek_target_is_clamped_to_zero() {
+        let harness = Harness::start();
+        harness.handle.patch(play(track("first"))).await.unwrap();
+
+        let player = harness
+            .handle
+            .patch(PatchRequest {
+                position: Omissible::Present(-5_000),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(player.state.position, 0);
+        assert!(harness.engine.calls().contains(&EngineCall::Seek { position_ms: 0 }));
+    }
+
     #[tokio::test]
     async fn seeking_an_empty_player_does_nothing() {
         let harness = Harness::start();
@@ -920,6 +958,35 @@ mod tests {
             call,
             EngineCall::Play {
                 start_position_ms: 30_000,
+                ..
+            }
+        )));
+    }
+
+    /// Same clamp as the seek path, on the play path: a negative start offset
+    /// on a play request must not reach the engine as-is — pump.rs's
+    /// start_position_ms only skips seeking when it is non-positive, it does
+    /// not clamp one, so an unclamped negative here would rebase the new
+    /// track's ring position negative for its whole run.
+    #[tokio::test]
+    async fn a_negative_start_offset_is_clamped_to_zero() {
+        let harness = Harness::start();
+
+        let player = harness
+            .handle
+            .patch(PatchRequest {
+                position: Omissible::Present(-30_000),
+                track: Some(TrackChange::Play(Box::new(track("first")))),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(player.state.position, 0);
+        assert!(harness.engine.calls().iter().any(|call| matches!(
+            call,
+            EngineCall::Play {
+                start_position_ms: 0,
                 ..
             }
         )));
