@@ -159,7 +159,13 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<DecodedTrack> {
     } else {
         1
     };
-    if version > TRACK_INFO_VERSION {
+    // Bounded on both sides, like `encode_to_bytes`. Version 0 is not a version
+    // this codec can produce, so accepting it on the way in made
+    // `decode` → `encode_with_version(track.version)` — the round trip this
+    // crate's own tests establish — fail on input `decode` had just accepted: set
+    // the versioned flag and write a `0`, and the fields parse as v1 under a
+    // version number nothing can write back.
+    if version == 0 || version > TRACK_INFO_VERSION {
         return Err(CodecError::UnsupportedVersion(version));
     }
 
@@ -336,6 +342,22 @@ mod tests {
         let track = decode(RICK).unwrap();
         let re_encoded = encode_with_version(&track.info, &track.tail, track.version).unwrap();
         assert_eq!(re_encoded, RICK);
+    }
+
+    /// The bug: `decode` bounded the version from above but not from below, while
+    /// `encode_to_bytes` rejects `0`. A token declaring version 0 therefore decoded
+    /// happily — parsed with the v1 field layout — and then failed the round trip
+    /// the test above establishes, on input this same crate had just accepted.
+    #[test]
+    fn version_zero_is_refused_rather_than_parsed_as_v1() {
+        let mut bytes = BASE64.decode(RICK).unwrap();
+        // Byte 4 is the version, the first byte after the 4-byte header.
+        bytes[4] = 0;
+
+        assert!(matches!(
+            decode(&BASE64.encode(&bytes)),
+            Err(CodecError::UnsupportedVersion(0))
+        ));
     }
 
     #[test]
