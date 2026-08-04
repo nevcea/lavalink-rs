@@ -64,7 +64,6 @@ pub enum Command {
     EmitUpdate,
     /// The audio engine reported something.
     Engine(EngineEvent),
-    Destroy(oneshot::Sender<()>),
 }
 
 #[derive(Debug, Default)]
@@ -113,6 +112,19 @@ pub struct PlayerHandle {
     /// unrelated REST traffic sharing the same queue — see the channel's own
     /// docs on `PlayerActor`.
     voice_updates: mpsc::Sender<VoiceUpdate>,
+    /// Teardown, off `commands` and off `voice_updates` both.
+    ///
+    /// Two reasons it cannot share the command queue. It must not have to wait
+    /// for room behind a burst of REST traffic: `send`'s own `SEND_TIMEOUT` is
+    /// the same 5s as `session::PLAYER_DESTROY_TIMEOUT`, so a full queue used up
+    /// the caller's entire budget before the reply was even sent. And the engine
+    /// holds a clone of the `commands` sender (`Engine::attach`), so
+    /// `commands.recv()` can never report every sender gone — this one is held
+    /// only by `PlayerHandle`, which makes dropping the last handle end the
+    /// actor. That is what stops a timed-out destroy from stranding the actor
+    /// task, its pump thread and its voice connection with nothing left pointing
+    /// at them.
+    destroy: mpsc::Sender<oneshot::Sender<()>>,
     /// Epoch ms when the current unbroken `Playing` period started, or `0` when not
     /// playing. Written only by the actor, in [`PlayerActor::sync_playing`]; read
     /// here without a lock.
@@ -166,9 +178,15 @@ impl PlayerHandle {
         rx.await.map_err(|_| PlayerGone)
     }
 
+    /// Tears the player down and waits for the actor to acknowledge it.
+    ///
+    /// `try_send` rather than an awaiting send: the channel is destroy-only with
+    /// a slot of its own, so the only way it is full is a destroy already in
+    /// flight, and waiting behind that one would just double the caller's
+    /// timeout for the same teardown.
     pub async fn destroy(&self) -> Result<(), PlayerGone> {
         let (tx, rx) = oneshot::channel();
-        self.send(Command::Destroy(tx)).await?;
+        self.destroy.try_send(tx).map_err(|_| PlayerGone)?;
         rx.await.map_err(|_| PlayerGone)
     }
 }
@@ -205,6 +223,10 @@ pub struct PlayerActor {
     /// instead of spinning on a channel that will only ever report closed.
     voice_updates: mpsc::Receiver<VoiceUpdate>,
     voice_updates_closed: bool,
+    /// See [`PlayerHandle::destroy`]'s field of the same name. Receiving `None`
+    /// here means every handle has been dropped, which is as final as an explicit
+    /// destroy and is the only signal that survives a caller giving up mid-way.
+    destroy: mpsc::Receiver<oneshot::Sender<()>>,
     position_ms: Arc<AtomicI64>,
     playing_since_ms: Arc<AtomicI64>,
     stuck_threshold: Duration,
@@ -233,6 +255,9 @@ impl PlayerActor {
     ) -> (Self, PlayerHandle) {
         let (tx, rx) = mpsc::channel(COMMAND_CAPACITY);
         let (voice_tx, voice_rx) = mpsc::channel(VOICE_UPDATE_CAPACITY);
+        // One slot: a second concurrent destroy is the same teardown, and the
+        // first one's acknowledgement is what both callers are waiting for.
+        let (destroy_tx, destroy_rx) = mpsc::channel(1);
         let position_ms = engine.position_handle();
         let frames = engine.frame_counters();
         // Not from the engine: whether the player is playing is the actor's own
@@ -247,6 +272,7 @@ impl PlayerActor {
             guild_id,
             commands: tx,
             voice_updates: voice_tx,
+            destroy: destroy_tx,
             playing_since_ms: Arc::clone(&playing_since_ms),
             frames,
         };
@@ -257,6 +283,7 @@ impl PlayerActor {
             commands: rx,
             voice_updates: voice_rx,
             voice_updates_closed: false,
+            destroy: destroy_rx,
             position_ms,
             playing_since_ms,
             stuck_threshold,
@@ -274,9 +301,26 @@ impl PlayerActor {
             tokio::select! {
                 command = self.commands.recv() => {
                     let Some(command) = command else { break };
-                    if self.handle(command) == Flow::Stop {
-                        break;
+                    self.handle(command);
+                }
+                // Destroy wins over anything in flight. The track ends with no
+                // event, matching the original, which drops the player without
+                // emitting on `DELETE`.
+                //
+                // `None` — every `PlayerHandle` dropped — ends the actor just the
+                // same, with nobody left to acknowledge. That is the case a
+                // `Session::shutdown` whose `destroy` timed out leaves behind: it
+                // has already taken the guild out of the map, so the drop at the
+                // end of that call is the last reference, and without this the
+                // actor, its pump thread and its voice connection would stay
+                // alive and unreachable for the life of the process.
+                reply = self.destroy.recv() => {
+                    self.engine.stop();
+                    self.model.stop();
+                    if let Some(reply) = reply {
+                        let _ = reply.send(());
                     }
+                    break;
                 }
                 update = self.voice_updates.recv(), if !self.voice_updates_closed => {
                     match update {
@@ -304,40 +348,24 @@ impl PlayerActor {
         self.engine.shutdown();
     }
 
-    fn handle(&mut self, command: Command) -> Flow {
-        let flow = match command {
+    /// No longer reports whether to stop: teardown has its own channel and its own
+    /// arm in `run`, so every command handled here is one the actor continues past.
+    fn handle(&mut self, command: Command) {
+        match command {
             Command::Snapshot(reply) => {
                 let _ = reply.send(self.snapshot());
-                Flow::Continue
             }
-            Command::EmitUpdate => {
-                self.emit_player_update();
-                Flow::Continue
-            }
+            Command::EmitUpdate => self.emit_player_update(),
             Command::Patch(request, reply) => {
                 self.apply_patch(*request);
                 let _ = reply.send(self.snapshot());
-                Flow::Continue
             }
-            Command::Engine(event) => {
-                self.apply_engine_event(event);
-                Flow::Continue
-            }
-            Command::Destroy(reply) => {
-                // Destroy wins over anything in flight. The track ends with no event,
-                // matching the original, which drops the player without emitting on
-                // `DELETE`.
-                self.engine.stop();
-                self.model.stop();
-                let _ = reply.send(());
-                Flow::Stop
-            }
-        };
+            Command::Engine(event) => self.apply_engine_event(event),
+        }
         // Every path above can change `self.model.playback`, and none of them is
         // worth hunting down individually just to keep a second counter in step —
         // one resync after every command is cheaper to keep correct.
         self.sync_playing();
-        flow
     }
 
     /// Keeps `playing_since_ms` in step with `self.model.playback`: stamped with
@@ -605,12 +633,6 @@ impl PlayerActor {
     fn guild_id_string(&self) -> String {
         self.guild_id_str.clone()
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum Flow {
-    Continue,
-    Stop,
 }
 
 pub fn now_epoch_ms() -> i64 {
@@ -1227,6 +1249,51 @@ mod tests {
             .iter()
             .any(|event| matches!(event, EmittedEvent::TrackEnd { .. })));
         assert_eq!(harness.handle.snapshot().await, Err(PlayerGone));
+    }
+
+    /// The bug: `destroy` used to travel on `commands`, whose `SEND_TIMEOUT` is the
+    /// same 5s as `session::PLAYER_DESTROY_TIMEOUT` — so a full queue burned the
+    /// caller's entire budget before the actor could even reply. It has its own
+    /// slot now, and a backed-up queue must have no bearing on tearing the player
+    /// down.
+    #[tokio::test]
+    async fn a_full_command_queue_does_not_block_a_destroy() {
+        let harness = Harness::start();
+        // Filled faster than the actor can drain, so at least one send has to fail
+        // — which is the state the queue must not be able to hold destroy hostage
+        // in.
+        while harness.handle.try_send(Command::EmitUpdate).is_ok() {}
+
+        tokio::time::timeout(Duration::from_secs(1), harness.handle.destroy())
+            .await
+            .expect("destroy must not wait on the commands queue")
+            .unwrap();
+        assert!(harness.engine.calls().contains(&EngineCall::Shutdown));
+    }
+
+    /// The bug: nothing tore the player down when a caller gave up on `destroy`.
+    /// The engine holds a clone of the *commands* sender (`Engine::attach`), so
+    /// that channel can never report every sender gone — and `Session::shutdown`
+    /// takes the guild out of the map before it waits, so a timed-out destroy
+    /// dropped the last handle and left the actor task, its pump thread and its
+    /// songbird driver alive and unreachable for the life of the process, still
+    /// streaming to Discord. Dropping the last handle has to be a teardown in its
+    /// own right.
+    #[tokio::test]
+    async fn dropping_the_last_handle_shuts_the_engine_down() {
+        let harness = Harness::start();
+        harness.handle.patch(play(track("first"))).await.unwrap();
+
+        let engine = harness.engine.clone();
+        drop(harness);
+
+        for _ in 0..100 {
+            if engine.calls().contains(&EngineCall::Shutdown) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("the actor must shut its engine down once its last handle is gone");
     }
 
     /// `STUCK_CHECK_INTERVAL` is a real-time tick, not `tokio::time`, so these wait

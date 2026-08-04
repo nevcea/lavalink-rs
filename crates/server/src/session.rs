@@ -211,6 +211,13 @@ impl Session {
     /// session that much time — not stall its own siblings, and not stall
     /// `ticker::sweep_tick`'s loop, which calls this once per expired session with
     /// nothing else bounding how long any single call may run.
+    ///
+    /// Giving up on the wait is not giving up on the teardown: `take_players` has
+    /// already emptied the map, so the handle dropped at the end of each of these
+    /// futures is the last one, and that drop closes the actor's destroy channel
+    /// and ends it. Before the channel existed, a timeout here stranded the actor
+    /// task, its pump thread, its ring and its songbird driver — still streaming to
+    /// Discord — unreachable for the life of the process.
     pub async fn shutdown(&self) {
         let destroys = self.take_players().into_iter().map(|player| async move {
             let _ = tokio::time::timeout(PLAYER_DESTROY_TIMEOUT, player.destroy()).await;
