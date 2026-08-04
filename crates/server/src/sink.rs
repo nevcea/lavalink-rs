@@ -7,10 +7,16 @@
 //!
 //! Here the queue is bounded, and messages are split into two lanes:
 //!
-//! * **Essential** — `ready` and every event. Never dropped, mutual order preserved.
-//!   If these alone fill the queue the client is not consuming, so the session is
-//!   closed with 1008 rather than silently losing events, which would leave the
-//!   client's queue state wrong forever.
+//! * Essential — ready and every event. Mutual order preserved, and not dropped
+//!   in the sense that matters for a connected client: ws.rs closes the session
+//!   with 1008 once 2048 are outstanding, well under this lane's own 4096 cap,
+//!   so a connected client that is actually draining never sees one lost. A
+//!   resumable (detached) session has no websocket for anything to notice that
+//!   on, so it only gets caught at the next per-second sweep tick
+//!   (SessionRegistry::sweep_expired polling is_overflowing) — every producer
+//!   here discards a SendError::Overflow (send's own Err case), so an essential
+//!   really can be silently lost for up to that one tick if a detached
+//!   session's queue crosses 4096 between sweeps.
 //! * **Snapshots** — `playerUpdate` and `stats`. Coalesced by key: an unsent update
 //!   for a guild is replaced by the newer one. Nothing is lost that the next message
 //!   does not already carry.
@@ -184,7 +190,15 @@ impl Sink {
             inner.essential.clear();
             inner.snapshots.clear();
         }
+        // Both calls, not just one: notify_waiters only reaches a Notified future
+        // that is already registered (polled at least once), so a recv caller
+        // between its closed check and its await point — already past try_recv,
+        // not yet registered — would never see this wakeup and hang forever.
+        // notify_one additionally stores a permit for the next await to consume
+        // immediately, which closes exactly that gap. One writer task per sink,
+        // so one stored permit is enough to cover it.
         self.notify.notify_waiters();
+        self.notify.notify_one();
     }
 
     pub fn is_paused(&self) -> bool {
@@ -218,6 +232,8 @@ impl Sink {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use lavalink_protocol::message::{EmittedEvent, Message};
     use crate::testing::track;
@@ -348,5 +364,39 @@ mod tests {
         sink.close();
         assert_eq!(sink.try_recv(), None);
         assert_eq!(sink.send(event("1")), Err(SendError::Closed));
+    }
+
+    /// close used to call only notify_waiters, which only reaches a Notified
+    /// future that has already been polled — a recv caller between its closed
+    /// check (reading false) and registering its await point would never be
+    /// woken by that call, and nothing wakes it after (send returns Err(Closed)
+    /// before its own notify_one). That caller hangs forever. close now also
+    /// calls notify_one, which stores a permit regardless of whether anyone is
+    /// waiting yet, closing the gap.
+    ///
+    /// The actual race window is a few instructions wide with no await point in
+    /// it, so this soak does not reliably reproduce the old hang on its own —
+    /// confirmed by temporarily dropping the notify_one call and rerunning this
+    /// exact test, which still passed. What it does verify: recv concurrent with
+    /// close, across many interleavings on a real multi-thread runtime, always
+    /// returns rather than hanging within the timeout — a basic correctness
+    /// property worth pinning even without a guaranteed repro of the narrow bug.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_recv_racing_close_is_not_a_permanent_hang() {
+        for _ in 0..200 {
+            let sink = Arc::new(Sink::new());
+            let reader = tokio::spawn({
+                let sink = Arc::clone(&sink);
+                async move { sink.recv().await }
+            });
+            // Give recv a chance to reach try_recv/the closed check before close
+            // runs, without pinning the interleaving down further.
+            tokio::task::yield_now().await;
+            sink.close();
+
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), reader).await;
+            assert!(result.is_ok(), "recv() did not return after close()");
+            assert_eq!(result.unwrap().unwrap(), None);
+        }
     }
 }
