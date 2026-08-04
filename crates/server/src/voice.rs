@@ -115,7 +115,16 @@ impl VoiceConnection {
         }
 
         let info = self.connection_info(voice)?;
-        state.driver.connect(info).await.map_err(Box::new)?;
+        // A failed attempt still tears down whatever songbird had before it, so
+        // `current` must not keep pointing at that now-dead connection — otherwise
+        // a client retrying with the same (last known-good) voice state would hit
+        // `needs_reconnect == false` and never call `driver.connect` again,
+        // stranding the guild disconnected until a byte-for-byte different voice
+        // state happens to arrive.
+        if let Err(error) = state.driver.connect(info).await {
+            state.current = None;
+            return Err(VoiceError::Connect(Box::new(error)));
+        }
         state.current = Some(voice.clone());
         Ok(())
     }
