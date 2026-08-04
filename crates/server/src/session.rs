@@ -140,6 +140,13 @@ impl Session {
         self.lock_guilds().get(&guild_id).map(|guild| guild.handle.clone())
     }
 
+    /// The voice connection currently registered for a guild, if any — for
+    /// comparing identity against a connection a caller already holds (see
+    /// `rest::player::patch_player`'s post-connect re-check), not for building on.
+    pub fn voice(&self, guild_id: u64) -> Option<Arc<VoiceConnection>> {
+        self.lock_guilds().get(&guild_id).map(|guild| Arc::clone(&guild.voice))
+    }
+
     pub fn players(&self) -> Vec<PlayerHandle> {
         self.lock_guilds()
             .values()
@@ -522,6 +529,31 @@ mod tests {
 
         assert!(result.is_none(), "a torn-down session must not build a new player");
         assert_eq!(build_calls.load(Ordering::SeqCst), 0, "build must not run either");
+    }
+
+    /// The identity `rest::player::patch_player` needs after its `connect` await:
+    /// a `DELETE` followed by a fresh `get_or_create_player` for the same guild
+    /// must leave `Session::voice` pointing at the *new* connection, distinguishable
+    /// by pointer from the one a racing `PATCH` is still holding — presence alone
+    /// (`session.player(guild_id).is_some()`) cannot tell the two apart.
+    #[tokio::test]
+    async fn voice_reflects_a_replaced_player_not_just_presence() {
+        let session = Session::new("s".into(), 1, None);
+        let guild = 9;
+
+        let (_handle, voice_old) = session.get_or_create_player(guild, || dummy_pair(guild)).unwrap();
+        session.remove_player(guild);
+        let (_handle, voice_new) = session.get_or_create_player(guild, || dummy_pair(guild)).unwrap();
+
+        let current = session.voice(guild).unwrap();
+        assert!(
+            Arc::ptr_eq(&current, &voice_new),
+            "voice(guild) must report the newly registered connection"
+        );
+        assert!(
+            !Arc::ptr_eq(&current, &voice_old),
+            "a stale connection must not be mistaken for the current one by presence checks alone"
+        );
     }
 
     fn resumable_session(registry: &SessionRegistry) -> Arc<Session> {

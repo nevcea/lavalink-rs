@@ -157,11 +157,21 @@ pub async fn patch_player(
         // `await` already tore this guild's player down — `engine.shutdown()` calls
         // `voice.leave()` — and nothing owns the connection this `connect` just
         // re-established. Leave again rather than hand a patch to an actor that is
-        // no longer registered (and may not even be this same one, if a fresh
-        // player was already built in its place).
-        if session.player(guild_id).is_none() {
-            connection.leave().await;
-            return Err(player_gone());
+        // no longer registered.
+        //
+        // Checked by identity, not just presence: a fresh player (and voice
+        // connection) can already have been built in its place by the time this
+        // `await` returns. `session.player(guild_id).is_none()` alone can't tell
+        // that case apart from "still ours" — it would leave `connection` (this
+        // stale one) IDENTIFY'd to Discord for the guild while a *different*,
+        // freshly-registered connection is also live for it, racing or knocking
+        // out the new player's real connection before this one is finally dropped.
+        match session.voice(guild_id) {
+            Some(current) if std::sync::Arc::ptr_eq(&current, &connection) => {}
+            _ => {
+                connection.leave().await;
+                return Err(player_gone());
+            }
         }
     }
 
