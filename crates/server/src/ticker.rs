@@ -86,6 +86,18 @@ async fn stats_tick(state: AppState) {
                 (sent, nulled, usable)
             }));
 
+            // A paused session's sink drops every snapshot it is handed
+            // (`Sink::send`'s own `paused` branch) — `Stats` included, since it
+            // coalesces the same way `PlayerUpdate` does. Sending it here anyway
+            // used to mean this minute's frame counts, already drained above,
+            // were silently discarded rather than reported on resume; skipping
+            // the send is the same behaviour `player_update_tick` already applies
+            // to `PlayerUpdate`, just made explicit instead of relying on the sink
+            // to swallow it.
+            if session.sink.is_paused() {
+                continue;
+            }
+
             let _ = session.send(Message::Stats(StatsEvent::from_node(node, frame_stats)));
         }
     }
