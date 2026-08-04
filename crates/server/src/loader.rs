@@ -315,10 +315,37 @@ impl Loader {
 
     /// Decodes an `encodedTrack` for `decodetrack(s)` and for `PATCH` requests that
     /// carry one.
+    ///
+    /// A track naming a source manager this node did not register is refused, the
+    /// way the original's `decodeTrack` refuses it: it resolves `sourceName`
+    /// against its registered `sourceManagers` and hands back null when the name
+    /// is absent, which the handler turns into a 400. Without that lookup
+    /// `sourceName` is nothing but a string the client chose, and
+    /// `StreamOpener::open` dispatches straight off it — so a hand-built
+    /// `encodedTrack` naming a source the operator left switched off would still
+    /// play, `local` (which opens an arbitrary path off the filesystem) included.
+    /// This is the only place a track can enter the node without a source manager
+    /// having produced it, so it is the only place the check is needed.
     pub fn decode(&self, encoded: &str) -> Result<Track, Exception> {
-        encoded_track::decode(encoded)
+        let track = encoded_track::decode(encoded)
             .map(|decoded| decoded.into_track(encoded.to_owned()))
-            .map_err(|error| Exception::common(error.to_string(), error.to_string()))
+            .map_err(|error| Exception::common(error.to_string(), error.to_string()))?;
+
+        if !self.has_manager(&track.info.source_name) {
+            let message = format!(
+                "no source manager registered for {}",
+                track.info.source_name
+            );
+            return Err(Exception::common(message.clone(), message));
+        }
+
+        Ok(track)
+    }
+
+    fn has_manager(&self, source_name: &str) -> bool {
+        self.managers
+            .iter()
+            .any(|manager| manager.name() == source_name)
     }
 }
 
@@ -579,6 +606,31 @@ mod tests {
         let (loader, _) = loader(ok_track);
         let error = loader.decode("not base64!!").unwrap_err();
         assert_eq!(error.severity, Severity::Common);
+    }
+
+    #[test]
+    fn a_registered_source_decodes() {
+        let (loader, _) = loader(ok_track);
+        let encoded = encode(one_track()).unwrap().encoded;
+        assert_eq!(loader.decode(&encoded).unwrap().info.source_name, "http");
+    }
+
+    /// The bug: nothing checked `sourceName` against the registered managers, so a
+    /// hand-built `encodedTrack` naming a source the operator switched off was
+    /// still handed to `StreamOpener::open`, which dispatches on that name alone.
+    /// With `local` that reads any path on the filesystem — on a node whose config
+    /// says `sources.local: false`.
+    #[test]
+    fn an_unregistered_source_is_refused_however_well_formed() {
+        let (loader, _) = loader(ok_track);
+        let mut track = one_track();
+        track.info.source_name = "local".into();
+        track.info.identifier = "/etc/shadow".into();
+        let encoded = encode(track).unwrap().encoded;
+
+        let error = loader.decode(&encoded).unwrap_err();
+        assert_eq!(error.severity, Severity::Common);
+        assert!(error.cause.contains("local"), "cause was {:?}", error.cause);
     }
 
     /// The bug: `LeaderGuard::drop` used to remove `in_flight[identifier]` by key
