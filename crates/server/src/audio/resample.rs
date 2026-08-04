@@ -160,7 +160,11 @@ impl Resampler {
         // they become the next buffer's history instead of being guessed at.
         let usable = source.len().saturating_sub(2) as f64;
 
-        // How many frames the loop below will emit, so the pushes never re-grow.
+        // An estimate of how many frames the loop below will emit, not an exact
+        // count: the loop advances cursor by step each iteration and stops on a
+        // float comparison (cursor < usable), which can disagree with this ceil()
+        // by one iteration. Good enough that the pushes essentially never re-grow,
+        // not a guarantee that they can't.
         out.reserve((((usable - cursor).max(0.0) / step).ceil() as usize) * CHANNELS);
 
         // `needless_range_loop`: `channel` is not indexing one slice, it is picking
