@@ -315,6 +315,20 @@ impl RingWriter {
     pub fn is_closed(&self) -> bool {
         self.shared.closed.load(Ordering::Relaxed)
     }
+
+    /// Wakes a pump parked in [`Self::wait_for_space`], without changing
+    /// anything it is waiting for.
+    ///
+    /// Called by the engine alongside a command send (`Seek`, `SetVolume`,
+    /// `SetFilters`, `SetEndTime`) so a pump that is currently blocked on a
+    /// full ring — the common case in steady playback, since decode outruns
+    /// real time — checks its command queue immediately instead of only at
+    /// the next `COMMAND_POLL` tick, up to 100ms later. Reuses the same
+    /// `space` condvar `reset` already notifies on, so this does not add a
+    /// second wakeup mechanism to the ring.
+    pub fn wake(&self) {
+        self.shared.space.notify_all();
+    }
 }
 
 /// The send path's end: a byte stream of little-endian `f32` samples, which is the
@@ -816,6 +830,40 @@ mod tests {
 
         producer.join().unwrap();
         assert_eq!(delivered, written, "every sample must survive the trip");
+    }
+
+    /// `wake` is what cuts a command's latency on a full ring down from
+    /// `COMMAND_POLL` to near-immediate — see `PipelineEngine::send_to_pump`.
+    /// This pins the mechanism it relies on: a producer parked in
+    /// `wait_for_space` returns as soon as `wake` is called, well before the
+    /// timeout it was given.
+    #[test]
+    fn wake_returns_a_parked_producer_before_its_timeout() {
+        let (writer, _reader, _) = ring(20);
+        let capacity_samples = (SAMPLE_RATE as usize / 50) * CHANNELS;
+        // Fill the ring completely so the next wait actually parks.
+        let (written, _closed) = writer.try_write(&vec![0.0; capacity_samples]);
+        assert_eq!(written, capacity_samples, "the ring must be full for this test");
+
+        let long_timeout = Duration::from_secs(10);
+        let waiting_writer = writer.clone();
+        let waiter = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let open = waiting_writer.wait_for_space(long_timeout);
+            (open, started.elapsed())
+        });
+
+        // Give the thread above a chance to actually enter the wait before
+        // waking it, without pinning the interleaving down further.
+        std::thread::sleep(Duration::from_millis(50));
+        writer.wake();
+
+        let (open, elapsed) = waiter.join().unwrap();
+        assert!(open, "the ring was never closed");
+        assert!(
+            elapsed < long_timeout / 2,
+            "wake should return the waiter almost immediately, took {elapsed:?}"
+        );
     }
 
     /// The bug: the engine hands the same `position_ms` handle to every ring it

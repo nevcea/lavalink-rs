@@ -155,6 +155,12 @@ impl PipelineEngine {
             // exists to cut short.
             let _ = active.commands.send(command);
             active.interrupt.store(true, Ordering::Relaxed);
+            // In steady playback the ring is usually full (decode outruns real
+            // time), so the pump is usually parked in `wait_for_space` rather than
+            // between packets — without this, a command sent there sits unseen for
+            // up to `COMMAND_POLL` (100ms), which for `Seek` means up to 100ms of
+            // `playerUpdate`s reporting the pre-seek position before it catches up.
+            active.ring.wake();
         }
     }
 
