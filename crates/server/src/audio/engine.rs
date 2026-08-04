@@ -83,6 +83,10 @@ struct Active {
     interrupt: Arc<AtomicBool>,
     /// The songbird side, so pause and stop reach the mixer.
     track: Option<TrackHandle>,
+    /// A clone of the pump's ring writer, kept only so `stop_active` can revoke
+    /// this ring's claim on the shared position counter — see
+    /// [`ring::RingWriter::detach_position`].
+    ring: ring::RingWriter,
     /// Bumped on every new track; checked by both the handle-storing task and the
     /// terminal-outcome dispatch (`play`, below) via [`is_current`] so a late
     /// outcome from a superseded pump is ignored rather than applied to whatever
@@ -183,6 +187,11 @@ impl PipelineEngine {
         previous.interrupt.store(true, Ordering::Relaxed);
         drop(previous.commands);
 
+        // Before the replacement ring exists, so the reader this one leaves behind
+        // inside songbird's `Input` cannot report the outgoing track's position
+        // over the incoming track's.
+        previous.ring.detach_position();
+
         if let Some(track) = previous.track {
             let _ = track.stop();
         }
@@ -221,6 +230,7 @@ impl Engine for PipelineEngine {
             generation,
             paused: request.paused,
             interrupt: Arc::clone(&interrupt),
+            ring: writer.clone(),
         });
 
         // The mixer's end of the ring, dressed as an input it understands. Raw f32
@@ -460,12 +470,18 @@ mod tests {
 
     fn dummy_active(generation: u64) -> Active {
         let (commands, _rx) = mpsc::channel();
+        let (ring, _reader) = ring::channel(
+            20,
+            Arc::new(AtomicI64::new(0)),
+            Arc::new(ring::FrameCounters::default()),
+        );
         Active {
             commands,
             track: None,
             generation,
             paused: false,
             interrupt: Arc::new(AtomicBool::new(false)),
+            ring,
         }
     }
 

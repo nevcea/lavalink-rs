@@ -122,13 +122,26 @@ struct Shared {
     remainder_samples: AtomicI64,
     /// Playback position at the last seek, in milliseconds.
     base_position_ms: AtomicI64,
-    /// Shared with the actor.
+    /// Shared with the actor — and, because the engine hands the same handle to
+    /// every ring it builds for a player, with every *other* ring that player has
+    /// ever had. See `owns_position`.
     position_ms: Arc<AtomicI64>,
+    /// Whether this ring is still the one entitled to write `position_ms`.
+    ///
+    /// Cleared by [`RingWriter::detach_position`] when the engine supersedes this
+    /// ring. A superseded `RingReader` stays alive inside songbird's `Input` until
+    /// the mixer gets round to dropping it, and any read it services meanwhile —
+    /// including a starved one, which refreshes the position too — would otherwise
+    /// write *this* track's base and consumed frames over the live one's.
+    owns_position: AtomicBool,
     frames: Arc<FrameCounters>,
 }
 
 impl Shared {
     fn refresh_position(&self) {
+        if !self.owns_position.load(Ordering::Relaxed) {
+            return;
+        }
         let frames = self.consumed_frames.load(Ordering::Relaxed);
         let elapsed_ms = frames * 1000 / i64::from(SAMPLE_RATE);
         let base = self.base_position_ms.load(Ordering::Relaxed);
@@ -169,6 +182,7 @@ pub fn channel(
         remainder_samples: AtomicI64::new(0),
         base_position_ms: AtomicI64::new(0),
         position_ms,
+        owns_position: AtomicBool::new(true),
         frames,
     });
 
@@ -259,6 +273,17 @@ impl RingWriter {
     /// end of stream.
     pub fn finish(&self) {
         self.shared.finished.store(true, Ordering::Release);
+    }
+
+    /// Gives up this ring's claim on the shared position counter.
+    ///
+    /// Called by the engine the moment it supersedes this ring, which it does
+    /// synchronously — before the replacement ring exists. Everything after that
+    /// point is the next track's to report, even though this ring's reader is
+    /// still alive inside songbird's `Input` until the mixer drops it. See
+    /// [`Shared::owns_position`].
+    pub fn detach_position(&self) {
+        self.shared.owns_position.store(false, Ordering::Relaxed);
     }
 
     /// Discards buffered audio and restarts the position counter at `position_ms`.
@@ -782,6 +807,37 @@ mod tests {
 
         producer.join().unwrap();
         assert_eq!(delivered, written, "every sample must survive the trip");
+    }
+
+    /// The bug: the engine hands the same `position_ms` handle to every ring it
+    /// builds for a player, so a superseded ring shares the live one's counter. Its
+    /// reader stays alive inside songbird's `Input` until the mixer drops it, and
+    /// any read it services in that window — a starved one included, since that
+    /// refreshes the position too — wrote the *old* track's base and consumed
+    /// frames over the new track's. Once the engine has moved on, the old ring must
+    /// not touch the counter again.
+    #[test]
+    fn a_detached_ring_stops_writing_the_shared_position() {
+        let (writer, mut reader, position) = ring(1000);
+        writer.write(&vec![0.25; SAMPLE_RATE as usize * CHANNELS]);
+        read_samples(&mut reader, FRAME_SAMPLES);
+        assert!(
+            position.load(Ordering::Relaxed) > 0,
+            "the live ring should be reporting its own position"
+        );
+
+        // What `stop_active` does the moment this ring is superseded, before the
+        // replacement ring exists.
+        writer.detach_position();
+        // The replacement's position, as the engine and the new ring write it.
+        position.store(7_000, Ordering::Relaxed);
+
+        read_samples(&mut reader, FRAME_SAMPLES);
+        assert_eq!(
+            position.load(Ordering::Relaxed),
+            7_000,
+            "a superseded ring must not report over the live track's position"
+        );
     }
 
     /// A concurrent `reset` (the pump, after a seek) must never have its rebase
