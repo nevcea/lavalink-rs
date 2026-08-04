@@ -343,26 +343,51 @@ impl Read for RingReader {
             // `RingWriter::reset` holds the same lock across — so a concurrent
             // seek can never have its rebase clobbered by a read that started
             // before it, or vice versa.
-            let silence = out.len().min(FRAME_SAMPLES * 4);
-            self.shared.advance_frames((silence / 4) as i64);
+            //
+            // Counted in samples, like wanted_samples/take below, and handed to
+            // out the same two ways they are: a whole number of 4-byte samples
+            // written straight in, with a leftover partial sample (only possible
+            // when out.len() < 4) routed through leftover instead of written
+            // directly. Silence used to just fill out.len().min(FRAME_SAMPLES * 4)
+            // bytes outright, which was not a multiple of 4 whenever out.len()
+            // itself was not — permanently misaligning every read after it by
+            // whatever fraction of a sample was short, since nothing carried the
+            // remainder forward.
+            let silence_samples = wanted_samples.min(FRAME_SAMPLES);
+            self.shared.advance_frames(silence_samples as i64);
             self.shared.refresh_position();
             drop(buffer);
             // Starved: the pump has not kept up. Hand back silence rather than
             // blocking the mixer, and account for it as a lost frame — exactly what
             // the original counts as `nulled`. No producer can be waiting on space
             // here (the buffer was empty), so there is nothing to `notify_all`.
-            self.shared.frames.record_nulled(silence / 4);
-            out[..silence].fill(0);
-            return Ok(silence);
+            self.shared.frames.record_nulled(silence_samples);
+            let written = if out.len() >= 4 {
+                let silence_bytes = silence_samples * 4;
+                out[..silence_bytes].fill(0);
+                silence_bytes
+            } else {
+                let bytes = [0u8; 4];
+                let written = bytes.len().min(out.len());
+                out[..written].copy_from_slice(&bytes[..written]);
+                self.leftover.extend_from_slice(&bytes[written..]);
+                written
+            };
+            return Ok(written);
         }
 
         let take = wanted_samples.min(buffer.len());
 
-        // The common case: `wanted_samples = out.len() / 4`, so `take * 4 <=
-        // out.len()` always holds and every drained sample is written straight into
-        // `out` with nothing left over. The exception is `out.len() < 4` (the
-        // `.max(1)` above), where a single sample can't fit — that's the one case
-        // still routed through `leftover`.
+        // The common case: wanted_samples = out.len() / 4, so take * 4 <= out.len()
+        // always holds today, and every drained sample is written straight into out
+        // with nothing left over. That bound comes from how wanted_samples above is
+        // computed, not from anything the zip loop below checks itself — it sums
+        // source.len() * 4 into written unconditionally, trusting the bound rather
+        // than verifying it, so a future change to wanted_samples that let take * 4
+        // exceed out.len() would silently under-report written (zip stops at
+        // whichever side runs out first) instead of panicking. The exception today
+        // is out.len() < 4 (the .max(1) above), where a single sample can't fit —
+        // that's the one case still routed through leftover.
         let written = if out.len() >= 4 {
             // Copied off `as_slices` rather than straight through `drain`: a
             // `VecDeque`'s drain iterator carries the wraparound check into every
@@ -622,6 +647,28 @@ mod tests {
 
         let (sent, nulled) = reader.take_frame_stats();
         assert_eq!((sent, nulled), (0, 1));
+    }
+
+    /// The bug this guards: a starved read used to hand back exactly
+    /// out.len().min(FRAME_SAMPLES * 4) bytes with no alignment check, so an
+    /// out whose length was not a multiple of 4 got a silence fill that was
+    /// not a whole number of samples either — and nothing carried the leftover
+    /// fraction forward, unlike every other partial-sample case in this file.
+    /// Every subsequent read would then start mid-sample, permanently. A
+    /// starved read must always return a multiple of 4 (when out is at least
+    /// 4 bytes; the sub-4-byte case already routes through leftover the same
+    /// as a normal read does), and real audio read right after one must still
+    /// decode to the exact values written, not something shifted.
+    #[test]
+    fn a_starved_read_stays_sample_aligned_with_an_odd_sized_buffer() {
+        let (writer, mut reader, _) = ring(1000);
+
+        let mut out = vec![0u8; 4001];
+        let written = reader.read(&mut out).unwrap();
+        assert_eq!(written % 4, 0, "a starved read must return a whole number of samples");
+
+        writer.write(&[0.5, -0.5, 0.25, -0.25]);
+        assert_eq!(read_samples(&mut reader, 4), vec![0.5, -0.5, 0.25, -0.25]);
     }
 
     #[test]
