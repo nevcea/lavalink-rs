@@ -4,19 +4,6 @@ Why this node's advertised feature set stops where it does. Each of these is a
 deliberate omission, checked at compile time or surfaced to clients honestly
 (`/v4/info`, a 400, or a 501) rather than approximated or stubbed silently.
 
-## `timescale` filter — not implemented
-
-lavadsp doesn't implement it either: `TimescalePcmAudioFilter` is a JNI wrapper
-around **SoundTouch**, a large C++ WSOLA time-stretcher. Independent speed,
-pitch and rate need real time-domain stretching with period detection — an
-approximation would be audibly wrong in a way that's easy to ship and hard to
-notice, which is a failure this module's own history already has one example
-of.
-
-So it's refused rather than faked: `timescale` is absent from
-`IMPLEMENTED_FILTERS`, `/v4/info` doesn't advertise it, and a request naming it
-gets the original's 400. See `crates/server/src/audio/filter.rs`'s module docs.
-
 ## `resamplingQuality`
 
 lavaplayer offers three quality settings backed by a windowed-sinc
@@ -192,6 +179,44 @@ observe over the protocol — status codes, field presence, event sequences,
 volume/distortion curves that are part of the wire's numeric contract. LFO phase
 is not observable or branched on by any client; it only ever produces a defect
 (the tremolo silently stopping). Reproducing it would buy nothing but a bug.
+
+## `timescale` filter — a different algorithm family, not a port
+
+Every other filter in `crates/server/src/audio/filter.rs` is a port of a
+specific lavaplayer/lavadsp implementation, coefficients and update-loop shape
+included. `timescale` can't be one: lavadsp's `TimescalePcmAudioFilter` is a
+JNI wrapper around **SoundTouch**, a large C++ WSOLA time-stretcher with no
+Rust implementation to port. Hand-rolling WSOLA from scratch (period
+detection, overlap-add) risked exactly the "approximation that's easy to ship
+and hard to notice as wrong" failure this module's own history already has one
+example of — reason enough that this stayed refused (400, absent from
+`IMPLEMENTED_FILTERS`) for a long time.
+
+It's implemented now, but with `signalsmith-stretch` (a `cc`+`bindgen` Rust
+wrapper around Signalsmith's phase-vocoder stretcher) standing in for
+SoundTouch — a different algorithm family, evaluated and chosen on its own
+listening/CPU merits (`cargo run -p lavalink-server --release --example
+repro_timescale`) rather than because a phase vocoder and WSOLA are
+interchangeable. It is the DSP chain's second acknowledged divergence, next to
+tremolo's LFO above, and for the same reason: nothing about *which*
+time-stretching algorithm ran is observable over the wire, only that `speed`/
+`pitch`/`rate` did what they said. That combination rule is ported faithfully
+from SoundTouch's three independent controls even though the stretcher behind
+it isn't: `rate` scales both tempo and pitch together, `speed` moves tempo
+alone, `pitch` moves pitch alone — `combined_speed = speed * rate`,
+`combined_pitch = pitch * rate`.
+
+This also makes `timescale` the one filter whose `process` changes the number
+of frames per channel instead of transforming them in place — nothing in
+`AudioFilter`'s signature prevented that (each channel is already a resizable
+`Vec<f32>`), but `pump::filter_interleaved` had to stop assuming the chain's
+output is the same length as its input, writing into an owned scratch buffer
+instead of back into the caller's fixed-size slice.
+
+Building `signalsmith-stretch` needs a C++ compiler and `libclang` (`bindgen`
+generates its FFI bindings at build time) on top of this crate's other build
+requirements — worth knowing before "why won't this compile on a fresh
+machine" turns into a longer search.
 
 ## `/metrics` — not implemented
 

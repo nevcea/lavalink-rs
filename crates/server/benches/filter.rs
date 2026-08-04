@@ -41,6 +41,7 @@ fn all_filters() -> Filters {
             "volume": 1.2,
             "equalizer": [{"band":0,"gain":0.5},{"band":5,"gain":0.3}],
             "karaoke": {"level":1.0,"monoLevel":1.0,"filterBand":220.0,"filterWidth":100.0},
+            "timescale": {"speed":1.2,"pitch":1.0,"rate":1.0},
             "tremolo": {"frequency":5.0,"depth":0.5},
             "vibrato": {"frequency":5.0,"depth":0.5},
             "distortion": {"sinOffset":0.0,"sinScale":2.0,"cosOffset":0.0,"cosScale":2.0,"tanOffset":0.0,"tanScale":2.0,"offset":0.0,"scale":1.0},
@@ -70,6 +71,10 @@ fn single_filters() -> Vec<(&'static str, Filters)> {
         (
             "karaoke",
             r#"{"karaoke": {"level":1.0,"monoLevel":1.0,"filterBand":220.0,"filterWidth":100.0}}"#,
+        ),
+        (
+            "timescale",
+            r#"{"timescale": {"speed":1.2,"pitch":1.0,"rate":1.0}}"#,
         ),
         ("tremolo", r#"{"tremolo": {"frequency":5.0,"depth":0.5}}"#),
         ("vibrato", r#"{"vibrato": {"frequency":5.0,"depth":0.5}}"#),
@@ -212,14 +217,21 @@ fn bench_filter_interleaved(c: &mut Criterion) {
     ] {
         group.bench_function(BenchmarkId::new("process", name), |b| {
             let mut chain = FilterChain::new(&filters, CHANNELS);
-            // The pump's own scratch, reused across buffers (`pump.rs`'s `planar`),
-            // so this measures the transpose and not a per-buffer allocation.
+            // The pump's own scratch, reused across buffers (`pump.rs`'s `planar`
+            // and `filtered`), so this measures the transpose and not a per-buffer
+            // allocation.
             let mut scratch = vec![Vec::new(); CHANNELS];
+            let mut out = Vec::new();
             let source = interleaved(CHANNELS, FRAMES);
             b.iter_batched_ref(
                 || source.clone(),
                 |buffer| {
-                    filter_interleaved(&mut chain, black_box(buffer), &mut scratch);
+                    filter_interleaved(
+                        &mut chain,
+                        black_box(buffer.as_slice()),
+                        &mut scratch,
+                        &mut out,
+                    );
                 },
                 criterion::BatchSize::SmallInput,
             );

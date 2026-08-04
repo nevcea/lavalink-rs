@@ -197,6 +197,7 @@ mod tests {
                 "volume",
                 "equalizer",
                 "karaoke",
+                "timescale",
                 "tremolo",
                 "vibrato",
                 "distortion",

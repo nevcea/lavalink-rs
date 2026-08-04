@@ -340,10 +340,8 @@ lavalink:
         let disabled = config.disabled_filters();
         // Configured off.
         assert!(disabled.contains(&"lowPass".to_owned()));
-        // Never implemented, even though the config leaves it enabled. It is the
-        // only one left in this category — see `audio::filter`.
-        assert!(disabled.contains(&"timescale".to_owned()));
-        // Implemented and enabled.
+        // Implemented (see `audio::filter`) and enabled — every filter now is.
+        assert!(!disabled.contains(&"timescale".to_owned()));
         assert!(!disabled.contains(&"volume".to_owned()));
         assert!(!disabled.contains(&"equalizer".to_owned()));
         assert!(!disabled.contains(&"karaoke".to_owned()));
@@ -358,6 +356,7 @@ lavalink:
                 "volume",
                 "equalizer",
                 "karaoke",
+                "timescale",
                 "tremolo",
                 "vibrato",
                 "distortion",

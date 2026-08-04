@@ -46,8 +46,8 @@ impl SourceManager for YouTubeSource {
         // `title: null`, and the `#songs`-scoped variant returns no entries at all —
         // neither is a playable song track. Mapping this to `ytsearch:` would return
         // ordinary YouTube search results under the `ytmsearch:` name: different
-        // ranking, different titles, fan uploads — silently wrong in exactly the way
-        // `MAINTENANCE.md` refuses `timescale` for.
+        // ranking, different titles, fan uploads — silently wrong in the same shape
+        // `MAINTENANCE.md` refuses to ship elsewhere in this codebase.
         if identifier.starts_with("ytmsearch:") {
             return Err(SourceError::Unplayable {
                 reason: "ytmsearch: (YouTube Music search) is not supported by this node; \

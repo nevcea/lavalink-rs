@@ -25,10 +25,11 @@
 //!
 //! # What is not implemented
 //!
-//! The `timescale` filter, plugins, route planning and IP rotation. Each is
-//! advertised honestly rather than stubbed: `/v4/info` lists only what really runs,
-//! and a request naming a filter this node does not have is rejected with the
-//! original's 400. `MAINTENANCE.md` records why for each.
+//! Plugins, route planning and IP rotation. Each is advertised honestly rather than
+//! stubbed: `/v4/info` lists only what really runs, and a request naming a filter
+//! this node does not have is rejected with the original's 400. `MAINTENANCE.md`
+//! records why for each. `timescale` used to belong on this list — see
+//! `audio::filter`'s module docs for why it does not any more.
 
 // The default limit overflows when the trait solver checks auto-trait bounds
 // (Send/Sync) on the full REST router as one type — `AppState` pulls in

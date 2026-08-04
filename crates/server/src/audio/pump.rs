@@ -122,6 +122,10 @@ struct State {
     interleaved: Vec<f32>,
     pcm: Vec<f32>,
     planar: Vec<Vec<f32>>,
+    /// `filter_interleaved`'s output, reused the same way. Separate from `pcm`
+    /// because `timescale` can make it a different length than its input — see
+    /// `filter.rs`'s module docs — so it can no longer be written back in place.
+    filtered: Vec<f32>,
     /// Shared with the source: cleared here once a batch of commands has been
     /// fully drained, so a later, unrelated stall doesn't inherit a stale
     /// "give up early" signal from a command that was already applied.
@@ -221,6 +225,7 @@ fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
         interleaved: Vec::new(),
         pcm: Vec::new(),
         planar: vec![Vec::new(); CHANNELS],
+        filtered: Vec::new(),
         interrupt: Arc::clone(&config.interrupt),
     };
 
@@ -365,14 +370,17 @@ impl State {
             }
 
             self.apply_volume(&mut pcm);
-            filter_interleaved(&mut self.filters, &mut pcm, &mut self.planar);
+
+            let mut filtered = std::mem::take(&mut self.filtered);
+            filter_interleaved(&mut self.filters, &pcm, &mut self.planar, &mut filtered);
+            self.pcm = pcm;
 
             self.produced = true;
-            if let ControlFlow::Stopped = self.write_interruptibly(writer, &pcm, commands) {
-                self.pcm = pcm;
+            let outcome = self.write_interruptibly(writer, &filtered, commands);
+            self.filtered = filtered;
+            if let ControlFlow::Stopped = outcome {
                 return PumpOutcome::Stopped;
             }
-            self.pcm = pcm;
             on_progress();
         }
     }
@@ -525,31 +533,45 @@ enum ControlFlow {
     Stopped,
 }
 
-/// Runs the filter chain over an interleaved buffer, using `planar` as the
-/// transpose scratch (its capacity is reused, so this allocates nothing once warm).
+/// Runs the filter chain over an interleaved buffer, writing the result into `out`
+/// (cleared first, capacity reused — a healthy pump allocates nothing here once
+/// warm) rather than back into `samples` in place, since `timescale` (the one
+/// length-changing filter — see `filter.rs`'s module docs) can make the output a
+/// different number of frames than the input.
 ///
-/// The chain works on planar channels and the ring wants interleaved, so a buffer
-/// with any filter enabled pays two extra full passes on top of the DSP itself.
-/// That transpose is the pump's cost, not the chain's, which is why this lives here
-/// rather than in `filter.rs` — and why it is free-standing and public rather than a
-/// method on `State`: `benches/filter.rs` measures the chain *with* the transpose
-/// around it, which is the only shape playback actually runs.
-pub fn filter_interleaved(chain: &mut FilterChain, samples: &mut [f32], planar: &mut [Vec<f32>]) {
+/// `planar` is the transpose scratch, also reused across calls. The chain works on
+/// planar channels and the ring wants interleaved, so a buffer with any filter
+/// enabled pays two extra full passes on top of the DSP itself (three once
+/// `timescale` is active, for the same reason `out` exists at all). That transpose
+/// is the pump's cost, not the chain's, which is why this lives here rather than in
+/// `filter.rs` — and why it is free-standing and public rather than a method on
+/// `State`: `benches/filter.rs` measures the chain *with* the transpose around it,
+/// which is the only shape playback actually runs.
+pub fn filter_interleaved(
+    chain: &mut FilterChain,
+    samples: &[f32],
+    planar: &mut [Vec<f32>],
+    out: &mut Vec<f32>,
+) {
+    out.clear();
     if !chain.is_enabled() {
+        out.extend_from_slice(samples);
         return;
     }
 
-    let frames = samples.len() / CHANNELS;
+    let in_frames = samples.len() / CHANNELS;
     for (channel, plane) in planar.iter_mut().enumerate() {
         plane.clear();
-        plane.extend((0..frames).map(|frame| samples[frame * CHANNELS + channel]));
+        plane.extend((0..in_frames).map(|frame| samples[frame * CHANNELS + channel]));
     }
 
     chain.process(planar);
 
-    for frame in 0..frames {
-        for (channel, plane) in planar.iter().enumerate() {
-            samples[frame * CHANNELS + channel] = plane[frame];
+    let out_frames = planar[0].len();
+    out.reserve(out_frames * CHANNELS);
+    for frame in 0..out_frames {
+        for plane in planar.iter() {
+            out.push(plane[frame]);
         }
     }
 }

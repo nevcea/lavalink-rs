@@ -17,18 +17,35 @@
 //! tremolo's depth is halved on the way in, the equalizer attenuates by 0.25 and
 //! restores by 4.0, player volume quantises through an integer multiplier.
 //!
-//! # `timescale` is not implemented
+//! # `timescale` is not a port
 //!
-//! It is the one filter with no port here, and the reason is that lavadsp does not
-//! implement it either: `TimescalePcmAudioFilter` is a JNI wrapper around
-//! **SoundTouch**, a large C++ WSOLA time-stretcher. Independent speed, pitch and
-//! rate need real time-domain stretching with period detection — an approximation
-//! would be audibly wrong in a way that is easy to ship and hard to notice, which is
-//! the failure this module's history already has one example of.
+//! Every other filter here is a port of a specific lavaplayer/lavadsp
+//! implementation, coefficients and update-loop shape included. `timescale` cannot
+//! be: lavadsp's `TimescalePcmAudioFilter` is a JNI wrapper around **SoundTouch**, a
+//! large C++ WSOLA time-stretcher with no Rust port to diff against, and
+//! hand-rolling WSOLA from scratch (period detection, overlap-add, the works) is
+//! exactly the kind of "approximation that's easy to ship and hard to notice as
+//! wrong" this module's own history already has one example of.
 //!
-//! So it is refused rather than faked: `timescale` is absent from
-//! [`IMPLEMENTED_FILTERS`], `/v4/info` does not advertise it, and a request naming it
-//! gets the original's 400.
+//! [`TimescaleFilter`] instead wraps `signalsmith-stretch`, a Rust binding (`cc` +
+//! `bindgen`, so it needs a C++ toolchain and `libclang` beyond this crate's other
+//! requirements) around Signalsmith's phase-vocoder stretcher — a different
+//! algorithm family than SoundTouch, not a port of it, chosen because it is the
+//! only actively-maintained Rust time/pitch stretcher available rather than because
+//! phase vocoders and WSOLA sound identical. Two things this trade leans on:
+//!
+//! - It is the one filter whose `process` changes the number of frames per channel
+//!   rather than transforming them in place — `speed`/`rate` above 1.0 shrink the
+//!   buffer, below 1.0 grow it. Nothing in [`AudioFilter`]'s signature prevents
+//!   this (each `Vec<f32>` can already be resized), but `pump::filter_interleaved`
+//!   is the one caller that has to stop assuming post-chain length equals
+//!   pre-chain length.
+//! - `speed`/`pitch`/`rate` combine the way SoundTouch's three independent knobs
+//!   do, since that is the wire contract regardless of which stretcher sits behind
+//!   it: `rate` scales both tempo and pitch together (as if the track were played
+//!   on a turntable at a different speed), `speed` changes tempo alone, `pitch`
+//!   changes pitch alone. `combined_speed = speed * rate` drives the output/input
+//!   frame ratio; `combined_pitch = pitch * rate` drives `set_transpose_factor`.
 //!
 //! # `sin`/`cos` per sample, left alone
 //!
@@ -61,17 +78,20 @@
 //! patch lavaplayer's `Equalizer.java` to dump its pre- and post-filter PCM buffers.
 
 use lavalink_protocol::filters::{
-    Band, ChannelMix, Distortion, Filters, Karaoke, LowPass, Rotation, Tremolo, Vibrato,
+    Band, ChannelMix, Distortion, Filters, Karaoke, LowPass, Rotation, Timescale, Tremolo,
+    Vibrato,
 };
 use lavalink_protocol::Omissible;
 
 /// What `/v4/info` advertises and what `PATCH` accepts.
 ///
-/// Nine of the original's ten. `timescale` is the omission — see the module docs.
-pub const IMPLEMENTED_FILTERS: [&str; 9] = [
+/// All ten of the original's, `timescale` included — see the module docs for what
+/// implementing it here actually means.
+pub const IMPLEMENTED_FILTERS: [&str; 10] = [
     "volume",
     "equalizer",
     "karaoke",
+    "timescale",
     "tremolo",
     "vibrato",
     "distortion",
@@ -157,8 +177,9 @@ impl FilterChain {
         if let Some(karaoke) = present(&filters.karaoke) {
             stages.push(Box::new(KaraokeFilter::new(karaoke)));
         }
-        // `timescale` belongs here in the order. It is not built — see the module
-        // docs — and a request naming it is rejected with 400 before this point.
+        if let Some(timescale) = present(&filters.timescale) {
+            stages.push(Box::new(TimescaleFilter::new(timescale, channels)));
+        }
         if let Some(tremolo) = present(&filters.tremolo) {
             stages.push(Box::new(TremoloFilter::new(tremolo, channels)));
         }
@@ -488,6 +509,112 @@ impl AudioFilter for KaraokeFilter {
             let o = y * self.mono_level * self.level;
             *l = dry_left - (dry_right * self.level) + o;
             *r = dry_right - (dry_left * self.level) + o;
+        }
+    }
+}
+
+/// Wraps `signalsmith_stretch::Stretch` — see the module docs for why this is not a
+/// SoundTouch/WSOLA port, and for the `speed`/`pitch`/`rate` combination rule.
+///
+/// The one filter whose `process` changes frame count instead of transforming
+/// samples in place.
+struct TimescaleFilter {
+    stretch: signalsmith_stretch::Stretch,
+    /// `speed * rate`: input frames divided by this is output frames.
+    speed_factor: f32,
+    enabled: bool,
+    /// Scratch buffers reused across calls so a warmed-up pump allocates nothing
+    /// here — the same pattern `Resampler`'s `frames` buffer uses.
+    interleaved_in: Vec<f32>,
+    interleaved_out: Vec<f32>,
+}
+
+// `Stretch` does not implement `Debug` (it is a `cc`/`bindgen` wrapper around an
+// opaque C++ object), so this is written by hand rather than derived.
+impl std::fmt::Debug for TimescaleFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimescaleFilter")
+            .field("speed_factor", &self.speed_factor)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+/// Neither `Filters::validate` nor `Timescale` itself bounds `speed`/`pitch`/
+/// `rate` — they are unclamped `f64`s straight off the wire. `speed_factor` is a
+/// divisor of the per-call frame count below (`in_frames / speed_factor`), so a
+/// client-supplied `speed`/`rate` at or below zero would divide by zero or go
+/// negative, and anything just above zero still asks `Stretch` for an output
+/// buffer many minutes long from one ~20ms chunk. `Vec::resize` on that scale
+/// doesn't panic, it aborts the whole node on allocation failure — a class of
+/// crash `engine.rs`'s `catch_unwind` cannot contain, unlike an ordinary panic.
+/// This is the same runaway-allocation risk `pump.rs`'s `SANE_SAMPLE_RATE_HZ`
+/// guards against, from a filter request instead of a degenerate container.
+/// 1e-3 caps one call's stretch at 1000x — already an extreme slowdown, and far
+/// short of overflowing anything.
+const MIN_SPEED_FACTOR: f32 = 1e-3;
+
+impl TimescaleFilter {
+    fn new(config: Timescale, channels: usize) -> Self {
+        let speed_factor = ((config.speed * config.rate) as f32).max(MIN_SPEED_FACTOR);
+        let pitch_factor = (config.pitch * config.rate) as f32;
+
+        let mut stretch =
+            signalsmith_stretch::Stretch::preset_default(channels as u32, SAMPLE_RATE as u32);
+        if (pitch_factor - 1.0).abs() > f32::EPSILON {
+            stretch.set_transpose_factor(pitch_factor, None);
+        }
+
+        Self {
+            stretch,
+            speed_factor,
+            enabled: (speed_factor - 1.0).abs() > f32::EPSILON
+                || (pitch_factor - 1.0).abs() > f32::EPSILON,
+            interleaved_in: Vec::new(),
+            interleaved_out: Vec::new(),
+        }
+    }
+}
+
+impl AudioFilter for TimescaleFilter {
+    /// `speed`/`pitch`/`rate` all default to `1.0` (a no-op combination); asking
+    /// for any other combination is the switch, matching `KaraokeFilter`.
+    fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn process(&mut self, channels: &mut [Vec<f32>]) {
+        let in_frames = channels[0].len();
+        if in_frames == 0 {
+            return;
+        }
+        let channel_count = channels.len();
+
+        self.interleaved_in.clear();
+        self.interleaved_in.reserve(in_frames * channel_count);
+        for frame in 0..in_frames {
+            for channel in channels.iter() {
+                self.interleaved_in.push(channel[frame]);
+            }
+        }
+
+        // `Stretch::process` takes whatever input/output lengths a call is given —
+        // the length mismatch between them is what creates the stretch — so a
+        // fixed-ratio-per-call request is exactly the streaming shape it wants.
+        // `speed_factor` is clamped to `MIN_SPEED_FACTOR` (> 0) in `new`, so this is
+        // always finite and non-negative — no `.max(0.0)` needed.
+        let out_frames = ((in_frames as f32) / self.speed_factor).round() as usize;
+        self.interleaved_out.clear();
+        self.interleaved_out.resize(out_frames * channel_count, 0.0);
+        self.stretch.process(&self.interleaved_in, self.interleaved_out.as_mut_slice());
+
+        for channel in channels.iter_mut() {
+            channel.clear();
+        }
+        for frame in 0..out_frames {
+            for (channel_index, channel) in channels.iter_mut().enumerate() {
+                channel.push(self.interleaved_out[frame * channel_count + channel_index]);
+            }
         }
     }
 }
@@ -1365,13 +1492,63 @@ mod tests {
         assert!(!chain.is_enabled());
     }
 
-    /// `timescale` is the one filter with no implementation. It is rejected with a
-    /// 400 before reaching the chain, so building one must not add a stage.
+    /// `speed`/`pitch`/`rate` all default to `1.0` — the no-op combination — so a
+    /// request naming `timescale` without moving any of them off default must not
+    /// add a stage, same as `unit_volume_is_a_no_op`.
     #[test]
-    fn timescale_is_not_advertised_and_builds_no_stage() {
-        assert!(!IMPLEMENTED_FILTERS.contains(&"timescale"));
-        let chain = FilterChain::new(&filters(r#"{"timescale":{"speed":2.0}}"#), 2);
+    fn unit_timescale_is_a_no_op() {
+        assert!(IMPLEMENTED_FILTERS.contains(&"timescale"));
+        let chain = FilterChain::new(&filters(r#"{"timescale":{}}"#), 2);
         assert!(!chain.is_enabled());
     }
 
+    /// `speed` above 1.0 shrinks the buffer — `timescale` is the one filter whose
+    /// `process` changes frame count instead of transforming samples in place.
+    #[test]
+    fn timescale_speed_changes_frame_count() {
+        let mut chain = FilterChain::new(&filters(r#"{"timescale":{"speed":2.0}}"#), 2);
+        assert!(chain.is_enabled());
+
+        let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+        let in_frames = channels[0].len();
+        chain.process(&mut channels);
+
+        // Not an exact halving: `Stretch` carries internal FFT-block latency across
+        // calls, so a single 960-frame call sees only part of that settle out.
+        assert_ne!(channels[0].len(), in_frames);
+        assert_eq!(channels[0].len(), channels[1].len(), "channels must stay in lockstep");
+    }
+
+    /// `rate` moves speed and pitch together; `speed`/`pitch` alone leave the other
+    /// at its neutral value. Exercised through `is_enabled` rather than the DSP
+    /// output, since the combination rule (not the stretcher's output samples) is
+    /// what this codebase owns — `signalsmith-stretch` owns the rest.
+    #[test]
+    fn timescale_rate_moves_speed_and_pitch_together() {
+        let chain = FilterChain::new(&filters(r#"{"timescale":{"rate":1.5}}"#), 2);
+        assert!(chain.is_enabled());
+    }
+
+    /// Neither the protocol nor `Filters::validate` bounds `speed`/`rate` — a
+    /// client can send zero, negative, or a tiny positive value. `speed_factor`
+    /// is a divisor of the per-call frame count, so unclamped this would divide
+    /// by zero (or go negative) and ask `Vec::resize` for an enormous buffer,
+    /// which aborts the process rather than panicking — a crash `engine.rs`'s
+    /// `catch_unwind` cannot contain. `MIN_SPEED_FACTOR` must keep this finite
+    /// and bounded regardless of what the client sends.
+    #[test]
+    fn a_zero_or_negative_speed_does_not_blow_up_the_output_buffer() {
+        for json in [
+            r#"{"timescale":{"speed":0.0}}"#,
+            r#"{"timescale":{"speed":-5.0}}"#,
+            r#"{"timescale":{"rate":0.0}}"#,
+        ] {
+            let mut chain = FilterChain::new(&filters(json), 2);
+            let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+            chain.process(&mut channels);
+
+            assert!(channels[0].len() <= 960 * 1000, "runaway output buffer for {json}");
+            assert_eq!(channels[0].len(), channels[1].len());
+        }
+    }
 }

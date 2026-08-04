@@ -75,6 +75,9 @@ Every commit follows [Conventional Commits v1.0.0](https://www.conventionalcommi
 - Rust 1.95+ (`rust-version` in the workspace `Cargo.toml`)
 - A C compiler and CMake, to build the vendored `libopus` (pulled in
   transitively through `songbird`)
+- A C++ compiler and `libclang` (e.g. `libclang-dev` on Debian/Ubuntu), for
+  `signalsmith-stretch`'s `cc`+`bindgen` build (the `timescale` filter — see
+  `MAINTENANCE.md`)
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) on `PATH`, optional — only needed
   for the youtube/soundcloud/bandcamp/deezer sources. Detected once at startup
   (`main.rs`); if it's missing, those sources are disabled rather than failing
@@ -84,7 +87,7 @@ Every commit follows [Conventional Commits v1.0.0](https://www.conventionalcommi
 
 ```sh
 cargo build --workspace
-cargo test --workspace                       # all unit tests (374 across the tree)
+cargo test --workspace                       # all unit tests (377 across the tree)
 cargo test -p lavalink-server config::        # one module, e.g. config tests
 cargo test -p lavalink-server some_test_name  # one test by name substring
 cargo bench -p lavalink-server --bench filter # also: resample, pipeline
