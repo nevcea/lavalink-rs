@@ -487,8 +487,16 @@ impl KaraokeFilter {
         let c = (-2.0 * std::f32::consts::PI * config.filter_width / SAMPLE_RATE)
             .exp()
             .clamp(1e-6, 0.999);
-        let b = -4.0 * c / (1.0 + c)
-            * (2.0 * std::f32::consts::PI * config.filter_band / SAMPLE_RATE).cos();
+        // `filterBand` has the same hole `filterWidth` does, and it needed the same
+        // guard: an out-of-range band (again, serde makes `1e39` an
+        // `f32::INFINITY` rather than an error) makes `cos` return `NaN`, which `b`
+        // and then `a` carry into the `y1`/`y2` recurrence below for good. Falling
+        // back to `cos(0)` — a band of 0 Hz — because that is the value the whole
+        // finite range converges toward and it keeps `a`'s `sqrt` argument
+        // non-negative: `1 - b²/4c` is `(1-c)²/(1+c)²` at `cos == 1`, and cannot go
+        // negative for any `|cos| <= 1`.
+        let band = (2.0 * std::f32::consts::PI * config.filter_band / SAMPLE_RATE).cos();
+        let b = -4.0 * c / (1.0 + c) * if band.is_finite() { band } else { 1.0 };
         let a = (1.0 - b * b / (4.0 * c)).sqrt() * (1.0 - c);
 
         Self {
@@ -647,10 +655,40 @@ impl AudioFilter for TimescaleFilter {
     }
 }
 
+/// One sample's worth of LFO phase advance, in radians, guarded against a
+/// client-supplied frequency that makes it non-finite.
+///
+/// Neither the protocol nor `Filters::validate` bounds `frequency`, and serde
+/// turns a JSON number past `f32`'s range into `f32::INFINITY` rather than an
+/// error — so `1e39` is an accepted value. A non-finite step makes the
+/// `rem_euclid` below return `NaN`, and unlike a bad sample that `NaN` is *phase
+/// state*: it never leaves the filter again, so every sample from that patch
+/// onward is `NaN` all the way into the Opus encoder, and a seek does not clear
+/// it — only a fresh `filters` patch rebuilding the chain does.
+///
+/// Falling back to a stopped LFO rather than reproducing that sink, which is the
+/// same call `RotationFilter::new` makes for its own phase step: like tremolo's
+/// phase wrap, this is not something a client observes on the wire, only ever a
+/// defect.
+///
+/// `step` is passed in already computed, because tremolo and vibrato multiply
+/// their terms in a different order and that ordering is part of each one's f32
+/// rounding.
+fn finite_phase_step(step: f32) -> f32 {
+    if step.is_finite() {
+        step
+    } else {
+        0.0
+    }
+}
+
 /// lavadsp `TremoloPcmAudioFilter` + `VectorSupport.tremolo`: amplitude modulation.
 #[derive(Debug)]
 struct TremoloFilter {
-    frequency: f32,
+    /// Radians of LFO phase per sample. Hoisted out of `process`'s inner loop,
+    /// where it was recomputed per sample from a frequency that never changes, so
+    /// [`finite_phase_step`] has one place to guard.
+    step: f32,
     /// **Half** the requested depth. `setDepth` stores `depth / 2`, and Lavalink
     /// passes the protocol value straight in, so the halving is part of the wire
     /// meaning rather than an implementation detail.
@@ -662,7 +700,9 @@ struct TremoloFilter {
 impl TremoloFilter {
     fn new(config: Tremolo, channels: usize) -> Self {
         Self {
-            frequency: config.frequency,
+            step: finite_phase_step(
+                2.0 * std::f32::consts::PI / SAMPLE_RATE * config.frequency,
+            ),
             depth: config.depth / 2.0,
             phases: vec![0.0; channels],
         }
@@ -694,8 +734,7 @@ impl AudioFilter for TremoloFilter {
                 // an inherited defect. `rem_euclid` keeps the same pattern used for
                 // vibrato below, and rotation's `f64` phase already sidesteps the
                 // same class of problem.
-                *phase = (*phase + 2.0 * std::f32::consts::PI / SAMPLE_RATE * self.frequency)
-                    .rem_euclid(2.0 * std::f32::consts::PI);
+                *phase = (*phase + self.step).rem_euclid(2.0 * std::f32::consts::PI);
             }
         }
     }
@@ -707,7 +746,9 @@ impl AudioFilter for TremoloFilter {
 /// pitch bend smooth rather than stepped — a nearest-sample read would zipper.
 #[derive(Debug)]
 struct VibratoFilter {
-    frequency: f32,
+    /// Radians of LFO phase per sample — see [`finite_phase_step`], which is what
+    /// keeps an out-of-range `frequency` from turning the phase permanently `NaN`.
+    step: f32,
     depth: f32,
     channels: Vec<VibratoChannel>,
 }
@@ -782,12 +823,11 @@ impl VibratoChannel {
 
     /// Upstream's LFO is unipolar — `(sin + 1) * 0.5` — so the delay only ever
     /// lengthens. A bipolar one would centre the pitch instead of bending it up.
-    fn next_lfo(&mut self, frequency: f32) -> f32 {
+    fn next_lfo(&mut self, step: f32) -> f32 {
         let value = (self.phase.sin() + 1.0) * 0.5;
         // `rem_euclid`, not a decrement loop, so an extreme client-supplied
         // frequency can't spin this for a very long time.
-        self.phase = (self.phase + 2.0 * std::f32::consts::PI * frequency / SAMPLE_RATE)
-            .rem_euclid(2.0 * std::f32::consts::PI);
+        self.phase = (self.phase + step).rem_euclid(2.0 * std::f32::consts::PI);
         value
     }
 }
@@ -795,7 +835,9 @@ impl VibratoChannel {
 impl VibratoFilter {
     fn new(config: Vibrato, channels: usize) -> Self {
         Self {
-            frequency: config.frequency,
+            step: finite_phase_step(
+                2.0 * std::f32::consts::PI * config.frequency / SAMPLE_RATE,
+            ),
             depth: config.depth,
             channels: (0..channels).map(|_| VibratoChannel::new()).collect(),
         }
@@ -816,7 +858,7 @@ impl AudioFilter for VibratoFilter {
             };
 
             for sample in channel.iter_mut() {
-                let lfo = state.next_lfo(self.frequency);
+                let lfo = state.next_lfo(self.step);
                 let delay = lfo * self.depth * max_delay + VIBRATO_ADDITIONAL_DELAY;
                 let out = state.read_hermite(delay);
                 state.write(*sample);
@@ -1306,6 +1348,24 @@ mod tests {
         );
     }
 
+    /// The same sink one coefficient over: `filterBand` reaches `cos` unguarded,
+    /// and a band past `f32`'s range — serde produces `f32::INFINITY` for `1e39`
+    /// rather than rejecting it — makes `cos` `NaN`, which `b` and `a` then carry
+    /// into the `y1`/`y2` recurrence for the life of the filter chain.
+    #[test]
+    fn karaoke_survives_unclamped_filter_band() {
+        for band in ["1e39", "-1e39"] {
+            let mut chain =
+                FilterChain::new(&filters(&format!(r#"{{"karaoke":{{"filterBand":{band}}}}}"#)), 2);
+            let mut channels = stereo(0.5, -0.3, 4800);
+            chain.process(&mut channels);
+            assert!(
+                channels.iter().all(|c| c.iter().all(|s| s.is_finite())),
+                "filterBand {band} produced non-finite output"
+            );
+        }
+    }
+
     /// Unlike `vibrato`/`tremolo`'s per-sample phase increment, rotation's `step`
     /// is derived once in `new()` from `rotationHz * 2 * PI`, which overflows to
     /// `f64::INFINITY` for an extreme `rotationHz` — and `phase.sin()` is `NaN`
@@ -1430,6 +1490,31 @@ mod tests {
             channels.iter().all(|c| c.iter().all(|s| s.is_finite())),
             "negative unclamped vibrato parameters produced non-finite output"
         );
+    }
+
+    /// The test above uses a large but *finite* frequency, which is why it never
+    /// caught this: the phase step only goes non-finite once
+    /// `2 * PI * frequency / SAMPLE_RATE` overflows `f32`, and serde turns `1e39`
+    /// into `f32::INFINITY` without erroring. `inf.rem_euclid(..)` is `NaN`, and
+    /// that `NaN` is phase *state* — every sample after it is `NaN`, and only a
+    /// fresh `filters` patch clears it, not a seek.
+    #[test]
+    fn an_lfo_frequency_past_f32_does_not_poison_the_phase() {
+        for filter in ["vibrato", "tremolo"] {
+            for frequency in ["1e39", "-1e39"] {
+                let json =
+                    format!(r#"{{"{filter}":{{"frequency":{frequency},"depth":0.5}}}}"#);
+                let mut chain = FilterChain::new(&filters(&json), 2);
+                assert!(chain.is_enabled());
+
+                let mut channels = stereo(1.0, 1.0, 4800);
+                chain.process(&mut channels);
+                assert!(
+                    channels.iter().all(|c| c.iter().all(|s| s.is_finite())),
+                    "{filter} frequency {frequency} produced non-finite output"
+                );
+            }
+        }
     }
 
     /// `read_hermite`'s `rem_euclid` is mathematically confined to `[0, size)`, but
