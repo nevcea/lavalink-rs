@@ -69,6 +69,12 @@ pub struct PumpConfig {
     /// cuts the retry short instead of waiting out the whole budget. Cleared
     /// once [`State::drain_commands`] has drained the commands that set it.
     pub interrupt: Arc<AtomicBool>,
+    /// Whether any audio has reached the ring, kept outside State so a panic
+    /// inside run (caught by engine.rs's catch_unwind, which cannot see State
+    /// once the unwind has destroyed it) can still tell a load-time crash from
+    /// one partway through a track. The engine reads this after the catch,
+    /// instead of assuming a panic always means the track had started.
+    pub produced: Arc<AtomicBool>,
 }
 
 /// Runs one track to completion. Returns how it ended, for the actor to turn into
@@ -108,8 +114,10 @@ struct State {
     volume: f32,
     end_time_ms: Option<i64>,
     /// Whether any audio has reached the ring. Distinguishes a track that failed to
-    /// start (`loadFailed`) from one that died partway (`finished`).
-    produced: bool,
+    /// start (`loadFailed`) from one that died partway (`finished`) — shared with
+    /// the engine (see PumpConfig::produced) so that distinction survives a panic
+    /// here too.
+    produced: Arc<AtomicBool>,
     /// Consecutive decode errors. A few corrupt frames are normal and skipped; a run
     /// of them means the stream is broken.
     consecutive_errors: u32,
@@ -220,7 +228,7 @@ fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
         filters: FilterChain::new(&config.filters, CHANNELS),
         volume: player_volume_multiplier(config.volume),
         end_time_ms: config.end_time_ms,
-        produced: false,
+        produced: Arc::clone(&config.produced),
         consecutive_errors: 0,
         interleaved: Vec::new(),
         pcm: Vec::new(),
@@ -300,7 +308,7 @@ impl State {
                                 "The audio track disappeared after a format change",
                                 "track lost on reset",
                             ),
-                            started: self.produced,
+                            started: self.produced.load(Ordering::Relaxed),
                         };
                     };
                     match source_params(&params) {
@@ -312,7 +320,7 @@ impl State {
                             writer.finish();
                             return PumpOutcome::Failed {
                                 exception,
-                                started: self.produced,
+                                started: self.produced.load(Ordering::Relaxed),
                             };
                         }
                     }
@@ -375,7 +383,7 @@ impl State {
             filter_interleaved(&mut self.filters, &pcm, &mut self.planar, &mut filtered);
             self.pcm = pcm;
 
-            self.produced = true;
+            self.produced.store(true, Ordering::Relaxed);
             let outcome = self.write_interruptibly(writer, &filtered, commands);
             self.filtered = filtered;
             if let ControlFlow::Stopped = outcome {
@@ -522,7 +530,7 @@ impl State {
                 format!("Playback failed: {error}"),
                 error.to_string(),
             ),
-            started: self.produced,
+            started: self.produced.load(Ordering::Relaxed),
         }
     }
 }
@@ -774,6 +782,7 @@ mod tests {
             opener: Arc::new(StreamOpener::default()),
             resampling_quality: ResamplingQuality::Low,
             interrupt: Arc::new(AtomicBool::new(false)),
+            produced: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1282,6 +1291,7 @@ mod tests {
             opener: Arc::new(StreamOpener::default()),
             resampling_quality: ResamplingQuality::Low,
             interrupt: Arc::new(AtomicBool::new(false)),
+            produced: Arc::new(AtomicBool::new(false)),
         });
 
         assert!(
@@ -1315,6 +1325,7 @@ mod tests {
                 opener: Arc::new(StreamOpener::default()),
                 resampling_quality: ResamplingQuality::Low,
                 interrupt: Arc::new(AtomicBool::new(false)),
+                produced: Arc::new(AtomicBool::new(false)),
             },
             writer,
             rx,
@@ -1352,6 +1363,7 @@ mod tests {
                 opener: Arc::new(StreamOpener::default()),
                 resampling_quality: ResamplingQuality::Low,
                 interrupt: Arc::new(AtomicBool::new(false)),
+                produced: Arc::new(AtomicBool::new(false)),
             },
             writer,
             rx,

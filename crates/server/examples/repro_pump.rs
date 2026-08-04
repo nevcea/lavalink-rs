@@ -91,6 +91,7 @@ fn main() {
                 opener,
                 resampling_quality: ResamplingQuality::Low,
                 interrupt: Arc::new(AtomicBool::new(false)),
+                produced: Arc::new(AtomicBool::new(false)),
             };
             pump::run(config, writer, pump_commands, pump_position, &|| {})
         })

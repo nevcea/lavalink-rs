@@ -255,6 +255,11 @@ impl Engine for PipelineEngine {
         let events = self.events.get().cloned();
         let guild_id = self.guild_id;
         let active = Arc::clone(&self.active);
+        // Kept outside config too (not just inside it) so the catch_unwind below
+        // can still read it after a panic has destroyed run's own State — that is
+        // the whole reason this exists rather than staying a plain bool on State,
+        // see PumpConfig::produced.
+        let produced = Arc::new(AtomicBool::new(false));
         let config = PumpConfig {
             info: request.track.info.clone(),
             start_position_ms: request.start_position_ms,
@@ -264,6 +269,7 @@ impl Engine for PipelineEngine {
             opener: Arc::clone(&self.opener),
             resampling_quality: self.resampling_quality,
             interrupt,
+            produced: Arc::clone(&produced),
         };
 
         // A dedicated thread, not the blocking pool: this lives for the whole track.
@@ -290,15 +296,28 @@ impl Engine for PipelineEngine {
                 };
 
                 // A panic in one pump is contained here. It cannot be recovered
-                // from, but it must not reach another player, and the track has to
-                // end with a defined event rather than silence.
+                // from, but it must not reach another player, and it should end the
+                // track with a defined event rather than silence. That last part is
+                // not guaranteed by this alone: the try_send below is best-effort
+                // (a full command queue drops the event silently), and unlike a
+                // normal Finished/Failed return this path never calls
+                // writer.finish() on the ring it is abandoning, so the reader keeps
+                // handing the mixer silence and advancing position forever if the
+                // event above is what gets lost.
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     pump::run(config, writer, pump_commands, position_ms, &on_progress)
                 }));
 
                 let outcome = outcome.unwrap_or_else(|_| super::PumpOutcome::Failed {
                     exception: Exception::fault("The audio pipeline panicked", "pump panic"),
-                    started: true,
+                    // Not hardcoded true: a panic inside pump::open, before a
+                    // single sample reached the ring, is a load failure, and the
+                    // actor turns started into loadFailed vs finished — clients
+                    // use exactly that distinction to decide whether to advance
+                    // the queue. produced is read here, after State (and its own
+                    // copy of the flag) has already been destroyed by the unwind,
+                    // which is why it has to live outside State at all.
+                    started: produced.load(Ordering::Relaxed),
                 });
 
                 if let Some(events) = &events {
@@ -442,5 +461,39 @@ mod tests {
         assert_ne!(second, first);
         assert!(!is_current(&active, first));
         assert!(is_current(&active, second));
+    }
+
+    /// The bug this guards: play used to hardcode started: true in the
+    /// catch_unwind recovery arm, so a panic during pump::open, before a single
+    /// sample reached the ring, was reported as finished rather than
+    /// loadFailed — exactly the distinction actor.rs uses to decide whether a
+    /// client should advance its queue. produced is read after catch_unwind
+    /// instead now, exercised here in isolation (the same shape play's spawned
+    /// closure uses) since driving a real panic through a live pump thread and
+    /// tokio runtime is what test-bot, not a unit test, is for.
+    #[test]
+    fn a_panic_before_producing_anything_is_reported_as_not_started() {
+        let produced = Arc::new(AtomicBool::new(false));
+        let outcome = recover_from_panic(&produced, || panic!("simulated load-time panic"));
+        assert!(matches!(outcome, crate::audio::PumpOutcome::Failed { started: false, .. }));
+    }
+
+    #[test]
+    fn a_panic_after_producing_something_is_reported_as_started() {
+        let produced = Arc::new(AtomicBool::new(false));
+        produced.store(true, Ordering::Relaxed);
+        let outcome = recover_from_panic(&produced, || panic!("simulated mid-track panic"));
+        assert!(matches!(outcome, crate::audio::PumpOutcome::Failed { started: true, .. }));
+    }
+
+    /// The exact recovery shape play's spawned closure uses around pump::run.
+    fn recover_from_panic(
+        produced: &Arc<AtomicBool>,
+        pump: impl FnOnce() -> crate::audio::PumpOutcome + std::panic::UnwindSafe,
+    ) -> crate::audio::PumpOutcome {
+        std::panic::catch_unwind(pump).unwrap_or_else(|_| crate::audio::PumpOutcome::Failed {
+            exception: Exception::fault("panicked", "panicked"),
+            started: produced.load(Ordering::Relaxed),
+        })
     }
 }
