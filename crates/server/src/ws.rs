@@ -122,10 +122,16 @@ async fn run(
         session_id: session.id.clone(),
     });
 
-    pump(&state, &session, socket).await;
+    let destroyed = pump(&state, &session, socket).await;
 
     // The socket is gone. Either the session waits to be resumed or it is over.
-    if let Some(session) = state.sessions.on_disconnect(&session.id, Instant::now()) {
+    // `destroyed` is checked first: `pump` already tore the session down (write
+    // timeout / overflow), so `on_disconnect` finding nothing left in the
+    // registry means exactly that, not "went Resumable" — the two share the
+    // same `None` otherwise.
+    if destroyed {
+        tracing::info!(session = %session.id, "session closed");
+    } else if let Some(session) = state.sessions.on_disconnect(&session.id, Instant::now()) {
         tracing::info!(session = %session.id, "session closed");
         session.shutdown().await;
     } else {
@@ -137,8 +143,10 @@ async fn run(
     }
 }
 
-/// Drives the socket until it closes.
-async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) {
+/// Drives the socket until it closes. Returns whether it destroyed the
+/// session itself (write timeout or essential-queue overflow) rather than
+/// leaving that decision to the caller.
+async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bool {
     let (mut writer, mut reader) = socket.split();
     let mut shutdown = state.shutdown.clone();
 
@@ -154,7 +162,7 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) {
                     }))),
                 )
                 .await;
-                break;
+                return false;
             }
 
             // v4 has no client-to-server messages; the original logs and ignores
@@ -207,7 +215,7 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) {
                             "client did not acknowledge a write in time; closing the session"
                         );
                         state.sessions.destroy(&session.id).await;
-                        break;
+                        return true;
                     }
                 }
             }
@@ -230,9 +238,11 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) {
             )
             .await;
             state.sessions.destroy(&session.id).await;
-            break;
+            return true;
         }
     }
+
+    false
 }
 
 #[cfg(test)]
