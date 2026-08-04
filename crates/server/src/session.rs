@@ -316,11 +316,18 @@ impl SessionRegistry {
 
         if entry.session.resuming() {
             // A negative timeout has no real deadline to give — treated as
-            // already expired (0) rather than panicking `Duration::from_secs`
-            // on a value it can't represent.
+            // already expired (0) rather than panicking Duration::from_secs on a
+            // value it can't represent. On the other end, timeout_seconds is an
+            // unvalidated client-supplied i64 (rest/session.rs's update writes it
+            // straight through), so a huge one can still overflow Instant +
+            // Duration. checked_add catches that side too, falling back to now —
+            // already expired, same as the negative case — rather than panicking
+            // under this lock: Open has no timeout of its own (is_expired never
+            // reclaims it), so a panic here would strand the entry Open forever
+            // instead of just failing this one disconnect.
             let timeout = Duration::from_secs(entry.session.resume_timeout_secs().max(0) as u64);
             entry.state = SessionState::Resumable {
-                deadline: now + timeout,
+                deadline: now.checked_add(timeout).unwrap_or(now),
             };
             entry.session.sink.pause();
             return None;
@@ -590,6 +597,29 @@ mod tests {
             ),
             "a rejected late claim must leave the entry for sweep_expired, not touch it"
         );
+    }
+
+    /// timeout_seconds is an unvalidated i64 straight off PATCH
+    /// /v4/sessions/{id} (rest/session.rs's update writes it through with no
+    /// range check) — a client-supplied value near i64::MAX must not panic
+    /// Instant + Duration inside on_disconnect. Before the checked_add fix, this
+    /// panicked while the registry lock was held; crate::lock's poison tolerance
+    /// kept the node up, but the entry never left Open, which is_expired never
+    /// reclaims — a permanent, remotely repeatable leak of the session and
+    /// everything it owns.
+    #[test]
+    fn a_huge_timeout_does_not_panic_and_leaves_the_session_reclaimable() {
+        let registry = SessionRegistry::new();
+        let session = registry.open(1, None);
+        session.set_resuming(true);
+        session.set_resume_timeout_secs(i64::MAX);
+
+        let disconnected_at = Instant::now();
+        registry.on_disconnect(&session.id, disconnected_at);
+
+        // Overflow is treated the same as a negative timeout: already expired.
+        let expired = registry.sweep_expired(disconnected_at);
+        assert_eq!(expired.len(), 1, "an overflowing deadline must be immediately reclaimable");
     }
 
     /// A failed claim attempt must not cancel the deadline.
