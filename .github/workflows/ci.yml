@@ -59,12 +59,19 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Ten advisories, none fixable by a version bump on our end: each is
-          # pulled in transitively through songbird 0.6.0 (davey/openmls's
-          # libcrux-* crates, and tungstenite's rustls 0.22 -> old
-          # rustls-webpki), which is itself the newest songbird release —
-          # there is no newer compatible version to move to yet, and two of
-          # the libcrux-aesgcm advisories (RUSTSEC-2026-0211, -0209) have no
-          # patched version published upstream at all. Re-run `cargo update`
-          # and drop entries here as songbird/serenity catch up.
+          # Ten advisories, none fixable by a version bump on our end. Eight are
+          # pulled in transitively through songbird 0.6.0 (tungstenite's rustls
+          # 0.22 -> old rustls-webpki), which is itself the newest songbird
+          # release — no newer compatible version to move to yet.
+          #
+          # The remaining two, both libcrux-aesgcm (RUSTSEC-2026-0211, -0209),
+          # come from `driver`'s unconditional davey (DAVE E2EE) dependency and
+          # *are* patched upstream (libcrux-aesgcm 0.0.9) — the block is one
+          # level up: hpke-rs 0.6.1 pins hpke-rs-libcrux to `^0.6.1`, which
+          # pins libcrux-aead to the exact `=0.0.7`, which pins libcrux-aesgcm
+          # to the exact `=0.0.7` in turn, so `cargo update` alone can't reach
+          # 0.0.9 no matter what songbird does. hpke-rs-libcrux 0.7.0 already
+          # requires the patched libcrux-aead; unblocking these two needs
+          # hpke-rs (not songbird) to pick that up. Re-run `cargo update` and
+          # drop entries here as songbird/serenity/hpke-rs catch up.
           ignore: "RUSTSEC-2026-0211,RUSTSEC-2026-0209,RUSTSEC-2026-0124,RUSTSEC-2026-0212,RUSTSEC-2026-0207,RUSTSEC-2026-0208,RUSTSEC-2026-0098,RUSTSEC-2026-0049,RUSTSEC-2026-0099,RUSTSEC-2026-0104"
