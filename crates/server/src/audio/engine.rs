@@ -169,9 +169,18 @@ impl PipelineEngine {
             return;
         };
 
-        previous.interrupt.store(true, Ordering::Relaxed);
+        // Sent before the flag is set, for the reason `send_to_pump` spells out
+        // above: setting it first leaves a window where `drain_commands` observes
+        // `Empty`, clears the flag, and only then receives this — leaving a pump
+        // on a stalled source to burn its whole reconnect budget (up to
+        // `MAX_RECONNECT_ATTEMPTS` × (`connect_timeout` + `read_timeout`), tens of
+        // seconds) before it notices it was told to stop at all. `Stop` is the
+        // command that most needs to cut that short, and was the last one still
+        // on the old order.
+        //
         // Dropping the sender is what unblocks a pump parked on a full ring.
         let _ = previous.commands.send(PumpCommand::Stop);
+        previous.interrupt.store(true, Ordering::Relaxed);
         drop(previous.commands);
 
         if let Some(track) = previous.track {
