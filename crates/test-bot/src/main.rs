@@ -20,30 +20,37 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use lavalink_protocol::filters::{Band, Filters, LowPass};
-use lavalink_protocol::player::{PlayerUpdate, PlayerUpdateTrack, VoiceState};
+use lavalink_protocol::player::{Player, PlayerUpdate, PlayerUpdateTrack, VoiceState};
 use lavalink_protocol::{LoadResult, Omissible, Track};
-use serenity::all::{Context, EventHandler, GatewayIntents, GuildId, Message, Ready, ShardManager};
+use serenity::all::{
+    CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
+    EditInteractionResponse, EventHandler, GatewayIntents, GuildId, Interaction, Ready,
+    ResolvedOption, ResolvedValue, ShardManager,
+};
 use serenity::{async_trait, Client};
 use songbird::{SerenityInit, Songbird};
 use tokio::sync::Mutex;
 
 use node::{Node, NodeError};
 
-const PREFIX: &str = "!";
-
 struct Handler {
     node: Node,
     songbird: Arc<Songbird>,
+    /// The guild slash commands are registered to — guild-scoped registration is
+    /// live immediately, unlike global commands, which can take up to an hour to
+    /// propagate. Fine for a bot that only ever runs against one test server.
+    guild: GuildId,
     /// Filters are cumulative on the wire — a `PATCH` carrying only `equalizer`
     /// replaces the whole chain — so the last state sent is kept per guild and
-    /// re-sent in full. Without this, `!lowpass` would silently undo `!eq`.
+    /// re-sent in full. Without this, `/lowpass` would silently undo `/eq`.
     filters: Mutex<HashMap<u64, Filters>>,
     /// Set once `main` has the built [`Client`] in hand — it does not exist yet when
-    /// `Handler` is constructed. `!ping` reads the shard's heartbeat latency from it.
+    /// `Handler` is constructed. `/ping` reads the shard's heartbeat latency from it.
     shard_manager: Arc<OnceLock<Arc<ShardManager>>>,
     /// `ready` fires on every IDENTIFY, not just the first — a failed session resume
     /// re-triggers it. Without this guard, each re-identify would spawn another
-    /// websocket task and register another session on the node.
+    /// websocket task, register another session on the node, and re-register the
+    /// same slash commands.
     ws_started: OnceLock<()>,
 }
 
@@ -51,7 +58,7 @@ struct Handler {
 impl EventHandler for Handler {
     /// The node websocket cannot open before this point: it needs the bot's user id
     /// as a header, and that is not known until Discord says so.
-    async fn ready(&self, _ctx: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
         let user_id = ready.user.id.get();
         tracing::info!(user = %ready.user.name, user_id, "logged in");
 
@@ -60,50 +67,49 @@ impl EventHandler for Handler {
             return;
         }
 
+        if let Err(error) = self.guild.set_commands(&ctx.http, commands()).await {
+            tracing::error!(%error, "failed to register slash commands");
+        }
+
         let session = self.node.session_slot();
         let (host, password) = (self.node.host.clone(), self.node.password.clone());
         tokio::spawn(node_ws::run(host, password, user_id, session));
     }
 
-    async fn message(&self, ctx: Context, msg: Message) {
-        if msg.author.bot || !msg.content.starts_with(PREFIX) {
-            return;
-        }
-        let Some(guild_id) = msg.guild_id else {
-            if let Err(error) = msg.reply(&ctx.http, "guild channels only").await {
-                tracing::warn!(%error, "failed to send reply");
-            }
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        let Interaction::Command(command) = interaction else {
             return;
         };
 
-        let mut parts = msg.content[PREFIX.len()..].splitn(2, char::is_whitespace);
-        let command = parts.next().unwrap_or_default().to_ascii_lowercase();
-        let rest = parts.next().unwrap_or_default().trim();
+        // Node REST calls can outlast the 3s Discord gives an initial response, so
+        // acknowledge first and deliver the real answer as an edit.
+        if let Err(error) = command.defer(&ctx.http).await {
+            tracing::warn!(%error, "failed to defer interaction");
+            return;
+        }
 
         let reply = self
-            .dispatch(&ctx, &msg, guild_id.get(), &command, rest)
+            .dispatch(&ctx, &command)
             .await
             .unwrap_or_else(|error| format!("`{error}`"));
 
-        if !reply.is_empty() {
-            if let Err(error) = msg.reply(&ctx.http, reply).await {
-                tracing::warn!(%error, "failed to send reply");
-            }
+        if let Err(error) =
+            command.edit_response(&ctx.http, EditInteractionResponse::new().content(reply)).await
+        {
+            tracing::warn!(%error, "failed to edit interaction response");
         }
     }
 }
 
 impl Handler {
-    async fn dispatch(
-        &self,
-        ctx: &Context,
-        msg: &Message,
-        guild: u64,
-        command: &str,
-        rest: &str,
-    ) -> Result<String, NodeError> {
-        match command {
-            "help" => Ok(HELP.to_owned()),
+    async fn dispatch(&self, ctx: &Context, command: &CommandInteraction) -> Result<String, NodeError> {
+        let Some(guild_id) = command.guild_id else {
+            return Ok("guild channels only".into());
+        };
+        let guild = guild_id.get();
+        let options = command.data.options();
+
+        match command.data.name.as_str() {
             "ping" => Ok(self.gateway_latency(ctx).await),
             "info" => {
                 let info = self.node.info().await?;
@@ -119,48 +125,37 @@ impl Handler {
                     stats.players, stats.playing_players, stats.uptime, stats.memory.used
                 ))
             }
-            "join" => self.join(ctx, msg, guild).await,
+            "join" => self.join(ctx, command, guild).await,
             "leave" => self.leave(guild).await,
-            "play" => self.play(guild, rest).await,
-            "search" => self.search(rest).await,
+            "play" => self.play(guild, opt_str(&options, "query").unwrap_or_default()).await,
+            "search" => self.search(opt_str(&options, "query").unwrap_or_default()).await,
             "stop" => {
                 // `Present(None)` on the track is the stop signal — an omitted track
                 // would mean "leave whatever is playing alone".
-                self.patch(guild, PlayerUpdate {
-                    track: Omissible::Present(PlayerUpdateTrack {
+                self.patch_with(guild, |u| {
+                    u.track = Omissible::Present(PlayerUpdateTrack {
                         encoded: Omissible::Present(None),
                         ..Default::default()
-                    }),
-                    ..Default::default()
+                    });
                 })
                 .await?;
                 Ok("stopped".into())
             }
-            "pause" | "resume" => {
-                let paused = command == "pause";
-                self.patch(guild, PlayerUpdate {
-                    paused: Omissible::Present(paused),
-                    ..Default::default()
-                })
-                .await?;
+            name @ ("pause" | "resume") => {
+                let paused = name == "pause";
+                self.patch_with(guild, |u| u.paused = Omissible::Present(paused)).await?;
                 Ok(if paused { "paused".into() } else { "resumed".into() })
             }
             "seek" => {
-                let seconds: f64 = rest.parse().map_err(|_| bad("seek <seconds>"))?;
-                self.patch(guild, PlayerUpdate {
-                    position: Omissible::Present((seconds * 1000.0) as i64),
-                    ..Default::default()
-                })
-                .await?;
+                let seconds = opt_f64(&options, "seconds").ok_or_else(|| bad("seek <seconds>"))?;
+                self.patch_with(guild, |u| u.position = Omissible::Present((seconds * 1000.0) as i64))
+                    .await?;
                 Ok(format!("seeked to {seconds}s"))
             }
             "volume" => {
-                let volume: i32 = rest.parse().map_err(|_| bad("volume <0-1000>"))?;
-                self.patch(guild, PlayerUpdate {
-                    volume: Omissible::Present(volume),
-                    ..Default::default()
-                })
-                .await?;
+                let volume =
+                    opt_i64(&options, "amount").ok_or_else(|| bad("volume <0-1000>"))? as i32;
+                self.patch_with(guild, |u| u.volume = Omissible::Present(volume)).await?;
                 Ok(format!("volume {volume}"))
             }
             "np" => {
@@ -180,7 +175,7 @@ impl Handler {
                 })
             }
             // The node-wide view, which is what the ten-player resource measurement
-            // needs — `!np` only ever describes the guild it was typed in.
+            // needs — `/np` only ever describes the guild it was typed in.
             "players" => {
                 let players = self.node.players().await?;
                 if players.0.is_empty() {
@@ -202,12 +197,40 @@ impl Handler {
                     .join("\n");
                 Ok(format!("{} players\n{lines}", players.0.len()))
             }
-            "eq" | "lowpass" | "clearfilters" => self.filter_command(guild, command, rest).await,
+            "eq" => {
+                let usage = || bad("eq <band> <gain>");
+                let band = opt_i64(&options, "band").ok_or_else(usage)? as i32;
+                let gain = opt_f64(&options, "gain").ok_or_else(usage)? as f32;
+                self.apply_filters(guild, |filters| {
+                    // Replacing an existing entry rather than appending: the node
+                    // applies the last value for a band, but sending duplicates
+                    // makes the echoed `filters` object unreadable while testing.
+                    let mut bands = match filters.equalizer.clone() {
+                        Omissible::Present(bands) => bands,
+                        Omissible::Omitted => Vec::new(),
+                    };
+                    match bands.iter_mut().find(|entry| entry.band == band) {
+                        Some(entry) => entry.gain = gain,
+                        None => bands.push(Band { band, gain }),
+                    }
+                    filters.equalizer = Omissible::Present(bands);
+                })
+                .await
+            }
+            "lowpass" => {
+                let smoothing =
+                    opt_f64(&options, "smoothing").ok_or_else(|| bad("lowpass <smoothing>"))? as f32;
+                self.apply_filters(guild, |filters| {
+                    filters.low_pass = Omissible::Present(Some(LowPass { smoothing }));
+                })
+                .await
+            }
+            "clearfilters" => self.apply_filters(guild, |filters| *filters = Filters::default()).await,
             "filters" => {
                 let player = self.node.player(guild).await?;
                 Ok(format!("```json\n{}\n```", pretty(&player.filters)))
             }
-            _ => Ok(format!("unknown command `{command}` — try `{PREFIX}help`")),
+            name => Ok(format!("unknown command `{name}`")),
         }
     }
 
@@ -217,13 +240,18 @@ impl Handler {
     /// The two steps are the whole architecture in miniature: songbird performs the
     /// gateway op4 and waits for Discord's voice state + voice server updates, and
     /// the node is then *told* the result. It never talks to the gateway itself.
-    async fn join(&self, ctx: &Context, msg: &Message, guild: u64) -> Result<String, NodeError> {
+    async fn join(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+        guild: u64,
+    ) -> Result<String, NodeError> {
         let channel = ctx
             .cache
             .guild(guild)
             .and_then(|g| {
                 g.voice_states
-                    .get(&msg.author.id)
+                    .get(&command.user.id)
                     .and_then(|state| state.channel_id)
             })
             .ok_or_else(|| bad("join a voice channel first"))?;
@@ -234,14 +262,13 @@ impl Handler {
             .await
             .map_err(|error| bad(format!("gateway join failed: {error}")))?;
 
-        self.patch(guild, PlayerUpdate {
-            voice: Omissible::Present(VoiceState {
+        self.patch_with(guild, |u| {
+            u.voice = Omissible::Present(VoiceState {
                 token: info.token,
                 endpoint: info.endpoint,
                 session_id: info.session_id,
                 channel_id: Some(channel.get().to_string()),
-            }),
-            ..Default::default()
+            });
         })
         .await?;
 
@@ -294,12 +321,11 @@ impl Handler {
         };
 
         let summary = describe(&track);
-        self.patch(guild, PlayerUpdate {
-            track: Omissible::Present(PlayerUpdateTrack {
+        self.patch_with(guild, |u| {
+            u.track = Omissible::Present(PlayerUpdateTrack {
                 encoded: Omissible::Present(Some(track.encoded)),
                 ..Default::default()
-            }),
-            ..Default::default()
+            });
         })
         .await?;
 
@@ -313,88 +339,47 @@ impl Handler {
         Ok(match result {
             LoadResult::Track(track) => format!("`track` — {}", describe(&track)),
             LoadResult::Search(tracks) => {
-                let list = tracks
-                    .iter()
-                    .take(5)
-                    .map(describe)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!("`search` — {} results\n{list}", tracks.len())
+                format!("`search` — {} results\n{}", tracks.len(), summarize(tracks.iter()))
             }
             LoadResult::Playlist(playlist) => format!(
                 "`playlist` — **{}** ({} tracks, selected {})\n{}",
                 playlist.info.name,
                 playlist.tracks.len(),
                 playlist.info.selected_track,
-                playlist.tracks.iter().take(5).map(describe).collect::<Vec<_>>().join("\n"),
+                summarize(playlist.tracks.iter()),
             ),
             LoadResult::Empty => "`empty`".into(),
             LoadResult::Error(exception) => format!("`error` — {exception:?}"),
         })
     }
 
-    /// Filter commands mutate the remembered chain and re-send all of it.
-    async fn filter_command(
+    /// Mutates the remembered filter chain for a guild and re-sends all of it — a
+    /// `PATCH` carrying only one filter key replaces the whole chain server-side.
+    async fn apply_filters(
         &self,
         guild: u64,
-        command: &str,
-        rest: &str,
+        f: impl FnOnce(&mut Filters),
     ) -> Result<String, NodeError> {
         let filters = {
             let mut cache = self.filters.lock().await;
             let filters = cache.entry(guild).or_default();
-
-            match command {
-                "clearfilters" => *filters = Filters::default(),
-                "lowpass" => {
-                    let smoothing: f32 = rest.parse().map_err(|_| bad("lowpass <smoothing>"))?;
-                    filters.low_pass = Omissible::Present(Some(LowPass { smoothing }));
-                }
-                "eq" => {
-                    let (band, gain) = rest
-                        .split_once(char::is_whitespace)
-                        .ok_or_else(|| bad("eq <band 0-14> <gain -0.25..1.0>"))?;
-                    let band: i32 = band.trim().parse().map_err(|_| bad("band must be 0-14"))?;
-                    let gain: f32 = gain.trim().parse().map_err(|_| bad("gain must be a number"))?;
-
-                    // Replacing an existing entry rather than appending: the node
-                    // applies the last value for a band, but sending duplicates
-                    // makes the echoed `filters` object unreadable while testing.
-                    let mut bands = match filters.equalizer.clone() {
-                        Omissible::Present(bands) => bands,
-                        Omissible::Omitted => Vec::new(),
-                    };
-                    match bands.iter_mut().find(|entry| entry.band == band) {
-                        Some(entry) => entry.gain = gain,
-                        None => bands.push(Band { band, gain }),
-                    }
-                    filters.equalizer = Omissible::Present(bands);
-                }
-                _ => unreachable!("filter_command is only called for filter commands"),
-            }
+            f(filters);
             filters.clone()
         };
 
-        let player = self
-            .patch(guild, PlayerUpdate {
-                filters: Omissible::Present(filters),
-                ..Default::default()
-            })
-            .await?;
-
+        let player = self.patch_with(guild, |u| u.filters = Omissible::Present(filters)).await?;
         Ok(format!("```json\n{}\n```", pretty(&player.filters)))
     }
 
-    async fn patch(
-        &self,
-        guild: u64,
-        update: PlayerUpdate,
-    ) -> Result<lavalink_protocol::Player, NodeError> {
+    async fn patch_with(&self, guild: u64, f: impl FnOnce(&mut PlayerUpdate)) -> Result<Player, NodeError> {
+        let mut update = PlayerUpdate::default();
+        f(&mut update);
         self.node.update_player(guild, &update, false).await
     }
 
-    /// The Discord gateway heartbeat latency for the shard this message arrived on —
-    /// the same number the client logs on every `Ready`/`Resumed`, surfaced on demand.
+    /// The Discord gateway heartbeat latency for the shard this interaction arrived
+    /// on — the same number the client logs on every `Ready`/`Resumed`, surfaced on
+    /// demand.
     async fn gateway_latency(&self, ctx: &Context) -> String {
         let Some(shard_manager) = self.shard_manager.get().cloned() else {
             return "pong! (shard manager not ready yet)".into();
@@ -414,11 +399,84 @@ impl Handler {
     }
 }
 
+/// Every slash command this bot registers, guild-scoped in `ready`.
+fn commands() -> Vec<CreateCommand> {
+    use CommandOptionType::{Integer, Number, String as Str};
+
+    vec![
+        CreateCommand::new("join").description("move the bot into your voice channel"),
+        CreateCommand::new("leave").description("destroy the player and leave"),
+        CreateCommand::new("play").description("load and play a track").add_option(
+            CreateCommandOption::new(Str, "query", "url, ytsearch:…, scsearch:…, or a local path")
+                .required(true),
+        ),
+        CreateCommand::new("search").description("load without playing").add_option(
+            CreateCommandOption::new(Str, "query", "same syntax as /play").required(true),
+        ),
+        CreateCommand::new("stop").description("stop the current track"),
+        CreateCommand::new("pause").description("pause playback"),
+        CreateCommand::new("resume").description("resume playback"),
+        CreateCommand::new("seek").description("seek to a position").add_option(
+            CreateCommandOption::new(Number, "seconds", "position in seconds").required(true),
+        ),
+        CreateCommand::new("volume").description("set player volume").add_option(
+            CreateCommandOption::new(Integer, "amount", "0-1000")
+                .required(true)
+                .min_int_value(0)
+                .max_int_value(1000),
+        ),
+        CreateCommand::new("np").description("now playing"),
+        CreateCommand::new("players").description("node-wide player list"),
+        CreateCommand::new("eq")
+            .description("set an equalizer band")
+            .add_option(
+                CreateCommandOption::new(Integer, "band", "0-14")
+                    .required(true)
+                    .min_int_value(0)
+                    .max_int_value(14),
+            )
+            .add_option(CreateCommandOption::new(Number, "gain", "-0.25 to 1.0").required(true)),
+        CreateCommand::new("lowpass").description("set the low-pass filter").add_option(
+            CreateCommandOption::new(Number, "smoothing", "smoothing factor").required(true),
+        ),
+        CreateCommand::new("clearfilters").description("clear all filters"),
+        CreateCommand::new("filters").description("show the current filter chain"),
+        CreateCommand::new("ping").description("gateway latency"),
+        CreateCommand::new("info").description("node version and capabilities"),
+        CreateCommand::new("stats").description("node-wide stats"),
+    ]
+}
+
+fn opt_str<'a>(options: &[ResolvedOption<'a>], name: &str) -> Option<&'a str> {
+    options.iter().find(|o| o.name == name).and_then(|o| match o.value {
+        ResolvedValue::String(s) => Some(s),
+        _ => None,
+    })
+}
+
+fn opt_i64(options: &[ResolvedOption<'_>], name: &str) -> Option<i64> {
+    options.iter().find(|o| o.name == name).and_then(|o| match o.value {
+        ResolvedValue::Integer(v) => Some(v),
+        _ => None,
+    })
+}
+
+fn opt_f64(options: &[ResolvedOption<'_>], name: &str) -> Option<f64> {
+    options.iter().find(|o| o.name == name).and_then(|o| match o.value {
+        ResolvedValue::Number(v) => Some(v),
+        _ => None,
+    })
+}
+
 fn describe(track: &Track) -> String {
     format!(
         "**{}** — {} `[{}] {}ms`",
         track.info.title, track.info.author, track.info.source_name, track.info.length
     )
+}
+
+fn summarize<'a>(tracks: impl Iterator<Item = &'a Track>) -> String {
+    tracks.take(5).map(describe).collect::<Vec<_>>().join("\n")
 }
 
 fn pretty(filters: &Filters) -> String {
@@ -429,13 +487,6 @@ fn pretty(filters: &Filters) -> String {
 fn bad(message: impl Into<String>) -> NodeError {
     NodeError::Usage(message.into())
 }
-
-const HELP: &str = "\
-`!join` / `!leave` — move the bot, and hand the credentials to the node
-`!play <url|ytsearch:…|scsearch:…>` · `!search <…>` — load and play
-`!stop` · `!pause` · `!resume` · `!seek <s>` · `!volume <0-1000>` · `!np`
-`!eq <band 0-14> <gain>` · `!lowpass <smoothing>` · `!clearfilters` · `!filters`
-`!ping` · `!info` · `!stats` · `!players`";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -453,6 +504,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let token = std::env::var("DISCORD_TOKEN")
         .map_err(|_| "DISCORD_TOKEN is not set — see crates/test-bot/README.md")?;
+    let guild = std::env::var("TEST_GUILD_ID")
+        .map_err(|_| "TEST_GUILD_ID is not set — see crates/test-bot/README.md")?
+        .parse::<u64>()
+        .map_err(|_| "TEST_GUILD_ID must be a guild id (a number)")?;
     let host = std::env::var("LAVALINK_HOST").unwrap_or_else(|_| "localhost:2333".into());
     let password = std::env::var("LAVALINK_PASSWORD").unwrap_or_else(|_| "youshallnotpass".into());
 
@@ -463,18 +518,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handler = Handler {
         node: Node::new(&host, &password),
         songbird: Arc::clone(&songbird),
+        guild: GuildId::new(guild),
         filters: Mutex::new(HashMap::new()),
         shard_manager: Arc::clone(&shard_manager_slot),
         ws_started: OnceLock::new(),
     };
 
     // `GUILD_VOICE_STATES` is what makes the caller's current voice channel
-    // knowable; `MESSAGE_CONTENT` is privileged and must be enabled on the
-    // application, or every command arrives as an empty string.
-    let intents = GatewayIntents::GUILDS
-        | GatewayIntents::GUILD_MESSAGES
-        | GatewayIntents::GUILD_VOICE_STATES
-        | GatewayIntents::MESSAGE_CONTENT;
+    // knowable. Slash commands need no message-content access, so unlike the old
+    // `!`-prefix commands, nothing here requires the privileged `MESSAGE_CONTENT`
+    // intent.
+    let intents = GatewayIntents::GUILDS | GatewayIntents::GUILD_VOICE_STATES;
 
     let mut client = Client::builder(&token, intents)
         .event_handler(handler)

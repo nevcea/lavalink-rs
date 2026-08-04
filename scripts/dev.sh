@@ -7,6 +7,7 @@ cd "$(dirname "$0")/.."
 [ -f .env ] && set -a && source .env && set +a
 
 : "${DISCORD_TOKEN:?DISCORD_TOKEN is not set (export it or put it in .env) — see crates/test-bot/README.md}"
+: "${TEST_GUILD_ID:?TEST_GUILD_ID is not set (export it or put it in .env) — see crates/test-bot/README.md}"
 : "${LAVALINK_HOST:=localhost:2333}"
 host="${LAVALINK_HOST%%:*}"
 port="${LAVALINK_HOST##*:}"

@@ -36,22 +36,26 @@ once. Otherwise, to run each half by hand:
    Enable whichever sources you plan to test — `local: true` for a file on disk,
    `youtube: true` (needs `yt-dlp` on `PATH`) for a URL.
 
-2. Create an application at <https://discord.com/developers/applications>, add a bot,
-   and **enable the Message Content intent** under Bot → Privileged Gateway Intents.
-   Without it every command arrives as an empty string and nothing responds.
+2. Create an application at <https://discord.com/developers/applications> and add a
+   bot. No privileged intents are needed — commands are slash commands, not text, so
+   the bot never reads message content.
 
-3. Invite it with the `bot` scope and the *Send Messages*, *Connect* and *Speak*
-   permissions.
+3. Invite it with the `bot` and `applications.commands` scopes and the *Connect* and
+   *Speak* permissions.
 
 4. Run the bot:
 
    ```sh
-   DISCORD_TOKEN=… cargo run -p lavalink-test-bot
+   DISCORD_TOKEN=… TEST_GUILD_ID=… cargo run -p lavalink-test-bot
    ```
 
-   or put `DISCORD_TOKEN=…` in a `.env` file in the repo root (or wherever you run
-   the command from) and just `cargo run -p lavalink-test-bot` — it loads `.env`
-   itself now, no export needed.
+   or put both in a `.env` file in the repo root (or wherever you run the command
+   from) and just `cargo run -p lavalink-test-bot` — it loads `.env` itself now, no
+   export needed.
+
+   `TEST_GUILD_ID` is the id of the server you invited the bot to — commands are
+   registered guild-scoped there, so they show up immediately (a global registration
+   can take up to an hour to propagate, unusable for iterating during development).
 
    `LAVALINK_HOST` (default `localhost:2333`) and `LAVALINK_PASSWORD` (default
    `youshallnotpass`) override the node it points at; both can live in `.env` too.
@@ -60,15 +64,15 @@ once. Otherwise, to run each half by hand:
 
 | | |
 |---|---|
-| `!join` / `!leave` | move the bot; hand the credentials to the node |
-| `!play <url \| ytsearch:… \| scsearch:… \| /path>` | load and play |
-| `!search <…>` | load without playing — checks a source without a voice channel |
-| `!stop` `!pause` `!resume` `!seek <s>` `!volume <0-1000>` | player control |
-| `!np` | this guild's player |
-| `!players` | every player on the node |
-| `!eq <band 0-14> <gain>` `!lowpass <smoothing>` `!clearfilters` `!filters` | the DSP chain |
-| `!ping` | gateway (Discord) latency, from serenity's shard heartbeat |
-| `!info` `!stats` | node identity and counters |
+| `/join` / `/leave` | move the bot; hand the credentials to the node |
+| `/play <query>` | load and play — a url, `ytsearch:…`, `scsearch:…`, or a local path |
+| `/search <query>` | load without playing — checks a source without a voice channel |
+| `/stop` `/pause` `/resume` `/seek <seconds>` `/volume <0-1000>` | player control |
+| `/np` | this guild's player |
+| `/players` | every player on the node |
+| `/eq <band 0-14> <gain>` `/lowpass <smoothing>` `/clearfilters` `/filters` | the DSP chain |
+| `/ping` | gateway (Discord) latency, from serenity's shard heartbeat |
+| `/info` `/stats` | node identity and counters |
 
 Filters are cumulative: the bot remembers the chain per guild and re-sends all of it,
 because a `PATCH` carrying one filter replaces the whole chain on the wire.
@@ -78,10 +82,10 @@ because a `PATCH` carrying one filter replaces the whole chain on the wire.
 The bot logs every node websocket message. That console is the point — it is where
 the event sequence becomes checkable:
 
-- `!join` → `playerUpdate` with `connected=true` and a real `ping`
-- `!play` → `TrackStartEvent`, then `playerUpdate` with a rising `position`
-- `!play` again → `TrackEndEvent reason=Replaced` before the next `TrackStartEvent`
-- `!stop` → `TrackEndEvent reason=Stopped`
+- `/join` → `playerUpdate` with `connected=true` and a real `ping`
+- `/play` → `TrackStartEvent`, then `playerUpdate` with a rising `position`
+- `/play` again → `TrackEndEvent reason=Replaced` before the next `TrackStartEvent`
+- `/stop` → `TrackEndEvent reason=Stopped`
 - a track running out → `TrackEndEvent reason=Finished`, `may_start_next=true`
 - kicking the bot from the channel → `WebSocketClosedEvent` with code `4014`
 

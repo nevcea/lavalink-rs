@@ -20,7 +20,7 @@ pub enum NodeError {
     /// because the body is the node's own error DTO and worth showing verbatim.
     #[error("node returned {status}: {body}")]
     Status { status: StatusCode, body: String },
-    /// `!join` has not run yet, so there is no session to address a player to.
+    /// `/join` has not run yet, so there is no session to address a player to.
     #[error("no session yet — the node websocket has not sent `ready`")]
     NoSession,
     /// The command was wrong, not the node. Carried here so the dispatch table has
