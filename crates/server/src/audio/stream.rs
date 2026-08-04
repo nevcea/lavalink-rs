@@ -283,6 +283,18 @@ impl ReaderChannel {
         if self.leftover_pos >= self.leftover.len() {
             match self.chunks.recv_timeout(timeout) {
                 Ok(Ok(data)) => {
+                    // `spawn` sends an empty chunk to mark the end of the response
+                    // before it exits. That is not a throughput sample and must
+                    // not be charged as one: `recv_timeout` is paced by playback
+                    // (the pump runs at most `frameBufferDurationMs` ahead), so on
+                    // any stream whose `READ_CHUNK_BYTES` chunk lasts longer than
+                    // `timeout` — under roughly 87 kbps — every chunk resets the
+                    // window, leaving `window_bytes` at 0 when the marker lands one
+                    // gap later. Counting it turned a clean end-of-stream into a
+                    // stall on every such track: on a non-seekable source that
+                    // reaches `decode_loop` as `PumpOutcome::Failed`, so the client
+                    // sees a playback exception where the track simply finished.
+                    let end_of_stream = data.is_empty();
                     self.window_bytes += data.len();
                     self.leftover = data;
                     self.leftover_pos = 0;
@@ -292,7 +304,7 @@ impl ReaderChannel {
                     // source that goes quiet between chunks (a paused player never
                     // calls `read` at all) is never charged for time nobody asked
                     // it to spend.
-                    if self.window_start.elapsed() >= timeout {
+                    if !end_of_stream && self.window_start.elapsed() >= timeout {
                         if self.window_bytes < MIN_WINDOW_BYTES {
                             return Err(io::Error::new(
                                 io::ErrorKind::TimedOut,
@@ -1070,6 +1082,68 @@ mod tests {
             saw_error,
             "a trickle below the throughput floor must eventually fail the read"
         );
+    }
+
+    /// The bug: the end-of-stream marker (an empty chunk) was charged against the
+    /// throughput floor like any other chunk. `recv_timeout` is paced by playback,
+    /// so on a stream whose chunk lasts longer than the timeout every chunk resets
+    /// the window and the marker arrives one gap later against a `window_bytes` of
+    /// 0 — failing the floor. A 64 kbps mp3 over `READ_CHUNK_BYTES` does exactly
+    /// that, deterministically, on every track: not seekable, so the error
+    /// surfaces straight to `decode_loop` and a finished track is reported to the
+    /// client as a playback exception instead.
+    ///
+    /// The pacing has to be on the *consumer*, which is where it is in production:
+    /// the server hands over both chunks at once, and the reads are spread out the
+    /// way the pump's are by a full ring. With a 300ms window and ~420ms spent
+    /// draining each 300-byte chunk, the second chunk resets the window and the
+    /// marker then arrives a full window later against a `window_bytes` of 0.
+    #[test]
+    fn a_clean_end_of_stream_is_not_charged_against_the_throughput_floor() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            consume_request(&stream);
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 600\r\n\r\n").unwrap();
+            // Two writes rather than one, so the reader thread produces two
+            // chunks and the first window actually gets to reset.
+            for _ in 0..2 {
+                if stream.write_all(&[b'x'; 300]).is_err() {
+                    return;
+                }
+                stream.flush().ok();
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        let mut source = HttpMediaSource::open_with_timeouts(
+            &format!("http://{addr}"),
+            None,
+            None,
+            CONNECT_TIMEOUT,
+            Duration::from_millis(300),
+            MAX_REQUEST_DURATION,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert!(!source.is_seekable());
+
+        let mut buffer = [0u8; 50];
+        let mut read_total = 0usize;
+        loop {
+            match source.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => read_total += read,
+                Err(error) => panic!(
+                    "a stream that ended cleanly must report EOF, not {:?}: {error}",
+                    error.kind()
+                ),
+            }
+            std::thread::sleep(Duration::from_millis(70));
+        }
+        assert_eq!(read_total, 600);
     }
 
     /// A source without range support cannot safely resume — reconnecting would
