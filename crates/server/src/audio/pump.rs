@@ -503,6 +503,7 @@ impl State {
 
         self.decoder.reset();
         self.resampler.reset();
+        self.filters.reset();
         succeeded
     }
 

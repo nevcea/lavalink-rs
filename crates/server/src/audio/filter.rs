@@ -148,6 +148,17 @@ trait AudioFilter: std::fmt::Debug {
     fn is_enabled(&self) -> bool;
 
     fn process(&mut self, channels: &mut [Vec<f32>]);
+
+    /// Called after a seek lands, mirroring lavaplayer's `AudioFilter.seekPerformed`
+    /// — the original does not rebuild its filter chain on seek either, it notifies
+    /// each filter so it can discard whatever internal state assumed continuous
+    /// playback. A no-op default: most filters here (the biquads, the LFOs) carry
+    /// at most a sample or two of history, cheap enough to leave stale across a
+    /// seek exactly like the original does. [`TimescaleFilter`] is the one
+    /// override, because its internal buffering is `output_latency` deep (tens of
+    /// milliseconds), not one sample — left stale, a seek would audibly blend
+    /// pre-seek audio into the first stretch of post-seek playback.
+    fn reset(&mut self) {}
 }
 
 /// The chain built from a `Filters` request.
@@ -216,6 +227,13 @@ impl FilterChain {
             if stage.is_enabled() {
                 stage.process(channels);
             }
+        }
+    }
+
+    /// Forwards a landed seek to every stage — see [`AudioFilter::reset`].
+    pub fn reset(&mut self) {
+        for stage in &mut self.stages {
+            stage.reset();
         }
     }
 }
@@ -616,6 +634,16 @@ impl AudioFilter for TimescaleFilter {
                 channel.push(self.interleaved_out[frame * channel_count + channel_index]);
             }
         }
+    }
+
+    /// `Stretch` buffers `output_latency` frames (tens of milliseconds) of
+    /// overlap-add state internally, unlike the single-sample IIR history the
+    /// other filters carry — left alone across a seek, that state would blend
+    /// pre-seek audio into the first stretch of post-seek playback. Matches
+    /// lavaplayer's own `AudioFilter.seekPerformed` — the original does not
+    /// rebuild its filter chain on seek either, it notifies each filter.
+    fn reset(&mut self) {
+        self.stretch.reset();
     }
 }
 
@@ -1550,5 +1578,24 @@ mod tests {
             assert!(channels[0].len() <= 960 * 1000, "runaway output buffer for {json}");
             assert_eq!(channels[0].len(), channels[1].len());
         }
+    }
+
+    /// Mirrors lavaplayer's per-filter `seekPerformed`, not a chain rebuild —
+    /// `FilterChain::reset` must reach every stage (`TimescaleFilter`'s internal
+    /// `Stretch` buffering included) without panicking, and the chain must keep
+    /// producing sane output afterward. What lands in `pump::State::seek`.
+    #[test]
+    fn reset_reaches_every_stage_and_leaves_the_chain_usable() {
+        let mut chain =
+            FilterChain::new(&filters(r#"{"timescale":{"speed":2.0},"volume":1.5}"#), 2);
+        let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+        chain.process(&mut channels);
+
+        chain.reset();
+
+        let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+        chain.process(&mut channels);
+        assert!(!channels[0].is_empty());
+        assert_eq!(channels[0].len(), channels[1].len());
     }
 }
