@@ -166,12 +166,9 @@ pub async fn patch_player(
         // stale one) IDENTIFY'd to Discord for the guild while a *different*,
         // freshly-registered connection is also live for it, racing or knocking
         // out the new player's real connection before this one is finally dropped.
-        match session.voice(guild_id) {
-            Some(current) if std::sync::Arc::ptr_eq(&current, &connection) => {}
-            _ => {
-                connection.leave().await;
-                return Err(player_gone());
-            }
+        if !is_current_connection(&session, guild_id, &connection) {
+            connection.leave().await;
+            return Err(player_gone());
         }
     }
 
@@ -192,6 +189,18 @@ pub async fn patch_player(
         .await
         .map(Json)
         .map_err(|_| player_gone())
+}
+
+/// Whether `connection` is still the one registered for `guild_id` — pulled
+/// out of `patch_player`'s post-connect re-check so the race it guards
+/// against (see the comment at its call site) is directly testable without a
+/// live voice connection or HTTP round trip.
+fn is_current_connection(
+    session: &crate::session::Session,
+    guild_id: u64,
+    connection: &std::sync::Arc<crate::voice::VoiceConnection>,
+) -> bool {
+    matches!(session.voice(guild_id), Some(current) if std::sync::Arc::ptr_eq(&current, connection))
 }
 
 fn player_gone() -> ApiError {
@@ -390,5 +399,50 @@ mod tests {
         assert!(!PatchQuery::default().no_replace);
         let explicit: PatchQuery = serde_json::from_str(r#"{"noReplace":true}"#).unwrap();
         assert!(explicit.no_replace);
+    }
+
+    fn dummy_pair(
+        guild_id: u64,
+    ) -> (crate::player::PlayerHandle, std::sync::Arc<crate::voice::VoiceConnection>) {
+        let voice_updates: crate::player::VoiceUpdateSlot = std::sync::Arc::new(std::sync::OnceLock::new());
+        let voice = std::sync::Arc::new(crate::voice::VoiceConnection::new(
+            guild_id,
+            1,
+            std::sync::Arc::clone(&voice_updates),
+        ));
+        let (actor, handle) = crate::player::PlayerActor::new(
+            guild_id,
+            Box::new(crate::audio::testing::RecordingEngine::new()),
+            std::sync::Arc::new(crate::sink::Sink::new()),
+            std::time::Duration::from_secs(10),
+            voice_updates,
+        );
+        tokio::spawn(actor.run());
+        (handle, voice)
+    }
+
+    /// `patch_player`'s post-connect re-check exists for exactly this: a `DELETE`
+    /// racing a slow `PATCH` builds a fresh player (and voice connection) for the
+    /// guild before the slow `PATCH`'s own `connect().await` returns. Presence
+    /// alone (`session.player(guild_id).is_some()`) can't tell "still ours" apart
+    /// from "replaced", which is why the check compares by pointer instead — this
+    /// exercises `is_current_connection` the same way `patch_player` does, without
+    /// a live voice connection or HTTP round trip.
+    #[tokio::test]
+    async fn is_current_connection_rejects_a_connection_replaced_by_a_racing_delete() {
+        let session = crate::session::SessionRegistry::new().open(1, None);
+        let guild_id = 9;
+
+        let (_handle, stale) = session.get_or_create_player(guild_id, || dummy_pair(guild_id)).unwrap();
+        assert!(is_current_connection(&session, guild_id, &stale));
+
+        session.remove_player(guild_id);
+        let (_handle, fresh) = session.get_or_create_player(guild_id, || dummy_pair(guild_id)).unwrap();
+
+        assert!(
+            !is_current_connection(&session, guild_id, &stale),
+            "the stale connection must no longer read as current"
+        );
+        assert!(is_current_connection(&session, guild_id, &fresh));
     }
 }
