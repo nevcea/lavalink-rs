@@ -87,7 +87,7 @@ Every commit follows [Conventional Commits v1.0.0](https://www.conventionalcommi
 
 ```sh
 cargo build --workspace
-cargo test --workspace                       # all unit tests (378 across the tree)
+cargo test --workspace                       # all unit tests (385 across the tree)
 cargo test -p lavalink-server config::        # one module, e.g. config tests
 cargo test -p lavalink-server some_test_name  # one test by name substring
 cargo bench -p lavalink-server --bench filter # also: resample, pipeline
