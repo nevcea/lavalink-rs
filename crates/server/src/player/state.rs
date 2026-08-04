@@ -59,6 +59,15 @@ pub struct PlayerModel {
     pub guild_id: u64,
     pub playback: Playback,
     pub track: Option<Track>,
+    /// What `PATCH`'s `paused` field last requested, tracked independently of
+    /// `playback`/`track` — the original's `AudioPlayer.paused` is its own flag,
+    /// not derived from whether a track happens to be loaded, so `PATCH
+    /// {"paused": true}` against an empty player still reports back `"paused":
+    /// true` there. `playback` alone cannot represent that: a trackless player
+    /// can never be `Playback::Paused`, since `Playback` also drives
+    /// `is_playing()`/stuck-detection, which really do depend on a track
+    /// actually running.
+    paused: bool,
     /// 0..=1000, as the original's `AudioPlayer.volume`.
     pub volume: i32,
     pub filters: Filters,
@@ -79,6 +88,7 @@ impl PlayerModel {
             guild_id,
             playback: Playback::Idle,
             track: None,
+            paused: false,
             volume: 100,
             filters: Filters::default(),
             end_time_ms: None,
@@ -99,6 +109,7 @@ impl PlayerModel {
     /// decision inside the model.
     pub fn play(&mut self, track: Track, paused: bool, now: Instant) {
         self.track = Some(track);
+        self.paused = paused;
         self.playback = if paused {
             Playback::Paused
         } else {
@@ -127,9 +138,12 @@ impl PlayerModel {
         track
     }
 
-    /// Applies `paused`. A no-op unless a track is loaded, matching the original,
-    /// where pausing an empty player sets a flag nothing reads.
+    /// Applies `paused`. The flag itself is recorded unconditionally — the
+    /// original's `AudioPlayer.setPaused` is not gated on a track being
+    /// loaded — but `playback` only transitions while a track is actually
+    /// running, since that is what `is_playing()`/stuck-detection depend on.
     pub fn set_paused(&mut self, paused: bool, now: Instant) {
+        self.paused = paused;
         match (self.playback, paused) {
             (Playback::Playing, true) => self.playback = Playback::Paused,
             (Playback::Paused, false) => {
@@ -161,7 +175,7 @@ impl PlayerModel {
                 track
             }),
             volume: self.volume,
-            paused: matches!(self.playback, Playback::Paused),
+            paused: self.paused,
             state: self.wire_state(position_ms, now_epoch_ms),
             voice: self.voice.clone(),
             filters: self.filters.clone(),
@@ -221,11 +235,39 @@ mod tests {
         assert!(model.track.is_none());
     }
 
+    /// `playback` cannot represent "paused" without a track — it stays `Idle`,
+    /// since `is_playing()`/stuck-detection genuinely depend on a track
+    /// running — but the wire `paused` field must still report back what was
+    /// requested, matching the original's `AudioPlayer.paused`, which is not
+    /// gated on a loaded track. This used to report `false` here (derived
+    /// purely from `playback == Paused`, which an empty player can never be),
+    /// diverging from the original for a `PATCH {"paused": true}` sent before
+    /// any track was ever played.
     #[test]
-    fn pausing_an_empty_player_changes_nothing() {
+    fn pausing_an_empty_player_still_reports_paused_on_the_wire() {
         let mut model = model();
         model.set_paused(true, Instant::now());
         assert_eq!(model.playback, Playback::Idle);
+        assert!(model.snapshot(0, 1).paused);
+
+        model.set_paused(false, Instant::now());
+        assert!(!model.snapshot(0, 1).paused);
+    }
+
+    /// The flag survives a track ending: the original's `AudioPlayer.paused`
+    /// is an independent switch, not reset by `onTrackEnd`, so a player
+    /// paused mid-track and then stopped stays reported as paused until a
+    /// client explicitly unpauses it.
+    #[test]
+    fn stopping_a_paused_player_does_not_clear_the_flag() {
+        let mut model = model();
+        model.play(track("title"), false, Instant::now());
+        model.set_paused(true, Instant::now());
+
+        model.stop();
+
+        assert_eq!(model.playback, Playback::Stopped);
+        assert!(model.snapshot(0, 1).paused);
     }
 
     #[test]
