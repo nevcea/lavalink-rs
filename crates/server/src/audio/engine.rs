@@ -297,16 +297,22 @@ impl Engine for PipelineEngine {
 
                 // A panic in one pump is contained here. It cannot be recovered
                 // from, but it must not reach another player, and it should end the
-                // track with a defined event rather than silence. That last part is
-                // not guaranteed by this alone: the try_send below is best-effort
-                // (a full command queue drops the event silently), and unlike a
-                // normal Finished/Failed return this path never calls
-                // writer.finish() on the ring it is abandoning, so the reader keeps
-                // handing the mixer silence and advancing position forever if the
-                // event above is what gets lost.
+                // track with a defined event rather than silence. Cloned before the
+                // move below so this survives the unwind: `writer` itself is
+                // consumed by `pump::run` and gone once it panics, but `RingWriter`
+                // is just a handle onto the same `Arc<Shared>`, so this clone can
+                // still call `finish()` afterwards regardless of whether the event
+                // below actually reaches the actor (a full command queue drops it
+                // silently) — otherwise the reader has no other way to learn the
+                // track is over and hands the mixer silence forever.
+                let writer_after_panic = writer.clone();
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     pump::run(config, writer, pump_commands, position_ms, &on_progress)
                 }));
+
+                if outcome.is_err() {
+                    writer_after_panic.finish();
+                }
 
                 let outcome = outcome.unwrap_or_else(|_| super::PumpOutcome::Failed {
                     exception: Exception::fault("The audio pipeline panicked", "pump panic"),
@@ -484,6 +490,33 @@ mod tests {
         produced.store(true, Ordering::Relaxed);
         let outcome = recover_from_panic(&produced, || panic!("simulated mid-track panic"));
         assert!(matches!(outcome, crate::audio::PumpOutcome::Failed { started: true, .. }));
+    }
+
+    /// The bug this guards: the panic-recovery arm used to leave the ring open
+    /// with neither `finish()` nor the terminal event delivered (simulated here
+    /// by never sending one), so the reader would starve forever instead of
+    /// ever reaching EOF. A clone of the writer taken before the panicking call
+    /// must still be able to close it out afterwards.
+    #[test]
+    fn a_panicked_pump_still_finishes_the_ring_it_abandoned() {
+        use std::io::Read as _;
+
+        let (writer, mut reader) = ring::channel(
+            20,
+            Arc::new(AtomicI64::new(0)),
+            Arc::new(ring::FrameCounters::default()),
+        );
+        let writer_after_panic = writer.clone();
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(writer);
+            panic!("simulated mid-track panic");
+        }));
+        assert!(outcome.is_err());
+        writer_after_panic.finish();
+
+        let mut out = [0u8; 4];
+        assert_eq!(reader.read(&mut out).unwrap(), 0);
     }
 
     /// The exact recovery shape play's spawned closure uses around pump::run.

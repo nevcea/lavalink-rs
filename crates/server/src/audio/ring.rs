@@ -184,7 +184,7 @@ pub fn channel(
 }
 
 /// The pump's end.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RingWriter {
     shared: Arc<Shared>,
 }
