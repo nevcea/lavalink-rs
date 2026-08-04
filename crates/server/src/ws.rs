@@ -149,6 +149,14 @@ async fn run(
 async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bool {
     let (mut writer, mut reader) = socket.split();
     let mut shutdown = state.shutdown.clone();
+    // A session resumed with a backlog already over OVERFLOW_THRESHOLD (built up
+    // while nobody was connected to read it — resume only reclaims it at the
+    // sink's own, much higher ESSENTIAL_CAPACITY) must get a chance to drain that
+    // backlog rather than being 1008-closed on its very first loop iteration for
+    // a client that hasn't had any opportunity to prove it isn't draining.
+    // Enforcement only arms once the backlog has been observed under threshold at
+    // least once since this connection began.
+    let mut overflow_armed = session.sink.pending_essentials() < OVERFLOW_THRESHOLD;
 
     loop {
         tokio::select! {
@@ -221,10 +229,7 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
             }
         }
 
-        // Essentials backing up means the client is not reading. Closing is the
-        // honest outcome — the alternative is dropping events, which leaves the
-        // client's view of its queue permanently wrong.
-        if session.sink.pending_essentials() >= OVERFLOW_THRESHOLD {
+        if overflow_closes(&mut overflow_armed, session.sink.pending_essentials()) {
             tracing::warn!(
                 session = %session.id,
                 "client is not draining events; closing the session"
@@ -243,6 +248,27 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
     }
 
     false
+}
+
+/// Whether a session that now has `pending` essential messages queued should be
+/// closed as a policy violation, given whether enforcement is currently `armed`
+/// (mutated in place).
+///
+/// Essentials backing up ordinarily means a connected client is not reading. But
+/// a session resumed after a long detach can start already over
+/// [`OVERFLOW_THRESHOLD`] on a backlog that piled up while nobody was connected
+/// to drain it — punishing that on the very first check would close a client
+/// that never had a chance to prove it isn't draining. So enforcement starts
+/// disarmed whenever the backlog is already over threshold, and arms itself the
+/// first time it is observed under threshold; only a backlog that regrows past
+/// threshold after that is a client that truly isn't keeping up.
+fn overflow_closes(armed: &mut bool, pending: usize) -> bool {
+    if pending >= OVERFLOW_THRESHOLD {
+        *armed
+    } else {
+        *armed = true;
+        false
+    }
 }
 
 #[cfg(test)]
@@ -287,5 +313,47 @@ mod tests {
         let headers = headers(&[("User-Id", "1"), ("Client-Name", "Wavelink/3.0")]);
         assert_eq!(parse_user_id(&headers).unwrap(), 1);
         assert_eq!(header(&headers, "client-name").as_deref(), Some("Wavelink/3.0"));
+    }
+
+    // -- overflow_closes ----------------------------------------------------------
+
+    #[test]
+    fn an_armed_session_over_threshold_closes() {
+        let mut armed = true;
+        assert!(overflow_closes(&mut armed, OVERFLOW_THRESHOLD));
+    }
+
+    #[test]
+    fn a_connected_session_under_threshold_never_closes_and_stays_armed() {
+        let mut armed = true;
+        assert!(!overflow_closes(&mut armed, OVERFLOW_THRESHOLD - 1));
+        assert!(armed);
+    }
+
+    /// The bug this guards: a session resumed with a pre-existing backlog above
+    /// threshold (built up while nobody was connected to drain it) must not be
+    /// closed on the very first check — it never had a chance to prove it isn't
+    /// draining live traffic.
+    #[test]
+    fn a_resumed_backlog_already_over_threshold_is_not_immediately_closed() {
+        let mut armed = false; // what pump() computes when resuming over threshold
+        assert!(!overflow_closes(&mut armed, OVERFLOW_THRESHOLD + 500));
+        assert!(!armed, "still disarmed until the backlog is seen under threshold");
+    }
+
+    /// Once the backlog has drained under threshold at least once, enforcement is
+    /// live: a client that lets it regrow past threshold after that really is
+    /// failing to keep up.
+    #[test]
+    fn enforcement_arms_after_the_backlog_drains_and_then_catches_regrowth() {
+        let mut armed = false;
+        assert!(!overflow_closes(&mut armed, OVERFLOW_THRESHOLD + 500));
+
+        // The backlog drains below threshold: this is what arms enforcement.
+        assert!(!overflow_closes(&mut armed, OVERFLOW_THRESHOLD - 1));
+        assert!(armed);
+
+        // It grows back past threshold: now it closes.
+        assert!(overflow_closes(&mut armed, OVERFLOW_THRESHOLD));
     }
 }
