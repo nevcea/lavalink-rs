@@ -42,7 +42,7 @@ use symphonia::core::units::Time;
 use super::filter::{player_volume_multiplier, FilterChain};
 use super::resample::Resampler;
 use super::ring::{RingWriter, CHANNELS};
-use super::stream::StreamOpener;
+use super::stream::{self, StreamOpener};
 use super::PumpOutcome;
 use crate::config::ResamplingQuality;
 
@@ -330,9 +330,11 @@ impl State {
                 // was waiting (see `stream.rs`'s `interrupt` field) — not a real
                 // failure, just a cue to go check that command right now instead
                 // of burning the rest of the reconnect budget on it first.
-                Err(SymphoniaError::IoError(error))
-                    if error.kind() == std::io::ErrorKind::Interrupted =>
-                {
+                //
+                // Matched on the payload type rather than on `ErrorKind`, because
+                // the kind that says this best is the one kind symphonia retries
+                // instead of propagating — see [`stream::CommandPending`].
+                Err(SymphoniaError::IoError(error)) if stream::is_command_pending(&error) => {
                     continue;
                 }
                 Err(error) => {
@@ -1002,9 +1004,12 @@ mod tests {
         ) -> symphonia::core::errors::Result<Option<symphonia::core::packet::Packet>> {
             if !self.fired {
                 self.fired = true;
-                return Err(SymphoniaError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "a pump command is pending",
+                // The same marker a stalled `HttpMediaSource` produces. Not
+                // `ErrorKind::Interrupted`: that is what this used to be, and it
+                // is exactly why the mock passed while the real demuxer path did
+                // not — symphonia retries that kind rather than propagating it.
+                return Err(SymphoniaError::IoError(std::io::Error::other(
+                    stream::CommandPending,
                 )));
             }
             self.inner.next_packet()

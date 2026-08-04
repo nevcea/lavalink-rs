@@ -22,6 +22,47 @@ use super::source::{SourceError, YtDlp};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// What a stalled source returns instead of retrying, once the pump has a command
+/// waiting. Carried as an [`io::Error`] payload rather than as an [`io::ErrorKind`].
+///
+/// `ErrorKind::Interrupted` is the obvious spelling and is what this used to be —
+/// but it is the one kind symphonia deliberately retries rather than propagates.
+/// `MediaSourceStream::read_buf_exact` swallows it and calls `read` again, and that
+/// is the path a packet body takes (`read_mpeg_frame` reads the frame that way), so
+/// the error never escaped to `decode_loop` from a real demuxer at all — only from
+/// the mock `FormatReader` the pump's tests use.
+///
+/// The result was worse than having no interrupt at all: the flag is only cleared
+/// by `drain_commands`, which a pump parked inside `next_packet()` never reaches,
+/// and the check sits above the reconnect guard, so the source could not recover
+/// either. A silent connection plus a pending stop meant `read` returning this and
+/// symphonia retrying it every `read_timeout` until `MAX_REQUEST_DURATION` — six
+/// hours — with the pump thread, reader thread and socket pinned throughout.
+/// Without the flag the same source would have failed for good after
+/// `MAX_RECONNECT_ATTEMPTS`, and that error *does* propagate.
+///
+/// Every other kind propagates, so what identifies this is the payload type rather
+/// than the kind: a genuine `ErrorKind::Other` off the network must not be mistaken
+/// for a pending command and skipped.
+#[derive(Debug)]
+pub struct CommandPending;
+
+impl std::fmt::Display for CommandPending {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a pump command is pending")
+    }
+}
+
+impl std::error::Error for CommandPending {}
+
+/// Whether an I/O error is [`CommandPending`] — a cue for `decode_loop` to go drain
+/// its command queue, not a real read failure.
+pub fn is_command_pending(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<CommandPending>())
+}
+
 /// How long a single read may go without a byte before it is treated as stalled.
 ///
 /// Comfortably under `trackStuckThresholdMs`'s 10s default, so a stall is caught
@@ -534,10 +575,7 @@ impl Read for HttpMediaSource {
             // particular error kind as "go check the command queue", not a real
             // failure — see its `next_packet()` match arm.
             if self.interrupt.load(Ordering::Relaxed) {
-                return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "a pump command is pending",
-                ));
+                return Err(io::Error::other(CommandPending));
             }
 
             // Only a seekable source can be resumed — without Range support a
@@ -879,7 +917,17 @@ mod tests {
 
         let started = Instant::now();
         let error = source.read(&mut buffer).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(
+            is_command_pending(&error),
+            "expected the CommandPending marker, got {:?}: {error}",
+            error.kind()
+        );
+        assert_ne!(
+            error.kind(),
+            io::ErrorKind::Interrupted,
+            "symphonia's read_buf_exact swallows Interrupted and retries it forever, \
+             so this must never be reported with that kind"
+        );
         assert!(
             started.elapsed() < Duration::from_millis(500),
             "the interrupt must skip straight past the reconnect attempt \
@@ -891,6 +939,76 @@ mod tests {
         assert!(
             !reconnected.load(Ordering::Relaxed),
             "a pending command must prevent the reconnect from being attempted at all"
+        );
+    }
+
+    /// The bug: this used to be `ErrorKind::Interrupted`, which is the one kind
+    /// symphonia retries rather than propagates —
+    /// `MediaSourceStream::read_buf_exact` swallows it and calls `read` again, and
+    /// that is the path a packet body takes. So the interrupt never reached
+    /// `decode_loop` from a real demuxer at all, and since only `drain_commands`
+    /// clears the flag (which a pump inside `next_packet()` never reaches) and the
+    /// check sits above the reconnect guard, the source could not recover either:
+    /// a silent connection plus a pending stop retried until `MAX_REQUEST_DURATION`
+    /// — six hours — with the pump thread, reader thread and socket pinned.
+    ///
+    /// `pump.rs`'s own interrupt test cannot catch this: it uses a mock
+    /// `FormatReader`, so real symphonia is never in the path. This drives the real
+    /// thing, and asserts the error escapes on the *first* attempt rather than
+    /// being retried at all.
+    #[test]
+    fn a_pending_command_escapes_symphonias_retry_loop() {
+        use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions, ReadBytes};
+
+        struct Stalling(Arc<std::sync::atomic::AtomicUsize>);
+
+        impl Read for Stalling {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                if self.0.fetch_add(1, Ordering::Relaxed) >= 64 {
+                    // Breaks a regressed retry loop, so this fails rather than
+                    // hanging the suite.
+                    return Err(io::Error::other("retried well past the first attempt"));
+                }
+                Err(io::Error::other(CommandPending))
+            }
+        }
+
+        impl Seek for Stalling {
+            fn seek(&mut self, _from: SeekFrom) -> io::Result<u64> {
+                Ok(0)
+            }
+        }
+
+        impl MediaSource for Stalling {
+            fn is_seekable(&self) -> bool {
+                false
+            }
+
+            fn byte_len(&self) -> Option<u64> {
+                None
+            }
+        }
+
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut stream = MediaSourceStream::new(
+            Box::new(Stalling(Arc::clone(&reads))),
+            MediaSourceStreamOptions::default(),
+        );
+
+        // Fully qualified: `read_buf_exact` collides with a std method name that
+        // is still unstable, which `unstable_name_collisions` warns on.
+        let mut packet = [0u8; 256];
+        let error = ReadBytes::read_buf_exact(&mut stream, &mut packet).unwrap_err();
+
+        assert!(
+            is_command_pending(&error),
+            "expected the CommandPending marker, got {:?}: {error}",
+            error.kind()
+        );
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            1,
+            "symphonia must propagate this on the first read, not retry it"
         );
     }
 
