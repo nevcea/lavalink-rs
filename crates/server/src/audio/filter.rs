@@ -583,7 +583,14 @@ const MIN_SPEED_FACTOR: f32 = 1e-3;
 impl TimescaleFilter {
     fn new(config: Timescale, channels: usize) -> Self {
         let speed_factor = ((config.speed * config.rate) as f32).max(MIN_SPEED_FACTOR);
+        // `f32::max` only saves `speed_factor` from a non-finite value because
+        // `MIN_SPEED_FACTOR` is the other operand; `pitch_factor` has no such
+        // partner. `pitch`/`rate` are each individually in-range `f64`s, but their
+        // product can still overflow to infinity at multiplication time, and that
+        // would otherwise cross into `Stretch::set_transpose_factor`'s C++ FFI
+        // unchecked.
         let pitch_factor = (config.pitch * config.rate) as f32;
+        let pitch_factor = if pitch_factor.is_finite() { pitch_factor } else { 1.0 };
 
         let mut stretch =
             signalsmith_stretch::Stretch::preset_default(channels as u32, SAMPLE_RATE as u32);
@@ -1663,6 +1670,24 @@ mod tests {
             assert!(channels[0].len() <= 960 * 1000, "runaway output buffer for {json}");
             assert_eq!(channels[0].len(), channels[1].len());
         }
+    }
+
+    /// `pitch_factor` had no equivalent guard to `speed_factor`'s
+    /// `MIN_SPEED_FACTOR`. `pitch`/`rate` are each individually valid, in-range
+    /// `f64`s (`serde_json` itself already refuses a literal like `1e309`), but
+    /// their *product* can still overflow `f64` to infinity at multiplication
+    /// time, and that infinity reached `Stretch::set_transpose_factor`'s C++ FFI
+    /// unchecked. Constructing the filter (and processing through it) must not
+    /// panic or leave a non-finite factor in place of it.
+    #[test]
+    fn a_non_finite_pitch_does_not_reach_the_stretcher() {
+        let mut chain =
+            FilterChain::new(&filters(r#"{"timescale":{"rate":100.0,"pitch":1.7e308}}"#), 2);
+        let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+        chain.process(&mut channels);
+
+        assert!(channels[0].iter().all(|sample| sample.is_finite()));
+        assert_eq!(channels[0].len(), channels[1].len());
     }
 
     /// Mirrors lavaplayer's per-filter `seekPerformed`, not a chain rebuild —
