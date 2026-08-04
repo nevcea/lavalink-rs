@@ -583,14 +583,16 @@ const MIN_SPEED_FACTOR: f32 = 1e-3;
 impl TimescaleFilter {
     fn new(config: Timescale, channels: usize) -> Self {
         let speed_factor = ((config.speed * config.rate) as f32).max(MIN_SPEED_FACTOR);
-        // `f32::max` only saves `speed_factor` from a non-finite value because
-        // `MIN_SPEED_FACTOR` is the other operand; `pitch_factor` has no such
-        // partner. `pitch`/`rate` are each individually in-range `f64`s, but their
-        // product can still overflow to infinity at multiplication time, and that
-        // would otherwise cross into `Stretch::set_transpose_factor`'s C++ FFI
-        // unchecked.
+        // `pitch`/`rate` are each individually in-range `f64`s, but their product
+        // can still overflow to infinity at multiplication time (`f32::max` alone
+        // wouldn't save it: `.max` on a `+inf` operand returns `+inf`, not the
+        // floor), and that would otherwise cross into `Stretch::set_transpose_factor`'s
+        // C++ FFI unchecked. A non-finite product falls back to the neutral 1.0
+        // (no pitch shift); a finite but non-positive one is floored the same way
+        // `speed_factor` is, since a zero or negative frequency multiplier is as
+        // meaningless to the stretcher as a zero or negative speed is.
         let pitch_factor = (config.pitch * config.rate) as f32;
-        let pitch_factor = if pitch_factor.is_finite() { pitch_factor } else { 1.0 };
+        let pitch_factor = if pitch_factor.is_finite() { pitch_factor.max(MIN_SPEED_FACTOR) } else { 1.0 };
 
         let mut stretch =
             signalsmith_stretch::Stretch::preset_default(channels as u32, SAMPLE_RATE as u32);
@@ -1688,6 +1690,25 @@ mod tests {
 
         assert!(channels[0].iter().all(|sample| sample.is_finite()));
         assert_eq!(channels[0].len(), channels[1].len());
+    }
+
+    /// A finite but zero or negative `pitch_factor` is as meaningless to the
+    /// stretcher as `speed_factor`'s zero/negative case (see
+    /// `a_zero_or_negative_speed_does_not_blow_up_the_output_buffer` above), and
+    /// gets the same floor rather than being passed through unchecked.
+    #[test]
+    fn a_non_positive_pitch_is_floored_before_reaching_the_stretcher() {
+        for json in [
+            r#"{"timescale":{"rate":1.0,"pitch":0.0}}"#,
+            r#"{"timescale":{"rate":1.0,"pitch":-2.0}}"#,
+        ] {
+            let mut chain = FilterChain::new(&filters(json), 2);
+            let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+            chain.process(&mut channels);
+
+            assert!(channels[0].iter().all(|sample| sample.is_finite()), "for {json}");
+            assert_eq!(channels[0].len(), channels[1].len());
+        }
     }
 
     /// Mirrors lavaplayer's per-filter `seekPerformed`, not a chain rebuild —
