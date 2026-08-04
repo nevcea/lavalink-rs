@@ -199,16 +199,17 @@ pub async fn delete_player(
     let session = session(&state, &session_id)?;
     let guild_id = parse_guild_id(&guild_id)?;
 
-    // Looked up, not removed, until `destroy` actually succeeds: the actor holds a
-    // clone of its own command sender (via the engine's `EventSlot`), so
-    // `Command::Destroy` reaching `handle()` is the *only* way its task ever ends.
-    // Removing the map entry first and then finding out `destroy` failed (a full
-    // queue outliving `SEND_TIMEOUT`) would leave nothing anywhere pointing at that
-    // actor — its task, pump thread and voice connection would never be reclaimed.
-    if let Some(handle) = session.player(guild_id) {
-        if handle.destroy().await.is_ok() {
-            session.remove_player(guild_id);
-        }
+    // Removed whether or not the actor acknowledges, because dropping the last
+    // `PlayerHandle` is itself a teardown: the destroy channel is held only by the
+    // handle, so the actor's own `recv` reports every sender gone and it runs
+    // `engine.shutdown()` on its way out. Keeping the entry on a failed `destroy`
+    // used to be the careful choice — nothing else pointed at the actor, and the
+    // engine's clone of the *command* sender meant that queue could never report
+    // closed — but it wedged the guild instead: every later `PATCH` found the same
+    // unresponsive handle and answered 503 for good, while the client had been told
+    // 204 here.
+    if let Some(handle) = session.remove_player(guild_id) {
+        let _ = handle.destroy().await;
     }
 
     // Deleting a player that is not there succeeds; the original's `destroyPlayer`
