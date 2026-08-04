@@ -178,12 +178,24 @@ struct ActorNotifier {
 impl EventHandler for ActorNotifier {
     async fn act(&self, context: &EventContext<'_>) -> Option<Event> {
         let update = match context {
-            EventContext::DriverConnect(_) => Some(VoiceUpdate::Connected {
-                // songbird has no latency measurement at connect time. -1 is the
-                // original's "not measured" value, not 0, and clients display it.
-                ping_ms: -1,
-            }),
-            EventContext::DriverReconnect(_) => Some(VoiceUpdate::Reconnecting),
+            // songbird's own docs on `CoreEvent::DriverReconnect`: it "fires when
+            // this driver successfully reconnects after a network error" — both
+            // firing sites are the `Ok` arm of a connect attempt
+            // (`driver/tasks/mod.rs`'s `RetryConnect`/`FullReconnect` handling).
+            // It is a *success* event, not "reconnecting in progress", so it is
+            // reported the same way an initial connect is. Mapping it to
+            // `Reconnecting` left `connected` false (and `ping` stuck at -1) for
+            // the rest of the session after every network blip that recovered on
+            // its own, with no event left to correct it — songbird never fires
+            // `DriverConnect` again on the same session.
+            EventContext::DriverConnect(_) | EventContext::DriverReconnect(_) => {
+                Some(VoiceUpdate::Connected {
+                    // songbird has no latency measurement at connect time. -1 is
+                    // the original's "not measured" value, not 0, and clients
+                    // display it.
+                    ping_ms: -1,
+                })
+            }
             EventContext::DriverDisconnect(data) => Some(disconnect_update(data.reason)),
             _ => None,
         };
