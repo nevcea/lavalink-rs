@@ -106,6 +106,14 @@ fn is_current(active: &Mutex<Option<Active>>, generation: u64) -> bool {
         .is_some_and(|current| current.generation == generation)
 }
 
+/// Whether a `stop` whose `voice.stop()` has not run yet has already been
+/// superseded by a `play`. See [`Engine::stop`] for why that matters and why
+/// `active` being filled in is the signal: `play` clears and reinstalls it
+/// synchronously, before it spawns anything.
+fn superseded_by_a_replacement(active: &Mutex<Option<Active>>) -> bool {
+    lock(active).is_some()
+}
+
 impl PipelineEngine {
     pub fn new(
         guild_id: u64,
@@ -365,7 +373,34 @@ impl Engine for PipelineEngine {
         self.position_ms.store(0, Ordering::Relaxed);
 
         let voice = Arc::clone(&self.voice);
-        self.runtime.spawn(async move { voice.stop().await });
+        let active = Arc::clone(&self.active);
+        self.runtime.spawn(async move {
+            // Skipped once a `play` has already installed its replacement.
+            //
+            // Replacing a track is `stop` then `play` — `actor.rs`'s
+            // `stop_track(Replaced)` followed by `engine.play` — and each spawns a
+            // task contending for the same voice mutex with nothing ordering the
+            // two. songbird maps both onto one ordered channel
+            // (`SetTrack(None)` for `stop`, `SetTrack(Some(..))` for
+            // `play_only_input`), so whichever task takes the lock *last* decides
+            // what the mixer is left holding, and tokio's LIFO slot makes the
+            // later spawn run first — i.e. this task landing last is the common
+            // order, not the unlucky one. That order leaves the mixer with no
+            // track at all: the new pump fills a ring nobody reads, stops
+            // reporting progress, and the player answers `Playing` with a frozen
+            // position and no audio until `check_stuck` finally fires.
+            //
+            // `play` installs `active` synchronously before it spawns, and the
+            // actor issues both calls from one `handle()` that never awaits in
+            // between, so a superseded stop always observes `Some` here. Skipping
+            // is correct and not merely safe: `play_only_input` is itself a
+            // replace, and `stop_active` has already stopped the outgoing track's
+            // handle directly.
+            if superseded_by_a_replacement(&active) {
+                return;
+            }
+            voice.stop().await;
+        });
     }
 
     /// Pausing is the mixer's job.
@@ -441,6 +476,23 @@ mod tests {
     fn nothing_is_current_once_active_is_cleared() {
         let active: Mutex<Option<Active>> = Mutex::new(None);
         assert!(!is_current(&active, 1));
+    }
+
+    /// The bug: a track replace is `stop` then `play`, each spawning a task onto
+    /// the same voice mutex with nothing ordering them. songbird turns both into
+    /// `SetTrack`, so a `stop` that lands after the `play` — the order tokio's
+    /// LIFO slot makes usual — leaves the mixer with no track and the player
+    /// silently `Playing`. A stop that finds `active` filled in has been
+    /// superseded and must not reach the mixer; a plain stop leaves `active`
+    /// cleared and must.
+    #[test]
+    fn a_stop_superseded_by_a_replacement_does_not_reach_the_mixer() {
+        let active: Mutex<Option<Active>> = Mutex::new(None);
+        assert!(!superseded_by_a_replacement(&active));
+
+        // What `play` installs, synchronously, before it spawns anything.
+        *lock(&active) = Some(dummy_active(1));
+        assert!(superseded_by_a_replacement(&active));
     }
 
     /// The bug this guards: deriving the next generation from the one being torn
