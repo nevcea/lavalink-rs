@@ -144,8 +144,8 @@ async fn run(
 }
 
 /// Drives the socket until it closes. Returns whether it destroyed the
-/// session itself (write timeout or essential-queue overflow) rather than
-/// leaving that decision to the caller.
+/// session itself (essential-queue overflow) rather than leaving that decision
+/// to the caller.
 async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bool {
     let (mut writer, mut reader) = socket.split();
     let mut shutdown = state.shutdown.clone();
@@ -215,15 +215,16 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
                     Ok(Err(_)) => break,
                     Err(_elapsed) => {
                         // The client stopped acknowledging writes at the transport
-                        // level. Treated the same as an overflowing queue below,
-                        // rather than left to block here while essentials pile up
-                        // unseen.
+                        // level — could be a misbehaving client or just a stalled
+                        // TCP receive window, so this is treated as an ordinary
+                        // disconnect (break, let the caller's on_disconnect decide
+                        // resumable vs. destroy) rather than assumed malicious the
+                        // way an overflowing queue below is.
                         tracing::warn!(
                             session = %session.id,
                             "client did not acknowledge a write in time; closing the session"
                         );
-                        state.sessions.destroy(&session.id).await;
-                        return true;
+                        break;
                     }
                 }
             }
