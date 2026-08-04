@@ -774,6 +774,18 @@ mod tests {
         // One load for the aborted leader (its OS thread was already running and
         // cannot be cancelled) plus exactly one for the new leader the two
         // followers elected between themselves — never three.
+        //
+        // The orphaned leader's `fetch_add` races this assertion, not just the
+        // rest of the test: `std::thread::Builder::spawn` returning only means
+        // the OS thread exists, not that the kernel has scheduled it yet, and
+        // nothing else here waits on it (there is no handle to join — it is
+        // deliberately orphaned). Under CI contention the scheduling delay can
+        // outlast everything from here to a bare check, so poll instead of
+        // reading the counter once.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while loads.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         assert_eq!(
             loads.load(Ordering::SeqCst),
             2,
