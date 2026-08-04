@@ -48,8 +48,23 @@ jobs:
   audit:
     name: Audit
     runs-on: ubuntu-latest
+    # audit-check publishes its report as a Check Run, which needs `checks:
+    # write` on top of the default token; without it, publishing itself throws
+    # and fails the job regardless of what cargo-audit found.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Ten advisories, none fixable by a version bump on our end: each is
+          # pulled in transitively through songbird 0.6.0 (davey/openmls's
+          # libcrux-* crates, and tungstenite's rustls 0.22 -> old
+          # rustls-webpki), which is itself the newest songbird release —
+          # there is no newer compatible version to move to yet, and two of
+          # the libcrux-aesgcm advisories (RUSTSEC-2026-0211, -0209) have no
+          # patched version published upstream at all. Re-run `cargo update`
+          # and drop entries here as songbird/serenity catch up.
+          ignore: "RUSTSEC-2026-0211,RUSTSEC-2026-0209,RUSTSEC-2026-0124,RUSTSEC-2026-0212,RUSTSEC-2026-0207,RUSTSEC-2026-0208,RUSTSEC-2026-0098,RUSTSEC-2026-0049,RUSTSEC-2026-0099,RUSTSEC-2026-0104"
