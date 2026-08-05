@@ -459,6 +459,13 @@ impl State {
                     if self.seek(position_ms) {
                         writer.reset(position_ms);
                         reset = true;
+                    } else {
+                        // The engine's `begin_seek` already announced this target
+                        // (see `RingWriter::begin_seek`'s docs) before the command
+                        // ever reached here — a failure must give position
+                        // reporting back to the real, unmoved position instead of
+                        // holding at a target that is never going to land.
+                        writer.cancel_seek();
                     }
                 }
                 Ok(PumpCommand::SetFilters(filters)) => {

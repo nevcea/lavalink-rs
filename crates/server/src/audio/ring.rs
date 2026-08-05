@@ -143,12 +143,33 @@ struct Shared {
     /// overwrite.
     owns_position: Mutex<bool>,
     frames: Arc<FrameCounters>,
+    /// The position a seek in flight will land on, or `-1` while none is
+    /// pending. Ports lavaplayer's own `LocalAudioTrackExecutor.queuedSeek`:
+    /// its `getPosition()` reports this unconditionally while it is set,
+    /// falling back to the last real frame's timecode only once the seek has
+    /// actually been applied (`queuedSeek.set(-1)` in `applySeekState`, run
+    /// on the playback thread) — not before.
+    ///
+    /// Set synchronously by [`RingWriter::begin_seek`] the moment the engine
+    /// accepts a seek, ahead of the pump ever seeing the command. Without
+    /// this, `refresh_position` below kept computing from the *old* base for
+    /// as long as the pump took to notice the command (up to `COMMAND_POLL`
+    /// on a full ring) and buffered pre-seek audio kept draining — so a
+    /// client watching `playerUpdate` saw the position it was just told to
+    /// expect regress toward wherever the stale audio happened to be, then
+    /// jump forward again once the seek landed.
+    pending_seek_ms: AtomicI64,
 }
 
 impl Shared {
     fn refresh_position(&self) {
         let owns = lock(&self.owns_position);
         if !*owns {
+            return;
+        }
+        let pending = self.pending_seek_ms.load(Ordering::Relaxed);
+        if pending != -1 {
+            self.position_ms.store(pending, Ordering::Relaxed);
             return;
         }
         let frames = self.consumed_frames.load(Ordering::Relaxed);
@@ -193,6 +214,7 @@ pub fn channel(
         position_ms,
         owns_position: Mutex::new(true),
         frames,
+        pending_seek_ms: AtomicI64::new(-1),
     });
 
     (
@@ -298,7 +320,12 @@ impl RingWriter {
     /// Discards buffered audio and restarts the position counter at `position_ms`.
     ///
     /// Called by the pump after it has seeked the decoder: the buffer holds audio
-    /// from *before* the seek, which must not be played.
+    /// from *before* the seek, which must not be played. Also the point where a
+    /// seek that [`Self::begin_seek`] announced has actually landed: `base` is
+    /// rebased to the same target `pending_seek_ms` was already reporting, so
+    /// clearing it here (after the rebase, before `refresh_position` runs) hands
+    /// position reporting back to the normal frame-tracked path without the
+    /// value it reports ever changing.
     pub fn reset(&self, position_ms: i64) {
         let mut buffer = lock(&self.shared.buffer);
         buffer.clear();
@@ -308,8 +335,29 @@ impl RingWriter {
         self.shared
             .base_position_ms
             .store(position_ms, Ordering::Relaxed);
+        self.shared.pending_seek_ms.store(-1, Ordering::Relaxed);
         self.shared.refresh_position();
         self.shared.space.notify_all();
+    }
+
+    /// Announces a seek that is about to be handed to the pump, before it has
+    /// been applied — see [`Shared::pending_seek_ms`]. Called by the engine
+    /// synchronously, in the same call that queues the command, so there is no
+    /// window where the command is in flight but nothing yet reflects it.
+    pub fn begin_seek(&self, position_ms: i64) {
+        self.shared
+            .pending_seek_ms
+            .store(position_ms, Ordering::Relaxed);
+    }
+
+    /// Cancels a seek [`Self::begin_seek`] announced but that never landed —
+    /// the pump found the target unseekable and the decoder kept going from
+    /// wherever it actually was, the same outcome the pump's own `seek` falls
+    /// back to on failure (`pump.rs`'s `State::seek`). Position reporting
+    /// must return to that real, unmoved position instead of holding at a
+    /// target that is never going to arrive.
+    pub fn cancel_seek(&self) {
+        self.shared.pending_seek_ms.store(-1, Ordering::Relaxed);
     }
 
     pub fn is_closed(&self) -> bool {
@@ -774,6 +822,66 @@ mod tests {
         }
 
         assert_eq!(position.load(Ordering::Relaxed), 10_250);
+    }
+
+    /// Ports lavaplayer's own `LocalAudioTrackExecutor.getPosition()`, which
+    /// reports `queuedSeek` unconditionally while a seek is pending, not the
+    /// last real frame's timecode. Without `begin_seek`, a read landing after
+    /// the announcement but before `reset` actually rebases the ring reports
+    /// whatever the still-buffered pre-seek audio's trajectory says instead —
+    /// the position-regresses-then-jumps bug this pins.
+    #[test]
+    fn a_pending_seek_is_reported_immediately_and_holds_until_it_lands() {
+        let (writer, mut reader, position) = ring(1000);
+        writer.write(&vec![1.0; SAMPLE_RATE as usize * CHANNELS]);
+        read_samples(&mut reader, FRAME_SAMPLES);
+        let before_seek = position.load(Ordering::Relaxed);
+        assert!(before_seek > 0);
+
+        // The engine announces the seek before the pump has done anything —
+        // no `reset` yet, so the ring's own base/consumed_frames are still
+        // exactly where they were.
+        writer.begin_seek(90_000);
+        assert_eq!(
+            position.load(Ordering::Relaxed),
+            before_seek,
+            "announcing alone does not move the counter; a read has to happen"
+        );
+
+        // A read of still-buffered pre-seek audio must not regress the
+        // reported position back toward its own trajectory.
+        read_samples(&mut reader, FRAME_SAMPLES);
+        assert_eq!(position.load(Ordering::Relaxed), 90_000);
+
+        // Only once the pump's `reset` actually lands does the ring go back to
+        // tracking frames for real — from the target, not from zero.
+        writer.reset(90_000);
+        assert_eq!(position.load(Ordering::Relaxed), 90_000);
+        read_samples(&mut reader, FRAME_SAMPLES);
+        assert!(position.load(Ordering::Relaxed) > 90_000);
+    }
+
+    /// The pump finds the source unseekable and never calls `reset`; position
+    /// reporting must give up on the target and go back to reality instead of
+    /// holding at a seek that is never going to land.
+    #[test]
+    fn cancelling_a_seek_returns_position_reporting_to_reality() {
+        let (writer, mut reader, position) = ring(1000);
+        writer.write(&vec![1.0; SAMPLE_RATE as usize * CHANNELS]);
+        read_samples(&mut reader, FRAME_SAMPLES);
+        let real_position = position.load(Ordering::Relaxed);
+
+        writer.begin_seek(90_000);
+        read_samples(&mut reader, FRAME_SAMPLES);
+        assert_eq!(position.load(Ordering::Relaxed), 90_000);
+
+        writer.cancel_seek();
+        read_samples(&mut reader, FRAME_SAMPLES);
+        assert!(
+            position.load(Ordering::Relaxed) > real_position,
+            "reporting must resume tracking the real, unmoved position"
+        );
+        assert!(position.load(Ordering::Relaxed) < 90_000);
     }
 
     #[test]

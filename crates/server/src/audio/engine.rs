@@ -448,6 +448,14 @@ impl Engine for PipelineEngine {
     }
 
     fn seek(&self, position_ms: i64) {
+        // Announced before the command is even sent, mirroring lavaplayer's own
+        // `LocalAudioTrackExecutor.setPosition`, which sets `queuedSeek`
+        // synchronously on the calling thread — so position reporting holds at
+        // the target from this call's return, not from whenever the pump gets
+        // around to the command. See `RingWriter::begin_seek`'s docs.
+        if let Some(active) = lock(&self.active).as_ref() {
+            active.ring.begin_seek(position_ms);
+        }
         self.send_to_pump(PumpCommand::Seek { position_ms });
     }
 
