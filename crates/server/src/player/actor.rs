@@ -452,30 +452,46 @@ impl PlayerActor {
 
         match request.track {
             None => {}
-            Some(TrackChange::Clear) => {
-                self.stop_track(TrackEndReason::Stopped);
-            }
-            Some(TrackChange::Play(track)) => {
-                // `noReplace` with something already playing: the request is dropped
-                // and the current state returned, with a 200 rather than an error
-                // (`:182-185`).
+            Some(track_change) => {
+                // `noReplace` with something already playing: the whole request is
+                // dropped and the current state returned, with a 200 rather than an
+                // error (`:182-185`). This guards both branches below, not just
+                // `Play` — the original's check runs once, before it has even
+                // decided whether the request means play or stop (`encodedTrack:
+                // null` takes the same early return when something is already
+                // playing, request is quietly ignored — `noReplace` protects
+                // "something is already playing" full stop, not just "against
+                // being replaced by a *different* track").
                 if request.no_replace && self.model.track.is_some() {
                     return;
                 }
+
+                // A play (or explicit stop) request with no `paused` field forces
+                // `false` (`:186`) — computed once and applied to both branches
+                // below, matching the original's single `player.setPause(...)`
+                // call that runs before it distinguishes play from stop. Note this
+                // ignores a `paused: true` sent alongside a track only in the
+                // sense that it is applied *after* `play`, not skipped.
+                let paused = match request.paused {
+                    Omissible::Present(paused) => paused,
+                    Omissible::Omitted => false,
+                };
+
+                let track = match track_change {
+                    TrackChange::Clear => {
+                        self.stop_track(TrackEndReason::Stopped);
+                        self.model.set_paused(paused, now);
+                        self.engine.set_paused(paused);
+                        return;
+                    }
+                    TrackChange::Play(track) => track,
+                };
 
                 // Anything already playing ends as REPLACED before the new track
                 // starts.
                 if self.model.track.is_some() {
                     self.stop_track(TrackEndReason::Replaced);
                 }
-
-                // A play request with no `paused` field forces `false` (`:186`) —
-                // note this ignores a `paused: true` sent alongside a track only in
-                // the sense that it is applied *after*, not skipped.
-                let paused = match request.paused {
-                    Omissible::Present(paused) => paused,
-                    Omissible::Omitted => false,
-                };
 
                 // Same clamp as the seek path above, and for the same reason:
                 // pump.rs's start_position_ms only skips seeking on a non-positive
@@ -844,6 +860,93 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// `PlayerRestHandler.kt:186`: `player.setPause(...)` runs unconditionally
+    /// whenever `encodedTrack`/`identifier` is present at all, *before* the
+    /// code decides whether the request means play or stop — so an explicit
+    /// stop (`encodedTrack: null`) forces `paused` exactly the way a play
+    /// request does (`false` when the field is absent), rather than leaving
+    /// whatever it was.
+    #[tokio::test]
+    async fn clearing_the_track_forces_paused_the_same_way_a_play_request_does() {
+        let harness = Harness::start();
+        harness.handle.patch(play(track("first"))).await.unwrap();
+        harness
+            .handle
+            .patch(PatchRequest {
+                paused: Omissible::Present(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(harness.handle.snapshot().await.unwrap().paused);
+
+        let player = harness
+            .handle
+            .patch(PatchRequest {
+                track: Some(TrackChange::Clear),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            !player.paused,
+            "a stop with no paused field must force it to false, the same default a play request uses"
+        );
+    }
+
+    /// As the previous test, but for the other direction: a stop that does
+    /// carry an explicit `paused: true` must apply it too, not just default
+    /// unpaused.
+    #[tokio::test]
+    async fn clearing_the_track_with_an_explicit_paused_field_applies_it() {
+        let harness = Harness::start();
+        harness.handle.patch(play(track("first"))).await.unwrap();
+
+        let player = harness
+            .handle
+            .patch(PatchRequest {
+                track: Some(TrackChange::Clear),
+                paused: Omissible::Present(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(player.paused);
+    }
+
+    /// `PlayerRestHandler.kt:182-185`: the `noReplace` check runs once, before
+    /// the code has even decided whether the request means play or stop — so
+    /// it guards an explicit stop (`encodedTrack: null`) too, not just a play
+    /// request naming a different track. A client sending `noReplace=true`
+    /// alongside `encodedTrack: null` while a track is already playing gets
+    /// that track left running, exactly as an unwanted *replacement* would be
+    /// dropped.
+    #[tokio::test]
+    async fn no_replace_also_drops_an_explicit_stop() {
+        let harness = Harness::start();
+        harness.handle.patch(play(track("first"))).await.unwrap();
+        harness.events(); // drain the TrackStart from the play above
+
+        let player = harness
+            .handle
+            .patch(PatchRequest {
+                track: Some(TrackChange::Clear),
+                no_replace: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            player.track.unwrap().info.title,
+            "first",
+            "noReplace must drop an explicit stop the same way it drops a replacement"
+        );
+        assert!(harness.events().is_empty(), "a dropped request emits nothing");
     }
 
     #[tokio::test]
