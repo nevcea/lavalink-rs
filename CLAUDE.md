@@ -21,7 +21,7 @@ when relevant, a `test-bot` pass (see its README).
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/):
 `<type>[scope]: <description>` (types: `feat|fix|docs|style|refactor|perf|
-test|build|ci|chore|revert`; description in Korean or English). `!` /
+test|build|ci|chore|revert`; description in English). `!` /
 `BREAKING CHANGE:` only for actual wire/config breaks, not internal
 refactors. Split unrelated changes into separate, independently-revertible
 commits — but don't fragment one mechanical pass (e.g. a repeated wording
