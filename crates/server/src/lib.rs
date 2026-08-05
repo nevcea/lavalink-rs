@@ -16,6 +16,7 @@
 //! | one session registry instead of two half-safe maps | [`session`] |
 //! | resume ownership taken atomically, deadlines never orphaned | [`session`] |
 //! | no blocking work under a per-guild lock | [`player::actor`] |
+//! | voice and engine reports cannot be starved by REST traffic | [`player::actor`] |
 //! | reads do not mutate state | [`player::state`] |
 //! | bounded, prioritised outbound queue | [`sink`] |
 //! | node-wide ticks instead of per-session schedulers | [`ticker`] |

@@ -49,8 +49,6 @@ use lavalink_protocol::player::Track;
 use lavalink_protocol::Exception;
 use tokio::sync::mpsc;
 
-use crate::player::Command;
-
 /// One track's worth of instructions for the pipeline.
 #[derive(Debug, Clone)]
 pub struct PlayRequest {
@@ -95,7 +93,11 @@ pub trait Engine: Send + Sync + 'static {
     }
 
     /// Hands the engine a channel for reporting back. Called once, at construction.
-    fn attach(&self, _events: mpsc::Sender<Command>) {}
+    ///
+    /// Its own channel, not the actor's general command queue: a terminal event
+    /// that loses its slot to a burst of REST traffic is a player wedged forever
+    /// — see `PlayerHandle::engine_events`.
+    fn attach(&self, _events: mpsc::Sender<EngineEvent>) {}
 
     fn play(&self, request: PlayRequest);
     fn stop(&self);
@@ -130,8 +132,7 @@ pub mod testing {
     use lavalink_protocol::filters::Filters;
     use tokio::sync::mpsc;
 
-    use super::{Engine, PlayRequest};
-    use crate::player::Command;
+    use super::{Engine, EngineEvent, PlayRequest};
 
     /// A record of one call into an [`Engine`].
     #[derive(Debug, Clone, PartialEq)]
@@ -164,7 +165,7 @@ pub mod testing {
     pub struct RecordingEngine {
         calls: Arc<Mutex<Vec<EngineCall>>>,
         position_ms: Arc<AtomicI64>,
-        events: Arc<Mutex<Option<mpsc::Sender<Command>>>>,
+        events: Arc<Mutex<Option<mpsc::Sender<EngineEvent>>>>,
     }
 
     impl RecordingEngine {
@@ -182,7 +183,7 @@ pub mod testing {
 
         /// The channel back to the actor, for tests that want to inject an event
         /// the way a real pipeline would.
-        pub fn events(&self) -> Option<mpsc::Sender<Command>> {
+        pub fn events(&self) -> Option<mpsc::Sender<EngineEvent>> {
             self.events.lock().unwrap().clone()
         }
 
@@ -196,7 +197,7 @@ pub mod testing {
             Arc::clone(&self.position_ms)
         }
 
-        fn attach(&self, events: mpsc::Sender<Command>) {
+        fn attach(&self, events: mpsc::Sender<EngineEvent>) {
             *self.events.lock().unwrap() = Some(events);
         }
 

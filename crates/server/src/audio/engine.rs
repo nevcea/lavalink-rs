@@ -41,7 +41,7 @@ use super::stream::StreamOpener;
 use super::{Engine, EngineEvent, PlayRequest};
 use crate::config::ResamplingQuality;
 use crate::lock;
-use crate::player::{Command, EventSlot};
+use crate::player::EventSlot;
 use crate::voice::SharedVoice;
 
 /// How often the pump reports that it is still producing. Throttled hard: this only
@@ -56,7 +56,8 @@ pub struct PipelineEngine {
     voice: SharedVoice,
     opener: Arc<StreamOpener>,
     runtime: tokio::runtime::Handle,
-    /// Shared with the voice connection, which reports into the same actor.
+    /// Filled in once the actor exists. Its own queue, not the actor's general
+    /// command queue — see `Engine::attach`.
     events: EventSlot,
     /// Shared so the task that hands the input to the mixer can store the resulting
     /// handle back, which is what `pause` later needs.
@@ -176,7 +177,7 @@ impl PipelineEngine {
         };
         // try_send, not send: this runs on the pump thread, which must not block
         // on a busy actor.
-        let _ = events.try_send(Command::Engine(event));
+        let _ = events.try_send(event);
     }
 
     /// Tears down whatever is playing.
@@ -214,7 +215,7 @@ impl Engine for PipelineEngine {
         Arc::clone(&self.frames)
     }
 
-    fn attach(&self, events: AsyncSender<Command>) {
+    fn attach(&self, events: AsyncSender<EngineEvent>) {
         // Engine::attach's own contract: called once, at construction.
         let _ = self.events.set(events);
     }
@@ -320,7 +321,7 @@ impl Engine for PipelineEngine {
                     *last = Instant::now();
                     drop(last);
                     if let Some(events) = &events {
-                        let _ = events.try_send(Command::Engine(EngineEvent::Progress));
+                        let _ = events.try_send(EngineEvent::Progress);
                     }
                 };
 
@@ -329,8 +330,10 @@ impl Engine for PipelineEngine {
                 // move below so it survives the unwind: writer is consumed by
                 // pump::run and gone once it panics, but this clone (same
                 // Arc<Shared>) can still call finish() — the reader's only way to
-                // learn the track ended if the event below never reaches the actor
-                // (a full command queue drops it silently).
+                // learn the track ended if the event below never reaches the actor.
+                // Engine events have their own queue now, so that is no longer the
+                // routine case it once was, but try_send can still fail and the
+                // reader must not be left waiting on a pump that no longer exists.
                 let writer_after_panic = writer.clone();
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     pump::run(config, writer, pump_commands, position_ms, &on_progress)
@@ -366,7 +369,7 @@ impl Engine for PipelineEngine {
                     // whatever track replaced it.
                     if let Some(event) = event {
                         if is_current(&active, generation) {
-                            let _ = events.try_send(Command::Engine(event));
+                            let _ = events.try_send(event);
                         }
                     }
                 }

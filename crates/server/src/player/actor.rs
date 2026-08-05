@@ -52,6 +52,12 @@ const STUCK_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 /// bigger than "one", not big.
 const VOICE_UPDATE_CAPACITY: usize = 16;
 
+/// Same reasoning as [`VOICE_UPDATE_CAPACITY`], and the same size for the same
+/// reason: it only has to be bigger than "one". A track produces exactly one
+/// terminal event, and `Progress` is throttled to one per 500ms by the engine's
+/// `PROGRESS_INTERVAL`.
+const ENGINE_CAPACITY: usize = 16;
+
 #[derive(Debug)]
 pub enum Command {
     /// One `PATCH /v4/sessions/{id}/players/{guildId}`, applied in the original's
@@ -62,8 +68,6 @@ pub enum Command {
     /// resume, neither of which reads player state itself — asking the actor to
     /// publish keeps it the only reader of its own fields.
     EmitUpdate,
-    /// The audio engine reported something.
-    Engine(EngineEvent),
 }
 
 #[derive(Debug, Default)]
@@ -112,14 +116,12 @@ pub struct PlayerHandle {
     /// unrelated REST traffic sharing the same queue — see the channel's own
     /// docs on `PlayerActor`.
     voice_updates: mpsc::Sender<VoiceUpdate>,
-    /// Teardown, off `commands` and off `voice_updates` both.
+    /// Teardown, off every other queue.
     ///
     /// Two reasons it cannot share the command queue. It must not have to wait
     /// for room behind a burst of REST traffic: `send`'s own `SEND_TIMEOUT` is
     /// the same 5s as `session::PLAYER_DESTROY_TIMEOUT`, so a full queue used up
-    /// the caller's entire budget before the reply was even sent. And the engine
-    /// holds a clone of the `commands` sender (`Engine::attach`), so
-    /// `commands.recv()` can never report every sender gone — this one is held
+    /// the caller's entire budget before the reply was even sent. And it is held
     /// only by `PlayerHandle`, which makes dropping the last handle end the
     /// actor. That is what stops a timed-out destroy from stranding the actor
     /// task, its pump thread and its voice connection with nothing left pointing
@@ -202,7 +204,7 @@ impl PlayerHandle {
 /// once, at construction" comment on [`Engine::attach`](crate::audio::Engine::attach).
 type DeferredSlot<T> = Arc<std::sync::OnceLock<mpsc::Sender<T>>>;
 
-pub type EventSlot = DeferredSlot<Command>;
+pub type EventSlot = DeferredSlot<EngineEvent>;
 /// [`DeferredSlot`] for voice transitions — `VoiceConnection` is built before the
 /// actor exists, same as the engine.
 pub type VoiceUpdateSlot = DeferredSlot<VoiceUpdate>;
@@ -223,6 +225,27 @@ pub struct PlayerActor {
     /// instead of spinning on a channel that will only ever report closed.
     voice_updates: mpsc::Receiver<VoiceUpdate>,
     voice_updates_closed: bool,
+    /// Also kept off `commands`, and for a sharper reason than voice: a dropped
+    /// engine event is not a delayed one, it is a player wedged forever.
+    ///
+    /// The pump thread must not block on a busy actor, so every report is a
+    /// `try_send` whose error the engine discards (`engine.rs`). Sharing the
+    /// 64-slot command queue with REST patches, snapshots and the global tick
+    /// meant a burst could take the slot `EngineEvent::Finished` needed — and
+    /// nothing else in the node notices a track ending. There is no
+    /// `TrackEvent::End` handler on the voice side, and `MAINTENANCE.md`'s
+    /// `TrackEndReason::Cleanup` entry records that stuck detection is
+    /// production-side only, so nothing polls for a player that stopped
+    /// producing. A dropped `Finished` meant no `TrackEndEvent`, `model.track`
+    /// left `Some` forever, and a client queue that never advances; a dropped
+    /// `Failed` meant no `TrackException` either.
+    ///
+    /// `None` handled the same way `voice_updates` handles it, and for the same
+    /// reason — the engine outlives nothing here, so this only closes if
+    /// `attach` was never called (`RecordingEngine` in a test that does not want
+    /// one).
+    engine_events: mpsc::Receiver<EngineEvent>,
+    engine_events_closed: bool,
     /// See [`PlayerHandle::destroy`]'s field of the same name. Receiving `None`
     /// here means every handle has been dropped, which is as final as an explicit
     /// destroy and is the only signal that survives a caller giving up mid-way.
@@ -255,6 +278,7 @@ impl PlayerActor {
     ) -> (Self, PlayerHandle) {
         let (tx, rx) = mpsc::channel(COMMAND_CAPACITY);
         let (voice_tx, voice_rx) = mpsc::channel(VOICE_UPDATE_CAPACITY);
+        let (engine_tx, engine_rx) = mpsc::channel(ENGINE_CAPACITY);
         // One slot: a second concurrent destroy is the same teardown, and the
         // first one's acknowledgement is what both callers are waiting for.
         let (destroy_tx, destroy_rx) = mpsc::channel(1);
@@ -263,9 +287,9 @@ impl PlayerActor {
         // Not from the engine: whether the player is playing is the actor's own
         // state, not the pipeline's.
         let playing_since_ms = Arc::new(AtomicI64::new(0));
-        // The engine reports back as Command::Engine, so it never needs a
-        // reference to the actor itself.
-        engine.attach(tx.clone());
+        // The engine reports back as EngineEvent, so it never needs a reference
+        // to the actor itself.
+        engine.attach(engine_tx);
         let _ = voice_slot.set(voice_tx.clone());
 
         let handle = PlayerHandle {
@@ -283,6 +307,8 @@ impl PlayerActor {
             commands: rx,
             voice_updates: voice_rx,
             voice_updates_closed: false,
+            engine_events: engine_rx,
+            engine_events_closed: false,
             destroy: destroy_rx,
             position_ms,
             playing_since_ms,
@@ -331,6 +357,17 @@ impl PlayerActor {
                         None => self.voice_updates_closed = true,
                     }
                 }
+                event = self.engine_events.recv(), if !self.engine_events_closed => {
+                    match event {
+                        Some(event) => {
+                            self.apply_engine_event(event);
+                            // Same resync every arm of `handle` gets, for the
+                            // same reason: apply_engine_event can end a track.
+                            self.sync_playing();
+                        }
+                        None => self.engine_events_closed = true,
+                    }
+                }
                 // Only armed while a track is actually running. check_stuck returns
                 // immediately for every other state, so an idle player was waking
                 // the runtime twice a second for nothing — multiplied by every
@@ -360,7 +397,6 @@ impl PlayerActor {
                 self.apply_patch(*request);
                 let _ = reply.send(self.snapshot());
             }
-            Command::Engine(event) => self.apply_engine_event(event),
         }
         // Every path above can change self.model.playback, and none of them is
         // worth hunting down individually just to keep a second counter in step —
@@ -728,6 +764,12 @@ mod tests {
                 tokio::task::yield_now().await;
             }
             panic!("condition was never satisfied within the retry budget");
+        }
+
+        /// Reports an engine event the way the real pipeline does — through the
+        /// channel `attach` handed the engine, not through `commands`.
+        async fn report(&self, event: EngineEvent) {
+            self.engine.events().unwrap().send(event).await.unwrap();
         }
     }
 
@@ -1179,14 +1221,12 @@ mod tests {
         harness.handle.patch(play(track("first"))).await.unwrap();
 
         harness
-            .handle
-            .send(Command::Engine(EngineEvent::Failed {
+            .report(EngineEvent::Failed {
                 exception: lavalink_protocol::Exception::common("nope", "cause"),
                 started: false,
-            }))
-            .await
-            .unwrap();
-        harness.handle.snapshot().await.unwrap();
+            })
+            .await;
+        harness.snapshot_until(|player| player.track.is_none()).await;
 
         let events = harness.events();
         assert!(events
@@ -1205,14 +1245,9 @@ mod tests {
     async fn a_finished_track_ends_as_finished() {
         let harness = Harness::start();
         harness.handle.patch(play(track("first"))).await.unwrap();
-        harness
-            .handle
-            .send(Command::Engine(EngineEvent::Finished))
-            .await
-            .unwrap();
+        harness.report(EngineEvent::Finished).await;
 
-        let player = harness.handle.snapshot().await.unwrap();
-        assert!(player.track.is_none());
+        harness.snapshot_until(|player| player.track.is_none()).await;
         assert!(harness.events().iter().any(|event| matches!(
             event,
             EmittedEvent::TrackEnd {
@@ -1341,6 +1376,45 @@ mod tests {
         );
     }
 
+    /// The same bug, one queue over and with worse consequences. Engine events
+    /// used to travel as `Command::Engine`, and the pump thread must not block
+    /// on a busy actor, so the engine reports with `try_send` and discards the
+    /// error. A burst of REST traffic filling `commands` at the moment a track
+    /// reached EOF therefore ate `EngineEvent::Finished` — and nothing else in
+    /// the node notices a track ending, so the player stayed `Some` forever with
+    /// no `TrackEndEvent` and a client queue that never advanced.
+    #[tokio::test]
+    async fn a_full_command_queue_does_not_block_an_engine_event() {
+        let sink = Arc::new(Sink::new());
+        let engine = RecordingEngine::new();
+        let (_actor, handle) = PlayerActor::new(
+            123,
+            Box::new(engine.clone()),
+            sink,
+            Duration::from_secs(10),
+            Arc::new(std::sync::OnceLock::new()),
+        );
+        // _actor.run() is deliberately never spawned, so commands fills
+        // without ever draining.
+
+        for _ in 0..COMMAND_CAPACITY {
+            handle.try_send(Command::EmitUpdate).unwrap();
+        }
+        assert!(
+            handle.try_send(Command::EmitUpdate).is_err(),
+            "the commands queue should now be completely full"
+        );
+
+        assert!(
+            engine
+                .events()
+                .expect("attach should have filled the slot")
+                .try_send(EngineEvent::Finished)
+                .is_ok(),
+            "a full commands queue must not cost a track its terminal event"
+        );
+    }
+
     #[tokio::test]
     async fn destroy_stops_the_engine_and_ends_the_actor() {
         let harness = Harness::start();
@@ -1454,11 +1528,7 @@ mod tests {
             .iter()
             .any(|event| matches!(event, EmittedEvent::TrackStuck { .. })));
 
-        harness
-            .handle
-            .send(Command::Engine(EngineEvent::Progress))
-            .await
-            .unwrap();
+        harness.report(EngineEvent::Progress).await;
 
         tokio::time::sleep(past_one_check_interval()).await;
         harness.handle.snapshot().await.unwrap();
