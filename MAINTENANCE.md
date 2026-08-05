@@ -122,6 +122,39 @@ nothing that reaches the Opus encoder's own complexity setting. lavaplayer's
 would need a patched or forked songbird, a materially larger undertaking than
 the other unmapped keys in this document.
 
+## `WebSocketClosedEvent.reason` — always empty
+
+Upstream's `WsEventHandler.gatewayClosed(code, reason, byRemote)` in
+`SocketContext.kt` gets a real `reason: String?` from Koe (its JVM voice
+library) and forwards it verbatim, defaulting to `""` only when Koe itself
+has none. This node always sends `""`.
+
+Checked against the vendored `songbird 0.6.0` source directly
+(`~/.cargo/registry/.../songbird-0.6.0/src`): `songbird::ws::Error::WsClosed`
+briefly holds tungstenite's full `CloseFrame` — code *and* reason text — but
+`events/context/data/disconnect.rs`'s `From<&WsError> for DisconnectReason`
+keeps only `frame.code` when building the public `DisconnectReason::WsClosed
+(Option<VoiceCloseCode>)` variant, discarding `frame.reason` at that
+conversion. `crates/server/src/voice.rs` only ever receives this
+already-stripped `DisconnectReason` via songbird's `EventContext::
+DriverDisconnect` — there is no lower-level hook that still has the string.
+Same class of gap as `opusEncodingQuality` above: matching this would need a
+patched or forked songbird, not a change on this node's side.
+
+## `Session-Resumed`-style backpressure — a deliberate divergence, not a gap
+
+`ws.rs`'s `OVERFLOW_THRESHOLD`/`ESSENTIAL_CAPACITY` logic closes a session
+with `1008` once its outbound essential-message backlog crosses a bound, and
+`sink.rs`'s queues are capacity-limited to match. Checked against upstream's
+`SocketContext.kt`: `resumeEventQueue` is a bare `ConcurrentLinkedQueue<
+String>` with no size cap and no code path that ever closes a slow-draining
+client — a paused session's queue grows without bound for as long as the
+session stays resumable. This node's bound is a genuine, deliberate safety
+fix for that unbounded growth (already reasoned about in `sink.rs`'s and
+`ws.rs`'s own doc comments), not an accidental behavior gap — recorded here
+so it reads the same way the rest of this document's intentional
+divergences do.
+
 ## Plugins — not implemented
 
 No plugin loading mechanism exists. `Info.plugins` is always reported as an
