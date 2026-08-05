@@ -212,7 +212,10 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
                 .await
                 {
                     Ok(Ok(())) => {}
-                    Ok(Err(_)) => break,
+                    Ok(Err(_)) => {
+                        restore_undelivered(session, message);
+                        break;
+                    }
                     Err(_elapsed) => {
                         // The client stopped acknowledging writes at the transport
                         // level — could be a misbehaving client or just a stalled
@@ -224,6 +227,7 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
                             session = %session.id,
                             "client did not acknowledge a write in time; closing the session"
                         );
+                        restore_undelivered(session, message);
                         break;
                     }
                 }
@@ -249,6 +253,27 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
     }
 
     false
+}
+
+/// Puts an essential `message` that `recv()` already dequeued back at the front
+/// of the essential lane, after the write that was going to deliver it failed or
+/// timed out.
+///
+/// Without this, `recv()`'s `try_recv` (`sink.rs`'s `essential.pop_front()`)
+/// already removed the message from the queue before the write that was
+/// supposed to deliver it ever ran — so a write failure here lost it silently,
+/// even though this is exactly the abnormal-disconnect case resume exists to
+/// recover from.
+///
+/// A snapshot message (`playerUpdate`/`stats`, identified by
+/// [`Message::coalesce_key`] being `Some`) is not restored: the caller's
+/// `on_disconnect` unconditionally clears the snapshot lane
+/// (`Sink::pause`), so putting one back here would just be thrown away a
+/// moment later, and the next tick regenerates a fresher one regardless.
+fn restore_undelivered(session: &Session, message: Message) {
+    if message.coalesce_key().is_none() {
+        let _ = session.sink.send_first(message);
+    }
 }
 
 /// Whether a session that now has `pending` essential messages queued should be
@@ -285,6 +310,62 @@ fn overflow_closes(armed: &mut bool, pending: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::track;
+    use lavalink_protocol::message::EmittedEvent;
+    use lavalink_protocol::player::PlayerState;
+
+    fn event(guild: &str) -> Message {
+        Message::Event(EmittedEvent::TrackStart {
+            guild_id: guild.to_owned(),
+            track: Box::new(track("t")),
+        })
+    }
+
+    fn update(guild: &str, position: i64) -> Message {
+        Message::PlayerUpdate {
+            state: PlayerState {
+                time: 0,
+                position,
+                connected: true,
+                ping: 1,
+            },
+            guild_id: guild.to_owned(),
+        }
+    }
+
+    fn dummy_session() -> std::sync::Arc<Session> {
+        crate::session::SessionRegistry::new().open(1, None)
+    }
+
+    /// The bug this guards: `recv()` already removed the message from the
+    /// essential lane before a write that fails or times out ever runs, so
+    /// without restoring it the message that was supposed to be delivered (or
+    /// replayed after a resume) is silently gone.
+    #[test]
+    fn restoring_an_undelivered_essential_puts_it_back_ahead_of_the_rest() {
+        let session = dummy_session();
+        session.send(event("1")).unwrap();
+        session.send(event("2")).unwrap();
+
+        // What ws.rs's pump() does with the message `recv()` just handed it,
+        // once the write for it failed.
+        restore_undelivered(&session, event("0"));
+
+        assert_eq!(session.sink.try_recv(), Some(event("0")));
+        assert_eq!(session.sink.try_recv(), Some(event("1")));
+        assert_eq!(session.sink.try_recv(), Some(event("2")));
+    }
+
+    /// A snapshot message is not restored: `on_disconnect`'s `sink.pause()`
+    /// clears the snapshot lane unconditionally right after, so putting one
+    /// back here would only be thrown away a moment later.
+    #[test]
+    fn restoring_an_undelivered_snapshot_is_a_no_op() {
+        let session = dummy_session();
+        restore_undelivered(&session, update("1", 42));
+        assert_eq!(session.sink.try_recv(), None);
+    }
+
     use axum::http::{HeaderName, HeaderValue};
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
