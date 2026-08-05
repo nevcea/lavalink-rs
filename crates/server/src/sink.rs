@@ -35,7 +35,13 @@ use tokio::sync::Notify;
 ///
 /// Generous: a healthy client drains continuously, and the only way to reach this
 /// is a client that has stopped reading entirely.
-const ESSENTIAL_CAPACITY: usize = 4096;
+///
+/// `pub(crate)` rather than private: `ws.rs`'s `overflow_closes` needs the exact
+/// value it shares with [`Sink::send`], so a connected client that reaches actual
+/// data loss (this cap, not just [`crate::ws`]'s own lower `OVERFLOW_THRESHOLD`)
+/// is closed unconditionally rather than only when the grace-period-after-resume
+/// logic happens to have armed.
+pub(crate) const ESSENTIAL_CAPACITY: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError {

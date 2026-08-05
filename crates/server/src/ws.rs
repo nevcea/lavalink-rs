@@ -263,7 +263,17 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
 /// disarmed whenever the backlog is already over threshold, and arms itself the
 /// first time it is observed under threshold; only a backlog that regrows past
 /// threshold after that is a client that truly isn't keeping up.
+///
+/// The grace period above only ever waives [`OVERFLOW_THRESHOLD`], never
+/// [`crate::sink::ESSENTIAL_CAPACITY`] itself: past that point `Sink::send` is
+/// already returning `SendError::Overflow` and silently dropping messages
+/// (every caller discards that error), so a backlog that never dips back under
+/// `OVERFLOW_THRESHOLD` — staying disarmed forever under the logic above — would
+/// otherwise keep losing events indefinitely with nothing to ever close it.
 fn overflow_closes(armed: &mut bool, pending: usize) -> bool {
+    if pending >= crate::sink::ESSENTIAL_CAPACITY {
+        return true;
+    }
     if pending >= OVERFLOW_THRESHOLD {
         *armed
     } else {
@@ -356,5 +366,24 @@ mod tests {
 
         // It grows back past threshold: now it closes.
         assert!(overflow_closes(&mut armed, OVERFLOW_THRESHOLD));
+    }
+
+    /// The bug this guards: a backlog resumed above `OVERFLOW_THRESHOLD` that
+    /// never dips back under it (a client slow enough to stay over the grace
+    /// threshold but not slow enough to stop entirely) left `armed` `false`
+    /// forever under the old logic — so it was never closed even once
+    /// `Sink::send` started silently dropping messages at
+    /// `ESSENTIAL_CAPACITY`. The hard cap must fire regardless of `armed`.
+    #[test]
+    fn a_backlog_that_never_arms_still_closes_once_data_is_actually_being_lost() {
+        let mut armed = false; // never observed under OVERFLOW_THRESHOLD
+        assert!(
+            !overflow_closes(&mut armed, crate::sink::ESSENTIAL_CAPACITY - 1),
+            "still under the point where Sink::send starts dropping messages"
+        );
+        assert!(
+            overflow_closes(&mut armed, crate::sink::ESSENTIAL_CAPACITY),
+            "past this point Sink::send is already discarding essentials"
+        );
     }
 }
