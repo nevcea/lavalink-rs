@@ -81,6 +81,17 @@ impl Resampler {
         self.source_rate == SAMPLE_RATE && self.source_channels == CHANNELS
     }
 
+    /// Whether this resampler is configured for exactly `rate`/`channels`.
+    ///
+    /// The pump checks every decoded packet against what the decoder actually
+    /// produced, because [`Resampler::new`] is built from what the *container*
+    /// declared and the two can disagree — see `pump.rs`'s `decode_loop`.
+    /// Normalised the same way `new` normalises its arguments, so a caller that
+    /// passes the same values `new` was given always gets `true`.
+    pub fn matches_source(&self, rate: u32, channels: usize) -> bool {
+        self.source_rate == rate.max(1) && self.source_channels == channels.max(1)
+    }
+
     /// Forgets carried-over state. Called after a seek, where the previous buffer's
     /// tail is from somewhere else in the track entirely.
     pub fn reset(&mut self) {

@@ -364,6 +364,51 @@ impl State {
             };
             self.consecutive_errors = 0;
 
+            // What the container declared (`source_params`, which `open` and the
+            // ResetRequired arm above both build the resampler from) is a hint,
+            // not a guarantee. The decoder is the authority on what it actually
+            // produced, and the two disagree often enough to matter:
+            //
+            // * HE-AAC's SBR outputs at twice the rate the container declares,
+            //   so the resample ratio is off by a factor of two and the whole
+            //   track plays at half speed.
+            // * `params.channels` is `None` for more containers than not, and
+            //   `source_params` falls back to stereo. For a mono stream
+            //   `to_interleaved` then emits one sample per frame while
+            //   `fill_stereo_frames` reads them back two at a time
+            //   (`resample.rs`'s `chunks_exact`), so adjacent mono samples
+            //   become an L/R pair and the track plays at double speed with the
+            //   channels smeared into each other.
+            //
+            // Neither fails loudly — that is exactly why this is checked rather
+            // than assumed. Two integer compares per packet against a decode
+            // that already costs tens of µs (benches/pipeline.rs).
+            let spec = decoded.spec();
+            let (decoded_rate, decoded_channels) = (spec.rate(), spec.channels().count());
+            if !self.resampler.matches_source(decoded_rate, decoded_channels) {
+                // Same bound `source_params` puts on a container-declared rate,
+                // and for the same reason: the rate is the resampler's step
+                // divisor, so a degenerate one reserves an unbounded output
+                // buffer on a thread with no memory limit.
+                if !SANE_SAMPLE_RATE_HZ.contains(&decoded_rate) {
+                    writer.finish();
+                    return PumpOutcome::Failed {
+                        exception: Exception::common(
+                            format!("The decoder produced an implausible sample rate: {decoded_rate}Hz"),
+                            "implausible sample rate",
+                        ),
+                        started: self.produced.load(Ordering::Relaxed),
+                    };
+                }
+                tracing::debug!(
+                    decoded_rate,
+                    decoded_channels,
+                    "the decoder's output format differs from the container's; rebuilding the resampler"
+                );
+                self.resampler =
+                    Resampler::new(decoded_rate, decoded_channels, self.resampling_quality);
+            }
+
             to_interleaved(&decoded, &mut self.interleaved);
             if self.interleaved.is_empty() {
                 continue;
@@ -1103,6 +1148,72 @@ mod tests {
             position.load(Ordering::Relaxed),
             250,
             "a failed seek must not move the reported position toward the target"
+        );
+    }
+
+    /// The bug: the resampler was built once, from what the *container*
+    /// declared (`source_params`), and never checked against what the decoder
+    /// actually produced. HE-AAC's SBR outputs at twice the declared rate, and
+    /// `params.channels` is `None` often enough that `source_params` falls back
+    /// to stereo for a mono stream — either way the track plays at the wrong
+    /// speed, silently, with `to_interleaved` framing the buffer by its real
+    /// channel count and `fill_stereo_frames` de-framing it by the declared one.
+    ///
+    /// The lie is injected rather than found: a container whose declaration is
+    /// wrong in exactly this way is a fixture this test would have to ship a
+    /// real HE-AAC file to produce, and the correction is the same code either
+    /// way. Half the rate and half the channels is the shape both real cases
+    /// take, and left uncorrected it stretches the same audio to four times its
+    /// length — far outside any resampler slack.
+    #[test]
+    fn a_decoder_format_that_contradicts_the_container_is_corrected() {
+        let wav = TempWav::new("pump-format-mismatch", 48_000, 2, 0.2);
+        let config = config(wav.track());
+
+        let position = Arc::new(AtomicI64::new(0));
+        // Big enough to hold even the uncorrected four-times-too-long result, so
+        // the pump never blocks and the failure shows up as a sample count
+        // rather than as a hang.
+        let (writer, mut reader) = super::super::ring::channel(
+            4_000,
+            Arc::clone(&position),
+            Arc::new(super::super::ring::FrameCounters::default()),
+        );
+        let mut state = open(&config, &writer).unwrap();
+        assert!(
+            state.resampler.matches_source(48_000, 2),
+            "open should have read the container's real format"
+        );
+
+        state.resampler = Resampler::new(24_000, 1, ResamplingQuality::Low);
+
+        // Kept alive so the drain sees Empty rather than Disconnected.
+        let (_commands_tx, commands_rx) = std::sync::mpsc::channel();
+        let outcome = state.decode_loop(&writer, &commands_rx, &position, &|| {});
+        assert!(matches!(outcome, PumpOutcome::Finished), "{outcome:?}");
+
+        let mut delivered = 0;
+        let mut buffer = vec![0u8; super::super::ring::FRAME_SAMPLES * 4];
+        loop {
+            let read = std::io::Read::read(&mut reader, &mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            delivered += read / 4;
+        }
+
+        // 0.2s of 48kHz stereo, with a frame or two of slack for the
+        // resampler's held-back tail. The uncorrected result is ~4x this.
+        let frames = delivered / CHANNELS;
+        let expected = (super::super::ring::SAMPLE_RATE as usize) / 5;
+        assert!(
+            frames.abs_diff(expected) < 512,
+            "expected about {expected} frames, got {frames} — the resampler kept \
+             the container's declared format instead of the decoder's"
+        );
+        assert!(
+            state.resampler.matches_source(48_000, 2),
+            "the resampler must have been rebuilt for what the decoder really produced"
         );
     }
 
