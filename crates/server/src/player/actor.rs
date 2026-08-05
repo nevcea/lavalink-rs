@@ -473,10 +473,18 @@ impl PlayerActor {
             self.engine.set_end_time(end_time);
         }
 
-        if let Omissible::Present(filters) = request.filters {
-            self.model.filters = filters;
-            self.engine.set_filters(&self.model.filters);
-            self.emit_player_update();
+        // noReplace with something already playing drops the whole request
+        // (see the check below) — filters must not leak through ahead of that,
+        // unlike volume above, which is the one deliberate exception.
+        let dropped_by_no_replace =
+            request.no_replace && request.track.is_some() && self.model.track.is_some();
+
+        if !dropped_by_no_replace {
+            if let Omissible::Present(filters) = request.filters {
+                self.model.filters = filters;
+                self.engine.set_filters(&self.model.filters);
+                self.emit_player_update();
+            }
         }
 
         match request.track {
@@ -489,7 +497,7 @@ impl PlayerActor {
                 // request means play or stop (encodedTrack: null takes the same
                 // early return). noReplace protects "something is already
                 // playing" full stop, not just "against a different track".
-                if request.no_replace && self.model.track.is_some() {
+                if dropped_by_no_replace {
                     return;
                 }
 
@@ -879,6 +887,37 @@ mod tests {
             .unwrap();
 
         assert_eq!(player.track.unwrap().info.title, "first");
+    }
+
+    /// `filters` used to leak through ahead of the `noReplace` check (applied
+    /// unconditionally, in the same block as `volume`'s documented exception),
+    /// so a dropped replacement request could still mutate the currently
+    /// playing track's filters. The whole request must be dropped, filters
+    /// included.
+    #[tokio::test]
+    async fn no_replace_also_drops_filters() {
+        let harness = Harness::start();
+        harness.handle.patch(play(track("first"))).await.unwrap();
+
+        let player = harness
+            .handle
+            .patch(PatchRequest {
+                track: Some(TrackChange::Play(Box::new(track("second")))),
+                no_replace: true,
+                filters: Omissible::Present(Filters {
+                    volume: Omissible::Present(2.0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(player.track.unwrap().info.title, "first");
+        assert!(
+            player.filters.volume.into_option().is_none(),
+            "a dropped noReplace request must not apply its filters either"
+        );
     }
 
     /// The three-state `Omissible` in action: an explicit null clears the track.
