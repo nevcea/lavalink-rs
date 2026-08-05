@@ -119,8 +119,8 @@ const SAMPLE_RATE: f32 = super::ring::SAMPLE_RATE as f32;
 
 /// lavaplayer `Equalizer.coefficients48000`, diffed against
 /// `lavaplayer/main/src/main/java/…/filter/equalizer/Equalizer.java`.
-// Kept at the precision upstream prints them at, even though `f32` cannot hold all
-// of it. Truncating to what `f32` represents would make a future diff against
+// Kept at the precision upstream prints them at, even though f32 cannot hold all
+// of it. Truncating to what f32 represents would make a future diff against
 // lavaplayer's source harder to read for no numerical gain.
 #[allow(clippy::excessive_precision)]
 const COEFFICIENTS_48000: [Coefficients; EQUALIZER_BAND_COUNT] = [
@@ -339,14 +339,13 @@ impl Equalizer {
     fn new(bands: &[Band], channels: usize) -> Self {
         let mut gains = [0.0; EQUALIZER_BAND_COUNT];
         for band in bands {
-            // Gains are *not* clamped. `EqualizerConfiguration.setGain` clamps to
-            // [-0.25, 1.0], but Lavalink never calls it: `EqualizerConfig` writes
-            // `array[it.band] = it.gain` and hands the array to the constructor,
-            // which stores it as-is. Clamping here would make loud settings quieter
-            // than the original's.
+            // Gains are not clamped. EqualizerConfiguration.setGain clamps to
+            // [-0.25, 1.0], but Lavalink never calls it — EqualizerConfig writes
+            // the array and hands it to the constructor as-is, so clamping here
+            // would make loud settings quieter than the original's.
             //
             // Out-of-range indices are dropped. The original throws
-            // `ArrayIndexOutOfBoundsException`, which is one of the few places a
+            // ArrayIndexOutOfBoundsException, which is one of the few places a
             // crash is not worth reproducing.
             if let Some(slot) = usize::try_from(band.band)
                 .ok()
@@ -472,29 +471,24 @@ struct KaraokeFilter {
 
 impl KaraokeFilter {
     fn new(config: Karaoke) -> Self {
-        // Neither the protocol nor `Filters::validate` bounds `filterWidth`, and
-        // unlike `vibrato`/`tremolo`'s LFOs this coefficient is fed back through
-        // `y1`/`y2` forever rather than recomputed per sample: an unclamped
-        // `filterWidth` around 8e5 or beyond makes `exp` saturate to `0.0` or
-        // `+inf`, which turns the division below into `0.0/0.0` — a `NaN` that
-        // then never leaves the filter chain's state until the client sends a new
-        // `filters` patch. `c` is also this recurrence's pole radius: even a
-        // *finite* but `c >= 1` (any negative `filterWidth`) makes the feedback
-        // loop diverge to infinity within a few dozen samples instead — clamping
-        // strictly below 1 is what actually keeps it stable, not just finite.
-        // Every realistic `filterWidth` (Nyquist and far past it) already lands
-        // well under this bound, so this is bit-identical there.
+        // filterWidth is unbounded by the protocol, and this coefficient feeds
+        // back through y1/y2 forever rather than being recomputed per sample: an
+        // unclamped filterWidth around 8e5+ makes exp saturate to 0.0 or +inf,
+        // turning the division below into a NaN that then never leaves the
+        // filter's state. c is also this recurrence's pole radius — even finite
+        // c >= 1 (any negative filterWidth) makes the feedback loop diverge to
+        // infinity in a few dozen samples, so clamping strictly below 1 is what
+        // keeps it stable. Every realistic filterWidth already lands well under
+        // this bound, so this is bit-identical there.
         let c = (-2.0 * std::f32::consts::PI * config.filter_width / SAMPLE_RATE)
             .exp()
             .clamp(1e-6, 0.999);
-        // `filterBand` has the same hole `filterWidth` does, and it needed the same
-        // guard: an out-of-range band (again, serde makes `1e39` an
-        // `f32::INFINITY` rather than an error) makes `cos` return `NaN`, which `b`
-        // and then `a` carry into the `y1`/`y2` recurrence below for good. Falling
-        // back to `cos(0)` — a band of 0 Hz — because that is the value the whole
-        // finite range converges toward and it keeps `a`'s `sqrt` argument
-        // non-negative: `1 - b²/4c` is `(1-c)²/(1+c)²` at `cos == 1`, and cannot go
-        // negative for any `|cos| <= 1`.
+        // filterBand needs the same guard as filterWidth: an out-of-range band
+        // (serde turns 1e39 into f32::INFINITY, not an error) makes cos return
+        // NaN, which b and then a carry into the y1/y2 recurrence permanently.
+        // Falls back to cos(0) — a band of 0 Hz, the value the whole finite range
+        // converges toward — which also keeps a's sqrt argument non-negative:
+        // 1 - b²/4c is (1-c)²/(1+c)² at cos == 1, never negative for |cos| <= 1.
         let band = (2.0 * std::f32::consts::PI * config.filter_band / SAMPLE_RATE).cos();
         let b = -4.0 * c / (1.0 + c) * if band.is_finite() { band } else { 1.0 };
         let a = (1.0 - b * b / (4.0 * c)).sqrt() * (1.0 - c);
@@ -555,7 +549,7 @@ struct TimescaleFilter {
     interleaved_out: Vec<f32>,
 }
 
-// `Stretch` does not implement `Debug` (it is a `cc`/`bindgen` wrapper around an
+// Stretch does not implement Debug (it is a cc/bindgen wrapper around an
 // opaque C++ object), so this is written by hand rather than derived.
 impl std::fmt::Debug for TimescaleFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -583,14 +577,13 @@ const MIN_SPEED_FACTOR: f32 = 1e-3;
 impl TimescaleFilter {
     fn new(config: Timescale, channels: usize) -> Self {
         let speed_factor = ((config.speed * config.rate) as f32).max(MIN_SPEED_FACTOR);
-        // `pitch`/`rate` are each individually in-range `f64`s, but their product
-        // can still overflow to infinity at multiplication time (`f32::max` alone
-        // wouldn't save it: `.max` on a `+inf` operand returns `+inf`, not the
-        // floor), and that would otherwise cross into `Stretch::set_transpose_factor`'s
-        // C++ FFI unchecked. A non-finite product falls back to the neutral 1.0
-        // (no pitch shift); a finite but non-positive one is floored the same way
-        // `speed_factor` is, since a zero or negative frequency multiplier is as
-        // meaningless to the stretcher as a zero or negative speed is.
+        // pitch/rate are each individually in-range f64s, but their product can
+        // still overflow to infinity at multiplication time (.max on a +inf
+        // operand returns +inf, not the floor), and that would cross into
+        // Stretch::set_transpose_factor's C++ FFI unchecked. A non-finite product
+        // falls back to the neutral 1.0 (no pitch shift); a finite but
+        // non-positive one is floored like speed_factor, since a zero or
+        // negative multiplier is just as meaningless here.
         let pitch_factor = (config.pitch * config.rate) as f32;
         let pitch_factor = if pitch_factor.is_finite() { pitch_factor.max(MIN_SPEED_FACTOR) } else { 1.0 };
 
@@ -633,11 +626,11 @@ impl AudioFilter for TimescaleFilter {
             }
         }
 
-        // `Stretch::process` takes whatever input/output lengths a call is given —
+        // Stretch::process takes whatever input/output lengths a call is given —
         // the length mismatch between them is what creates the stretch — so a
         // fixed-ratio-per-call request is exactly the streaming shape it wants.
-        // `speed_factor` is clamped to `MIN_SPEED_FACTOR` (> 0) in `new`, so this is
-        // always finite and non-negative — no `.max(0.0)` needed.
+        // speed_factor is clamped to MIN_SPEED_FACTOR (> 0) in new, so this is
+        // always finite and non-negative — no .max(0.0) needed.
         let out_frames = ((in_frames as f32) / self.speed_factor).round() as usize;
         self.interleaved_out.clear();
         self.interleaved_out.resize(out_frames * channel_count, 0.0);
@@ -732,17 +725,15 @@ impl AudioFilter for TremoloFilter {
             let offset = 1.0 - self.depth;
             for sample in channel.iter_mut() {
                 *sample *= offset + self.depth * phase.sin();
-                // lavadsp's `VectorSupport.tremolo` accumulates this phase in an
-                // unwrapped `float` and never resets it, so on a real node the LFO's
-                // rate quantises away after a couple of minutes and eventually
-                // freezes as the increment falls below the f32 ULP at that
-                // magnitude. That is reproduced faithfully by lavadsp's own
-                // upstream, lavaplayer, but not by us: unlike volume curves or
-                // status codes, LFO phase is not something a client observes or
-                // branches on, so there is no wire fidelity to preserve here, only
-                // an inherited defect. `rem_euclid` keeps the same pattern used for
-                // vibrato below, and rotation's `f64` phase already sidesteps the
-                // same class of problem.
+                // lavadsp's VectorSupport.tremolo accumulates this phase in an
+                // unwrapped float and never resets it, so on a real node the LFO's
+                // rate quantises away and eventually freezes as the increment
+                // falls below the f32 ULP. Reproduced faithfully by upstream, but
+                // not here: LFO phase isn't observable or branched on by any
+                // client, so there's no wire fidelity to preserve, only an
+                // inherited defect. rem_euclid matches the pattern vibrato below
+                // already uses, and rotation's f64 phase sidesteps the same class
+                // of problem. See MAINTENANCE.md.
                 *phase = (*phase + self.step).rem_euclid(2.0 * std::f32::consts::PI);
             }
         }
@@ -803,17 +794,16 @@ impl VibratoChannel {
     }
 
     fn read_hermite(&self, delay: f32) -> f32 {
-        // `rem_euclid` wraps in one step regardless of how far out of range `delay`
+        // rem_euclid wraps in one step regardless of how far out of range delay
         // is (an unclamped client-supplied depth can push it arbitrarily far), where
         // the previous increment/decrement loop could spin for a very long time.
         let read_index = (self.write_index as f32 - 1.0 - delay).rem_euclid(self.size as f32);
 
-        // `rem_euclid` is mathematically confined to `[0, size)`, but floating-point
-        // rounding can round its result up to exactly `size` (seen when `delay` is
-        // within an epsilon of a whole number of samples behind the write index),
-        // which would then read `size + 3` — one past the mirrored margin at the end
-        // of `buffer`. Clamping the index rather than the float keeps this exact for
-        // every other value; the one sample it can shift by is inaudible.
+        // rem_euclid is mathematically confined to [0, size), but rounding can
+        // push its result up to exactly size (when delay is within an epsilon of
+        // a whole number of samples), which would read size + 3 — one past the
+        // mirrored margin. Clamping the index rather than the float keeps every
+        // other value exact; the one sample this can shift by is inaudible.
         let offset = (read_index as usize).min(self.size - 1);
         let x = read_index - offset as f32;
 
@@ -834,7 +824,7 @@ impl VibratoChannel {
     /// lengthens. A bipolar one would centre the pitch instead of bending it up.
     fn next_lfo(&mut self, step: f32) -> f32 {
         let value = (self.phase.sin() + 1.0) * 0.5;
-        // `rem_euclid`, not a decrement loop, so an extreme client-supplied
+        // rem_euclid, not a decrement loop, so an extreme client-supplied
         // frequency can't spin this for a very long time.
         self.phase = (self.phase + step).rem_euclid(2.0 * std::f32::consts::PI);
         value
@@ -933,12 +923,12 @@ impl RotationFilter {
                 f64::from(SAMPLE_RATE) / (config.rotation_hz * 2.0 * std::f64::consts::PI);
             1.0 / samples_per_cycle
         };
-        // An extreme client-supplied `rotationHz` overflows the multiplication
-        // above to `f64::INFINITY`, and a non-finite step turns `phase.sin()`
-        // into `NaN` forever after — the same class of defect `KaraokeFilter`
-        // guards `filterWidth` against. Falling back to disabled rather than
-        // reproducing the NaN sink: like tremolo's phase wrap, this is not
-        // something a client observes on the wire, only ever a defect.
+        // An extreme rotationHz overflows the multiplication above to
+        // f64::INFINITY, and a non-finite step turns phase.sin() into NaN
+        // forever after — the same class of defect KaraokeFilter guards
+        // filterWidth against. Falls back to disabled rather than reproducing
+        // the NaN sink: like tremolo's phase wrap, not something a client
+        // observes on the wire, only ever a defect.
         let step = if step.is_finite() { step } else { 0.0 };
 
         Self {
@@ -1043,7 +1033,7 @@ mod tests {
     #[test]
     fn volume_near_unity_is_passed_through_untouched() {
         let mut chain = FilterChain::new(&filters(r#"{"volume":1.01}"#), 1);
-        // The stage is still built — `VolumeConfig.isEnabled` is `volume != 1.0`.
+        // The stage is still built — VolumeConfig.isEnabled is volume != 1.0.
         assert!(chain.is_enabled());
 
         let mut channels = vec![vec![0.5, -0.25]];
@@ -1541,10 +1531,10 @@ mod tests {
         }
 
         let base = channel.write_index as f32 - 1.0;
-        // The smallest float strictly greater than `base`. Subtracting it makes
-        // `write_index - 1 - delay` a single ULP below zero — near enough to zero
-        // that adding `size` back in (`rem_euclid`'s negative branch) rounds the
-        // sum up to exactly `size`.
+        // The smallest float strictly greater than base. Subtracting it makes
+        // write_index - 1 - delay a single ULP below zero — near enough to zero
+        // that adding size back in (rem_euclid's negative branch) rounds the
+        // sum up to exactly size.
         let delay = f32::from_bits(base.to_bits() + 1);
 
         let _ = channel.read_hermite(delay);
@@ -1635,7 +1625,7 @@ mod tests {
         let in_frames = channels[0].len();
         chain.process(&mut channels);
 
-        // Not an exact halving: `Stretch` carries internal FFT-block latency across
+        // Not an exact halving: Stretch carries internal FFT-block latency across
         // calls, so a single 960-frame call sees only part of that settle out.
         assert_ne!(channels[0].len(), in_frames);
         assert_eq!(channels[0].len(), channels[1].len(), "channels must stay in lockstep");

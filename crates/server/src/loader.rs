@@ -115,11 +115,10 @@ impl Loader {
         }
 
         // Join an existing load, or become the one that runs it. A leader that dies
-        // without publishing (see the `Err` arm below) sends every follower back
-        // here rather than off to its own independent load, so single-flight still
-        // holds and the result still gets cached: `LeaderGuard`'s `Drop` clears the
-        // dead entry before this loop can observe it again, so exactly one of the
-        // followers becomes the new leader and the rest re-subscribe to it.
+        // without publishing (see the Err arm below) sends every follower back here
+        // rather than off to its own load, so single-flight still holds:
+        // LeaderGuard's Drop clears the dead entry first, so exactly one follower
+        // becomes the new leader and the rest re-subscribe to it.
         loop {
             let mut receiver = None;
             let mut own_sender = None;
@@ -145,20 +144,18 @@ impl Loader {
                 }
             }
 
-            // No receiver means the match above took the `None` arm and this task
-            // became the leader, inserting `own_sender` itself.
+            // No receiver means the match above took the None arm and this task
+            // became the leader, inserting own_sender itself.
             let sender = own_sender.expect("the leader branch always sets own_sender");
 
-            // Guarantees the entry inserted above is cleared even if this leader's
-            // own future is dropped before `load_uncached` returns — a client-side
-            // request cancellation (e.g. an HTTP/2 stream reset on timeout) drops
-            // this future mid-await with no further code of ours running. Without
-            // this, the `broadcast::Sender` above would stay in `in_flight` forever
-            // with nothing left to call `.send()` on it, and every later caller for
-            // this exact identifier would subscribe and hang in `recv().await`
-            // permanently. The explicit removal below already clears it on a
-            // normal return, so this is a no-op then; it only matters on the
-            // cancellation path.
+            // Guarantees the entry above is cleared even if this leader's own
+            // future is dropped before load_uncached returns (e.g. an HTTP/2
+            // stream reset on client cancellation drops this future mid-await).
+            // Without it the broadcast::Sender would stay in in_flight forever
+            // with nothing to call .send() on it, and every later caller for this
+            // identifier would subscribe and hang in recv().await permanently. A
+            // no-op on the normal-return path, where the explicit removal below
+            // already clears it.
             let leader_guard = LeaderGuard {
                 loader: self,
                 identifier,
@@ -185,10 +182,9 @@ impl Loader {
             }
 
             // Removing before sending is safe: subscribers join under the same
-            // lock, so anyone who got a receiver did so before the removal and is
-            // still attached. `remove_if_still_ours` rather than a plain
-            // remove-by-key so this can never delete a different leader's entry —
-            // see `LeaderGuard`'s docs for when that would otherwise happen.
+            // lock, so anyone with a receiver got it before the removal.
+            // remove_if_still_ours instead of remove-by-key so this can never
+            // delete a different leader's entry — see LeaderGuard's docs.
             leader_guard.remove_if_still_ours();
             let _ = sender.send(result.clone());
 
@@ -219,22 +215,21 @@ impl Loader {
         let identifier = identifier.to_owned();
         let manager = Arc::clone(&self.managers[index]);
 
-        // A dedicated thread rather than `spawn_blocking`, and the reason is not
-        // performance. Blocking-pool threads still carry the runtime in their
-        // thread-local context, and `reqwest::blocking` panics outright when it
-        // detects one — "cannot drop a runtime in a context where blocking is not
-        // allowed". A plain thread does not inherit that context, so the HTTP source
-        // works there.
+        // A dedicated thread rather than spawn_blocking — not for performance.
+        // Blocking-pool threads still carry the runtime in thread-local context,
+        // and reqwest::blocking panics when it detects one ("cannot drop a runtime
+        // in a context where blocking is not allowed"). A plain thread doesn't
+        // inherit that context, so the HTTP source works there.
         //
-        // The permit moves into the thread rather than staying a local here: this
+        // The permit moves into the thread instead of staying local: this
         // function is cancelled by dropping its own future (a client-side request
-        // cancellation), which would otherwise free the permit the moment that
-        // happens while the OS thread — already started, nothing left to cancel it —
-        // keeps running the real (possibly slow) load. A client that cancels and
-        // retries in a loop would then accumulate unbounded background loads with
-        // the semaphore reporting free slots throughout. Holding the permit for the
-        // thread's actual lifetime ties the concurrency bound to the work that's
-        // really running, not to whether anyone is still awaiting it.
+        // cancellation), which would otherwise free the permit while the OS
+        // thread — already started, nothing left to cancel it — keeps running the
+        // real load. A client that cancels and retries in a loop would then
+        // accumulate unbounded background loads while the semaphore reports free
+        // slots throughout. Holding the permit for the thread's real lifetime
+        // ties the concurrency bound to the work actually running, not to
+        // whether anyone still awaits it.
         let (tx, rx) = tokio::sync::oneshot::channel();
         let spawned = std::thread::Builder::new()
             .name("loader".to_owned())
@@ -286,7 +281,7 @@ impl Loader {
                                 _ => -1,
                             },
                         },
-                        // We ship no plugins, so this is `{}` exactly as the
+                        // We ship no plugins, so this is {} exactly as the
                         // original's built-in sources report it.
                         plugin_info: Default::default(),
                         tracks,
@@ -520,7 +515,7 @@ mod tests {
         for track in &playlist.tracks {
             assert!(encoded_track::decode(&track.encoded).is_ok());
         }
-        // We ship no plugins, so this stays `{}` rather than becoming absent.
+        // We ship no plugins, so this stays {} rather than becoming absent.
         assert!(playlist.plugin_info.is_empty());
     }
 
@@ -693,7 +688,7 @@ mod tests {
         };
 
         // A new leader takes over the same key before the stale guard drops —
-        // exactly the situation `remove_if_still_ours` exists to detect.
+        // exactly the situation remove_if_still_ours exists to detect.
         lock(&loader.in_flight).insert(identifier.to_owned(), sender_b.clone());
 
         drop(stale_guard);
@@ -862,16 +857,14 @@ mod tests {
         assert!(matches!(b.unwrap(), LoadResult::Track(_)));
 
         // One load for the aborted leader (its OS thread was already running and
-        // cannot be cancelled) plus exactly one for the new leader the two
-        // followers elected between themselves — never three.
+        // can't be cancelled) plus exactly one for the new leader the followers
+        // elected — never three.
         //
-        // The orphaned leader's `fetch_add` races this assertion, not just the
-        // rest of the test: `std::thread::Builder::spawn` returning only means
-        // the OS thread exists, not that the kernel has scheduled it yet, and
-        // nothing else here waits on it (there is no handle to join — it is
-        // deliberately orphaned). Under CI contention the scheduling delay can
-        // outlast everything from here to a bare check, so poll instead of
-        // reading the counter once.
+        // The orphaned leader's fetch_add races this assertion: spawn returning
+        // only means the OS thread exists, not that the kernel has scheduled it,
+        // and nothing here waits on it (deliberately orphaned, no join handle).
+        // Poll instead of reading the counter once, since CI contention can
+        // outlast a bare check.
         let deadline = Instant::now() + Duration::from_secs(2);
         while loads.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(5)).await;

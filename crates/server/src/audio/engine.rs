@@ -162,10 +162,10 @@ impl PipelineEngine {
         if let Some(active) = lock(&self.active).as_ref() {
             signal_pump(&active.commands, &active.interrupt, command);
             // In steady playback the ring is usually full (decode outruns real
-            // time), so the pump is usually parked in `wait_for_space` rather than
+            // time), so the pump is usually parked in wait_for_space rather than
             // between packets — without this, a command sent there sits unseen for
-            // up to `COMMAND_POLL` (100ms), which for `Seek` means up to 100ms of
-            // `playerUpdate`s reporting the pre-seek position before it catches up.
+            // up to COMMAND_POLL (100ms), which for Seek means up to 100ms of
+            // playerUpdates reporting the pre-seek position before it catches up.
             active.ring.wake();
         }
     }
@@ -174,7 +174,7 @@ impl PipelineEngine {
         let Some(events) = self.events.get().cloned() else {
             return;
         };
-        // `try_send`, not `send`: this runs on the pump thread, which must not block
+        // try_send, not send: this runs on the pump thread, which must not block
         // on a busy actor.
         let _ = events.try_send(Command::Engine(event));
     }
@@ -185,9 +185,9 @@ impl PipelineEngine {
             return;
         };
 
-        // `Stop` is the command that most needs `signal_pump`'s ordering: without
+        // Stop is the command that most needs signal_pump's ordering: without
         // it, a pump on a stalled source could burn its whole reconnect budget (up
-        // to `MAX_RECONNECT_ATTEMPTS` × (`connect_timeout` + `read_timeout`), tens
+        // to MAX_RECONNECT_ATTEMPTS × (connect_timeout + read_timeout), tens
         // of seconds) before it notices it was told to stop at all.
         //
         // Dropping the sender is what unblocks a pump parked on a full ring.
@@ -195,7 +195,7 @@ impl PipelineEngine {
         drop(previous.commands);
 
         // Before the replacement ring exists, so the reader this one leaves behind
-        // inside songbird's `Input` cannot report the outgoing track's position
+        // inside songbird's Input cannot report the outgoing track's position
         // over the incoming track's.
         previous.ring.detach_position();
 
@@ -215,7 +215,7 @@ impl Engine for PipelineEngine {
     }
 
     fn attach(&self, events: AsyncSender<Command>) {
-        // `Engine::attach`'s own contract: called once, at construction.
+        // Engine::attach's own contract: called once, at construction.
         let _ = self.events.set(events);
     }
 
@@ -251,16 +251,14 @@ impl Engine for PipelineEngine {
             self.runtime.spawn(async move {
                 let handle = voice.play(input).await;
 
-                // Store the handle only if this track is still the current one: by
-                // the time the mixer has taken the input, a newer play request may
-                // already have replaced it.
+                // Store the handle only if this track is still current — by the
+                // time the mixer takes the input, a newer play request may have
+                // replaced it.
                 //
-                // `paused` is read from `current` here, not from a `request.paused`
-                // captured at the top of `play` — `Active::paused` is the same field
-                // `set_paused` writes, so whichever of the two runs last (a separate
-                // `paused`-only patch landing before this task gets to run, or this
-                // task completing first) is what gets applied, instead of a snapshot
-                // from before the handle even existed.
+                // paused is read from current, not a snapshot captured at the top
+                // of play: Active::paused is the same field set_paused writes, so
+                // whichever of the two runs last wins, instead of a stale value
+                // from before the handle existed.
                 let should_pause = {
                     let mut active = lock(&active);
                     match active.as_mut() {
@@ -289,10 +287,8 @@ impl Engine for PipelineEngine {
         let events = self.events.get().cloned();
         let guild_id = self.guild_id;
         let active = Arc::clone(&self.active);
-        // Kept outside config too (not just inside it) so the catch_unwind below
-        // can still read it after a panic has destroyed run's own State — that is
-        // the whole reason this exists rather than staying a plain bool on State,
-        // see PumpConfig::produced.
+        // Kept outside config so catch_unwind below can still read it after a
+        // panic destroys run's own State — see PumpConfig::produced.
         let produced = Arc::new(AtomicBool::new(false));
         let config = PumpConfig {
             info: request.track.info.clone(),
@@ -310,12 +306,11 @@ impl Engine for PipelineEngine {
         let spawned = std::thread::Builder::new()
             .name(format!("pump-{guild_id}"))
             .spawn(move || {
-                // A `Mutex<Instant>` taken on every decoded packet just to throttle
-                // progress events — measured and left alone rather than swapped for
-                // an `AtomicU64` of millis. An uncontended lock is ~15ns against the
-                // packet's own decode cost (tens of µs, see
-                // `crates/server/benches/pipeline.rs`), so it is not on the list of
-                // things worth the churn.
+                // A Mutex<Instant> per decoded packet, just to throttle progress
+                // events. Measured and left as-is: an uncontended lock is ~15ns
+                // against the packet's own decode cost (tens of µs, see
+                // benches/pipeline.rs) — not worth swapping for an AtomicU64 of
+                // millis.
                 let last_progress = Mutex::new(Instant::now());
                 let on_progress = || {
                     let mut last = lock(&last_progress);
@@ -329,16 +324,13 @@ impl Engine for PipelineEngine {
                     }
                 };
 
-                // A panic in one pump is contained here. It cannot be recovered
-                // from, but it must not reach another player, and it should end the
-                // track with a defined event rather than silence. Cloned before the
-                // move below so this survives the unwind: `writer` itself is
-                // consumed by `pump::run` and gone once it panics, but `RingWriter`
-                // is just a handle onto the same `Arc<Shared>`, so this clone can
-                // still call `finish()` afterwards regardless of whether the event
-                // below actually reaches the actor (a full command queue drops it
-                // silently) — otherwise the reader has no other way to learn the
-                // track is over and hands the mixer silence forever.
+                // Contains a panic in this pump so it can't reach another player,
+                // and still ends the track with a defined event. Cloned before the
+                // move below so it survives the unwind: writer is consumed by
+                // pump::run and gone once it panics, but this clone (same
+                // Arc<Shared>) can still call finish() — the reader's only way to
+                // learn the track ended if the event below never reaches the actor
+                // (a full command queue drops it silently).
                 let writer_after_panic = writer.clone();
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     pump::run(config, writer, pump_commands, position_ms, &on_progress)
@@ -350,13 +342,12 @@ impl Engine for PipelineEngine {
 
                 let outcome = outcome.unwrap_or_else(|_| super::PumpOutcome::Failed {
                     exception: Exception::fault("The audio pipeline panicked", "pump panic"),
-                    // Not hardcoded true: a panic inside pump::open, before a
-                    // single sample reached the ring, is a load failure, and the
-                    // actor turns started into loadFailed vs finished — clients
-                    // use exactly that distinction to decide whether to advance
-                    // the queue. produced is read here, after State (and its own
-                    // copy of the flag) has already been destroyed by the unwind,
-                    // which is why it has to live outside State at all.
+                    // Not hardcoded true: a panic inside pump::open, before any
+                    // sample reached the ring, is a load failure — the actor turns
+                    // started into loadFailed vs finished, and clients use that to
+                    // decide whether to advance the queue. Read here because State
+                    // (and its own copy) is already gone by the time the unwind
+                    // reaches this point.
                     started: produced.load(Ordering::Relaxed),
                 });
 
@@ -369,12 +360,10 @@ impl Engine for PipelineEngine {
                         // A stop was requested; the actor already knows.
                         super::PumpOutcome::Stopped => None,
                     };
-                    // A pump superseded by a replace can still be mid-`next_packet`
-                    // when `Stop` is sent, so it can reach a terminal outcome
-                    // (natural EOF or a decode error) without ever seeing the
+                    // A superseded pump can still be mid-next_packet when Stop is
+                    // sent, so it can reach EOF/error without ever seeing the
                     // command. Reporting that outcome unconditionally would end
-                    // whatever track replaced this one, not the track that
-                    // actually produced it.
+                    // whatever track replaced it.
                     if let Some(event) = event {
                         if is_current(&active, generation) {
                             let _ = events.try_send(Command::Engine(event));
@@ -401,27 +390,23 @@ impl Engine for PipelineEngine {
         let voice = Arc::clone(&self.voice);
         let active = Arc::clone(&self.active);
         self.runtime.spawn(async move {
-            // Skipped once a `play` has already installed its replacement.
+            // Skipped once a play has already installed its replacement.
             //
-            // Replacing a track is `stop` then `play` — `actor.rs`'s
-            // `stop_track(Replaced)` followed by `engine.play` — and each spawns a
-            // task contending for the same voice mutex with nothing ordering the
-            // two. songbird maps both onto one ordered channel
-            // (`SetTrack(None)` for `stop`, `SetTrack(Some(..))` for
-            // `play_only_input`), so whichever task takes the lock *last* decides
-            // what the mixer is left holding, and tokio's LIFO slot makes the
-            // later spawn run first — i.e. this task landing last is the common
-            // order, not the unlucky one. That order leaves the mixer with no
-            // track at all: the new pump fills a ring nobody reads, stops
-            // reporting progress, and the player answers `Playing` with a frozen
-            // position and no audio until `check_stuck` finally fires.
+            // Replace is stop then play (actor.rs's stop_track(Replaced) then
+            // engine.play), each spawning a task that contends for the same voice
+            // mutex with nothing ordering the two. songbird serializes both onto
+            // one channel, so whichever task takes the lock last wins — and
+            // tokio's LIFO slot makes the later spawn (play) run first, so this
+            // stop task landing last is the common case, not a rare race. Left
+            // unguarded, that order would leave the mixer with no track: the new
+            // pump fills a ring nobody reads, and the player answers Playing with
+            // a frozen position until check_stuck fires.
             //
-            // `play` installs `active` synchronously before it spawns, and the
-            // actor issues both calls from one `handle()` that never awaits in
-            // between, so a superseded stop always observes `Some` here. Skipping
-            // is correct and not merely safe: `play_only_input` is itself a
-            // replace, and `stop_active` has already stopped the outgoing track's
-            // handle directly.
+            // play installs active synchronously before spawning, and the actor
+            // issues both calls from one handle() that never awaits in between,
+            // so a superseded stop always observes Some here — skipping is
+            // correct, not just safe: play_only_input is itself a replace, and
+            // stop_active already stopped the outgoing track's handle directly.
             if superseded_by_a_replacement(&active) {
                 return;
             }
@@ -450,10 +435,10 @@ impl Engine for PipelineEngine {
 
     fn seek(&self, position_ms: i64) {
         // Announced before the command is even sent, mirroring lavaplayer's own
-        // `LocalAudioTrackExecutor.setPosition`, which sets `queuedSeek`
+        // LocalAudioTrackExecutor.setPosition, which sets queuedSeek
         // synchronously on the calling thread — so position reporting holds at
         // the target from this call's return, not from whenever the pump gets
-        // around to the command. See `RingWriter::begin_seek`'s docs.
+        // around to the command. See RingWriter::begin_seek's docs.
         if let Some(active) = lock(&self.active).as_ref() {
             active.ring.begin_seek(position_ms);
         }
@@ -530,7 +515,7 @@ mod tests {
         let active: Mutex<Option<Active>> = Mutex::new(None);
         assert!(!superseded_by_a_replacement(&active));
 
-        // What `play` installs, synchronously, before it spawns anything.
+        // What play installs, synchronously, before it spawns anything.
         *lock(&active) = Some(dummy_active(1));
         assert!(superseded_by_a_replacement(&active));
     }
@@ -549,8 +534,8 @@ mod tests {
         let first = next_generation.fetch_add(1, Ordering::Relaxed);
         *lock(&active) = Some(dummy_active(first));
 
-        // The pump for `first` is stuck retrying a stalled source and never
-        // observes the stop; `active` is cleared out from under it anyway.
+        // The pump for first is stuck retrying a stalled source and never
+        // observes the stop; active is cleared out from under it anyway.
         *lock(&active) = None;
 
         let second = next_generation.fetch_add(1, Ordering::Relaxed);

@@ -97,10 +97,10 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         // Deliberately bodyless. The path is not knowable here, and
-        // [`fill_error_path`] — the outermost layer in `rest::router`, so nothing
+        // [fill_error_path] — the outermost layer in rest::router, so nothing
         // reaches a client without passing through it — re-renders every response
         // carrying this extension once it does know. Rendering a body here as well
-        // would serialize an `ErrorBody` and immediately throw it away on every
+        // would serialize an ErrorBody and immediately throw it away on every
         // error the node returns.
         let mut response = self.status.into_response();
         response.extensions_mut().insert(self);
@@ -129,7 +129,7 @@ pub async fn fill_error_path(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
 
     // Taken out rather than cloned: this is the outermost layer, so nothing after it
-    // reads the extension, and the error owns a `String` that would be copied for no
+    // reads the extension, and the error owns a String that would be copied for no
     // one on every error response.
     let Some(error) = response.extensions_mut().remove::<ApiError>() else {
         return response;

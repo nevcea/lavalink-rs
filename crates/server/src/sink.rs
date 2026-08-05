@@ -99,20 +99,18 @@ impl Sink {
             match SnapshotKey::of(&message) {
                 Some(key) => {
                     // While paused, snapshots are not queued at all — a genuine
-                    // divergence, not a port of the original: `SocketContext.kt`
-                    // queues *every* payload while paused, `playerUpdate`/`Stats`
-                    // included, in its own unbounded `resumeEventQueue`, and
-                    // replays the whole thing verbatim on resume before also
-                    // sending one fresh update per player (`SocketContext.kt:193`).
+                    // divergence from the original, which queues every payload
+                    // (playerUpdate/Stats included) in an unbounded
+                    // resumeEventQueue and replays it verbatim on resume before
+                    // sending one fresh update per player (SocketContext.kt:193).
                     // Queuing a growing backlog of stale positions is exactly the
-                    // unbounded-growth shape this module's own docs reject for
-                    // essentials; a stale `playerUpdate` is also strictly less
-                    // useful than the fresh one that immediately follows it, so
-                    // dropping it here loses nothing a client can act on. The end
-                    // state a client observes still matches: `ws.rs::run` sends
-                    // that same per-player fresh update at resume, so the queued
-                    // replay the original does is redundant work we skip, not a
-                    // wire-visible difference in what the client ends up seeing.
+                    // unbounded growth this module's docs reject for essentials,
+                    // and a stale playerUpdate is strictly less useful than the
+                    // fresh one that follows it — dropping it loses nothing a
+                    // client can act on. What a client actually observes still
+                    // matches: ws.rs::run sends that same fresh per-player update
+                    // at resume, so the original's replay is redundant work we
+                    // skip, not a wire-visible difference.
                     if inner.paused {
                         return Ok(());
                     }
@@ -164,9 +162,9 @@ impl Sink {
         if let Some(message) = inner.essential.pop_front() {
             return Some(message);
         }
-        // `pop_first`, not `keys().next().cloned()` then `remove`: the latter cloned
-        // the key `String` and searched the map twice to take the entry it had just
-        // found. Same entry either way — both take the first in `BTreeMap` order.
+        // pop_first, not keys().next().cloned() then remove: the latter cloned
+        // the key String and searched the map twice to take the entry it had just
+        // found. Same entry either way — both take the first in BTreeMap order.
         inner.snapshots.pop_first().map(|(_, message)| message)
     }
 
@@ -208,12 +206,11 @@ impl Sink {
             inner.snapshots.clear();
         }
         // Both calls, not just one: notify_waiters only reaches a Notified future
-        // that is already registered (polled at least once), so a recv caller
-        // between its closed check and its await point — already past try_recv,
-        // not yet registered — would never see this wakeup and hang forever.
-        // notify_one additionally stores a permit for the next await to consume
-        // immediately, which closes exactly that gap. One writer task per sink,
-        // so one stored permit is enough to cover it.
+        // already registered (polled at least once), so a recv caller between its
+        // closed check and its await point would never see this wakeup and hang
+        // forever. notify_one stores a permit for the next await to consume
+        // immediately, closing that gap — one writer task per sink, so one stored
+        // permit covers it.
         self.notify.notify_waiters();
         self.notify.notify_one();
     }

@@ -329,16 +329,15 @@ impl SessionRegistry {
         }
 
         if entry.session.resuming() {
-            // A negative timeout has no real deadline to give — treated as
-            // already expired (0) rather than panicking Duration::from_secs on a
-            // value it can't represent. On the other end, timeout_seconds is an
-            // unvalidated client-supplied i64 (rest/session.rs's update writes it
-            // straight through), so a huge one can still overflow Instant +
-            // Duration. checked_add catches that side too, falling back to now —
-            // already expired, same as the negative case — rather than panicking
-            // under this lock: Open has no timeout of its own (is_expired never
-            // reclaims it), so a panic here would strand the entry Open forever
-            // instead of just failing this one disconnect.
+            // A negative timeout has no real deadline — treated as already
+            // expired (0) rather than panicking Duration::from_secs on a value it
+            // can't represent. timeout_seconds is also an unvalidated
+            // client-supplied i64 (rest/session.rs's update writes it straight
+            // through), so a huge one can overflow Instant + Duration;
+            // checked_add catches that side too, falling back to now (already
+            // expired) rather than panicking under this lock — Open has no
+            // timeout of its own, so a panic here would strand the entry Open
+            // forever instead of just failing this one disconnect.
             let timeout = Duration::from_secs(entry.session.resume_timeout_secs().max(0) as u64);
             entry.state = SessionState::Resumable {
                 deadline: now.checked_add(timeout).unwrap_or(now),
@@ -743,7 +742,7 @@ mod tests {
         }
 
         let now = Instant::now();
-        // What `sweep_expired`'s scan phase would have decided moments earlier:
+        // What sweep_expired's scan phase would have decided moments earlier:
         // this session is expired (by overflow, not deadline).
         assert!(registry
             .lock()
@@ -751,11 +750,11 @@ mod tests {
             .is_some_and(|entry| SessionRegistry::is_expired(entry, now)));
 
         // The claim that lands in the gap between scan and removal. Succeeds
-        // because the deadline itself is nowhere near `now`.
+        // because the deadline itself is nowhere near now.
         assert!(registry.claim_for_resume(&session.id, now).is_some());
         assert_eq!(registry.state(&session.id), Some(SessionState::Open));
 
-        // The stale removal decision must see the session is `Open` now and
+        // The stale removal decision must see the session is Open now and
         // leave it alone, instead of tearing down a session just resumed.
         assert!(registry.remove_if_still_expired(&session.id, now).is_none());
         assert!(registry.get(&session.id).is_some());
@@ -803,9 +802,9 @@ mod tests {
     async fn shutdown_does_not_let_one_wedged_player_block_its_siblings() {
         let session = Session::new("s".into(), 1, None);
 
-        // A player whose actor loop never runs: `destroy()`'s command send
+        // A player whose actor loop never runs: destroy()'s command send
         // succeeds (there's room in the channel) but its oneshot reply never
-        // arrives, so it can only ever be recovered by `PLAYER_DESTROY_TIMEOUT`.
+        // arrives, so it can only ever be recovered by PLAYER_DESTROY_TIMEOUT.
         let wedged_voice_updates: crate::player::VoiceUpdateSlot =
             Arc::new(std::sync::OnceLock::new());
         let wedged_voice = Arc::new(VoiceConnection::new(

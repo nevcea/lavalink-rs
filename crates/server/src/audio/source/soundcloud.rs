@@ -41,7 +41,7 @@ impl SourceManager for SoundCloudSource {
 
     fn load(&self, identifier: &str) -> Result<SourceLoad, SourceError> {
         if let Some(query) = identifier.strip_prefix("scsearch:") {
-            // See `YouTubeSource::load`'s equivalent comment: this must not shell
+            // See YouTubeSource::load's equivalent comment: this must not shell
             // out even if called directly with search disabled.
             if !self.search_enabled || query.trim().is_empty() {
                 return Err(SourceError::NotFound);
@@ -57,8 +57,8 @@ impl SourceManager for SoundCloudSource {
         }
 
         // A set is SoundCloud's playlist. Nothing names an entry point within one —
-        // there is no `watch?v=…&list=…` equivalent — so the selection is always
-        // "none", which is what `-1` on the wire means.
+        // there is no watch?v=…&list=… equivalent — so the selection is always
+        // "none", which is what -1 on the wire means.
         if is_set_url(identifier) {
             return self
                 .backend
@@ -80,8 +80,8 @@ fn is_soundcloud_url(identifier: &str) -> bool {
     let rest = rest.strip_prefix("www.").unwrap_or(rest);
     let rest = rest.strip_prefix("m.").unwrap_or(rest);
 
-    // A path is required: `soundcloud.com` alone names no track, and claiming it
-    // would turn the front page into a failed load rather than `empty`.
+    // A path is required: soundcloud.com alone names no track, and claiming it
+    // would turn the front page into a failed load rather than empty.
     let host_matches = rest.starts_with("soundcloud.com/") || rest.starts_with("on.soundcloud.com/");
     host_matches
         && rest
@@ -125,7 +125,7 @@ mod tests {
             "https://example.invalid/a.mp3",
             "ytsearch:something",
             "/tmp/a.mp3",
-            // No path: names no track, so it is `empty` rather than a failed load.
+            // No path: names no track, so it is empty rather than a failed load.
             "https://soundcloud.com/",
             "https://soundcloud.com",
             // A lookalike host must not be claimed.

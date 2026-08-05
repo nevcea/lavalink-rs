@@ -32,9 +32,9 @@
 //! `audio::filter`'s module docs for why it does not any more.
 
 // The default limit overflows when the trait solver checks auto-trait bounds
-// (Send/Sync) on the full REST router as one type — `AppState` pulls in
+// (Send/Sync) on the full REST router as one type — AppState pulls in
 // songbird's connection/error types transitively, and that chain runs deep
-// enough during a `Router::oneshot` call (used by `rest::tests`) to need more
+// enough during a Router::oneshot call (used by rest::tests) to need more
 // headroom than 128 gives.
 #![recursion_limit = "256"]
 

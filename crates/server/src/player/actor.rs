@@ -263,7 +263,7 @@ impl PlayerActor {
         // Not from the engine: whether the player is playing is the actor's own
         // state, not the pipeline's.
         let playing_since_ms = Arc::new(AtomicI64::new(0));
-        // The engine reports back as `Command::Engine`, so it never needs a
+        // The engine reports back as Command::Engine, so it never needs a
         // reference to the actor itself.
         engine.attach(tx.clone());
         let _ = voice_slot.set(voice_tx.clone());
@@ -305,15 +305,15 @@ impl PlayerActor {
                 }
                 // Destroy wins over anything in flight. The track ends with no
                 // event, matching the original, which drops the player without
-                // emitting on `DELETE`.
+                // emitting on DELETE.
                 //
-                // `None` — every `PlayerHandle` dropped — ends the actor just the
-                // same, with nobody left to acknowledge. That is the case a
-                // `Session::shutdown` whose `destroy` timed out leaves behind: it
-                // has already taken the guild out of the map, so the drop at the
-                // end of that call is the last reference, and without this the
-                // actor, its pump thread and its voice connection would stay
-                // alive and unreachable for the life of the process.
+                // None — every PlayerHandle dropped — ends the actor the same
+                // way, with nobody left to acknowledge. That's the case a
+                // Session::shutdown whose destroy timed out leaves behind: it has
+                // already taken the guild out of the map, so that drop is the
+                // last reference, and without this the actor, its pump thread,
+                // and its voice connection would stay alive unreachable for the
+                // life of the process.
                 reply = self.destroy.recv() => {
                     self.engine.stop();
                     self.model.stop();
@@ -331,13 +331,13 @@ impl PlayerActor {
                         None => self.voice_updates_closed = true,
                     }
                 }
-                // Only armed while a track is actually running. `check_stuck` returns
-                // immediately for every other state, so an idle player was waking the
-                // runtime twice a second to decide it had nothing to do — multiplied
-                // by every player the node holds, playing or not. A disabled `select!`
-                // branch is never polled, so no timer is registered at all meanwhile.
+                // Only armed while a track is actually running. check_stuck returns
+                // immediately for every other state, so an idle player was waking
+                // the runtime twice a second for nothing — multiplied by every
+                // player the node holds. A disabled select! branch is never
+                // polled, so no timer is registered at all meanwhile.
                 //
-                // Re-arming is safe: `PlayerModel::set_paused` restamps `last_progress`
+                // Re-arming is safe: PlayerModel::set_paused restamps last_progress
                 // on resume, so the first tick after a pause does not measure the pause.
                 _ = stuck_check.tick(), if self.model.playback.is_playing() => {
                     self.check_stuck(Instant::now());
@@ -362,7 +362,7 @@ impl PlayerActor {
             }
             Command::Engine(event) => self.apply_engine_event(event),
         }
-        // Every path above can change `self.model.playback`, and none of them is
+        // Every path above can change self.model.playback, and none of them is
         // worth hunting down individually just to keep a second counter in step —
         // one resync after every command is cheaper to keep correct.
         self.sync_playing();
@@ -403,7 +403,7 @@ impl PlayerActor {
             self.engine.set_paused(paused);
         }
 
-        // Cloned because `userData` is consumed again further down, when the request
+        // Cloned because userData is consumed again further down, when the request
         // also sets a track — the two paths are mutually exclusive at run time but
         // both are reachable from here.
         if let Some(user_data) = request.user_data.clone().take_if(track_untouched) {
@@ -446,25 +446,23 @@ impl PlayerActor {
         match request.track {
             None => {}
             Some(track_change) => {
-                // `noReplace` with something already playing: the whole request is
-                // dropped and the current state returned, with a 200 rather than an
-                // error (`:182-185`). This guards both branches below, not just
-                // `Play` — the original's check runs once, before it has even
-                // decided whether the request means play or stop (`encodedTrack:
-                // null` takes the same early return when something is already
-                // playing, request is quietly ignored — `noReplace` protects
-                // "something is already playing" full stop, not just "against
-                // being replaced by a *different* track").
+                // noReplace with something already playing: the whole request is
+                // dropped and current state returned, with a 200 rather than an
+                // error (:182-185). Guards both branches below, not just Play —
+                // the original's check runs once, before deciding whether the
+                // request means play or stop (encodedTrack: null takes the same
+                // early return). noReplace protects "something is already
+                // playing" full stop, not just "against a different track".
                 if request.no_replace && self.model.track.is_some() {
                     return;
                 }
 
-                // A play (or explicit stop) request with no `paused` field forces
-                // `false` (`:186`) — computed once and applied to both branches
-                // below, matching the original's single `player.setPause(...)`
+                // A play (or explicit stop) request with no paused field forces
+                // false (:186) — computed once and applied to both branches
+                // below, matching the original's single player.setPause(...)
                 // call that runs before it distinguishes play from stop. Note this
-                // ignores a `paused: true` sent alongside a track only in the
-                // sense that it is applied *after* `play`, not skipped.
+                // ignores a paused: true sent alongside a track only in the
+                // sense that it is applied *after* play, not skipped.
                 let paused = match request.paused {
                     Omissible::Present(paused) => paused,
                     Omissible::Omitted => false,
@@ -536,14 +534,14 @@ impl PlayerActor {
                     // The original forwards Discord's reason string; we do not get
                     // one from every path, so an empty string stands in — which is
                     // also what the original sends when koe reports none
-                    // (`SocketContext.kt:224`).
+                    // (SocketContext.kt:224).
                     reason: String::new(),
                     by_remote,
                 });
             }
         }
         // Both the original and we push a fresh update after a voice transition, so
-        // clients see `connected` flip without waiting for the next tick.
+        // clients see connected flip without waiting for the next tick.
         self.emit_player_update();
     }
 
@@ -1149,9 +1147,9 @@ mod tests {
             })
             .unwrap();
         // A sentinel sent right after, on the same channel: FIFO delivery
-        // within one channel guarantees the actor applies `Closed` before
-        // this, so once this lands, `Closed`'s emission is already in the
-        // sink — unlike `state.connected`/`ping`, which `Closed` sets to the
+        // within one channel guarantees the actor applies Closed before
+        // this, so once this lands, Closed's emission is already in the
+        // sink — unlike state.connected/ping, which Closed sets to the
         // same values a fresh player already starts with, so they can't
         // distinguish "applied" from "not yet applied".
         const SENTINEL_PING: i64 = 4_006_000;
@@ -1324,7 +1322,7 @@ mod tests {
             Duration::from_secs(10),
             Arc::new(std::sync::OnceLock::new()),
         );
-        // _actor.run() is deliberately never spawned, so `commands` fills
+        // _actor.run() is deliberately never spawned, so commands fills
         // without ever draining.
 
         for _ in 0..COMMAND_CAPACITY {

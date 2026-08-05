@@ -39,15 +39,14 @@ impl SourceManager for YouTubeSource {
     }
 
     fn load(&self, identifier: &str) -> Result<SourceLoad, SourceError> {
-        // Claimed and refused rather than left unclaimed: an unclaimed prefix comes
-        // back `loadType: "empty"`, indistinguishable from "YouTube Music had no
-        // results". yt-dlp (checked against 2026.07) has no way to answer this
-        // query: `music.youtube.com/search` returns `MPREb_*` browse/album ids with
-        // `title: null`, and the `#songs`-scoped variant returns no entries at all —
-        // neither is a playable song track. Mapping this to `ytsearch:` would return
-        // ordinary YouTube search results under the `ytmsearch:` name: different
-        // ranking, different titles, fan uploads — silently wrong in the same shape
-        // `MAINTENANCE.md` refuses to ship elsewhere in this codebase.
+        // Claimed and refused rather than left unclaimed: an unclaimed prefix
+        // comes back loadType: "empty", indistinguishable from "no results".
+        // yt-dlp has no way to answer this query (checked against 2026.07):
+        // music.youtube.com/search returns MPREb_* browse/album ids with
+        // title: null, and the #songs-scoped variant returns no entries —
+        // neither is a playable song track. Mapping to ytsearch: would return
+        // ordinary YouTube results under the ytmsearch: name — silently wrong,
+        // the same shape MAINTENANCE.md refuses elsewhere.
         if identifier.starts_with("ytmsearch:") {
             return Err(SourceError::Unplayable {
                 reason: "ytmsearch: (YouTube Music search) is not supported by this node; \
@@ -57,8 +56,8 @@ impl SourceManager for YouTubeSource {
         }
 
         if let Some(query) = identifier.strip_prefix("ytsearch:") {
-            // `matches` already gates this on `search_enabled` in the ordinary
-            // path; checked again here so a direct `load` call (as in a test, or
+            // matches already gates this on search_enabled in the ordinary
+            // path; checked again here so a direct load call (as in a test, or
             // a future caller) cannot shell out to yt-dlp for a prefix this node
             // was configured not to serve.
             if !self.search_enabled || query.trim().is_empty() {
@@ -71,7 +70,7 @@ impl SourceManager for YouTubeSource {
 
         let video_id = video_id_of(identifier);
 
-        // A `list=` wins over a `v=`, which is what lavaplayer does: `watch?v=…&list=…`
+        // A list= wins over a v=, which is what lavaplayer does: watch?v=…&list=…
         // loads the playlist with that video selected, not the video alone.
         if let Some(playlist_id) = playlist_id_of(identifier) {
             let url = playlist_url(&playlist_id, video_id.as_deref());

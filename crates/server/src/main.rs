@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // symphonia's probe logs a WARN every time it skips a leading ID3 tag or
             // padding before the first frame sync — its normal, successful detection
             // path for a large fraction of real MP3s, not a sign anything is wrong
-            // with how this node opened the stream. `error` still surfaces an actual
+            // with how this node opened the stream. error still surfaces an actual
             // probe failure, just not this expected, per-track noise.
             EnvFilter::new("info,symphonia_core::formats::probe=error")
         }))
@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load(&config_path)?;
 
     // Built once and cloned into every blocking client this node constructs — see
-    // `configured_proxy`'s docs for why this exists.
+    // configured_proxy's docs for why this exists.
     let proxy = configured_proxy(&config.lavalink.server.http_config)?;
 
     // yt-dlp is a runtime-optional dependency: detected here, and if it is absent
@@ -169,7 +169,7 @@ fn source_managers(
         match HttpSource::new(proxy) {
             Ok(source) => managers.push(Arc::new(source)),
             // Advertising a source we could not build would be a lie in
-            // `/v4/info`, so it is dropped rather than half-enabled.
+            // /v4/info, so it is dropped rather than half-enabled.
             Err(error) => tracing::error!(%error, "could not start the http source; disabling it"),
         }
     }

@@ -77,7 +77,7 @@ impl SourceManager for HttpSource {
 
         if let Some(content_type) = headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()) {
             if is_definitely_not_media(content_type) {
-                // `NotFound`, which becomes `loadType: "empty"` — not an error.
+                // NotFound, which becomes loadType: "empty" — not an error.
                 //
                 // This source claims every http(s) URL, so it is where a link
                 // belonging to a source this node does not run ends up: a YouTube
@@ -90,9 +90,9 @@ impl SourceManager for HttpSource {
         }
 
         let extension = extension_of(identifier);
-        // Bounded by construction, not by trusting the server: a `Range` header is
-        // only a request, and a server that ignores it and answers `200` with the
-        // full body would otherwise have every `loadtracks` call against it buffer
+        // Bounded by construction, not by trusting the server: a Range header is
+        // only a request, and a server that ignores it and answers 200 with the
+        // full body would otherwise have every loadtracks call against it buffer
         // an entire (possibly multi-gigabyte) file in memory rather than the
         // "bounded prefix" this module's own docs promise.
         let mut body = Vec::new();
@@ -208,7 +208,7 @@ mod tests {
             stream
                 .write_all(&vec![0u8; PROBE_PREFIX_BYTES as usize])
                 .unwrap();
-            // Connection drops here, far short of `declared_len`.
+            // Connection drops here, far short of declared_len.
         });
 
         format!("http://{addr}")

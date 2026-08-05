@@ -34,9 +34,9 @@ pub fn router(state: AppState) -> Router {
         // Route planning belongs to the IP-rotation feature, which is out of scope.
         // The original's own behaviour with no route planner configured (the only
         // state this node can ever be in) is what's matched here, not a made-up
-        // "not implemented" status: `getStatus` returns 204 with no body, and both
-        // `POST` handlers throw `RoutePlannerDisabledException`, a plain 500
-        // (`RoutePlannerRestHandler.kt`).
+        // "not implemented" status: getStatus returns 204 with no body, and both
+        // POST handlers throw RoutePlannerDisabledException, a plain 500
+        // (RoutePlannerRestHandler.kt).
         .route("/v4/routeplanner/status", get(route_planner_status))
         .route(
             "/v4/routeplanner/free/address",
@@ -47,11 +47,11 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/version", get(info::version))
         .merge(v4)
-        // Both must come after every `.route`/`.merge` above: `fallback` only
-        // covers paths that match nothing at all, and `method_not_allowed_fallback`
-        // installs itself on every `MethodRouter` registered so far, so it has to
+        // Both must come after every .route/.merge above: fallback only
+        // covers paths that match nothing at all, and method_not_allowed_fallback
+        // installs itself on every MethodRouter registered so far, so it has to
         // run last to reach all of them. Both replace axum's default empty-body
-        // 404/405 with the same `Error` JSON shape a client gets from a stale
+        // 404/405 with the same Error JSON shape a client gets from a stale
         // session or player id.
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)

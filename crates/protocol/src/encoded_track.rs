@@ -140,7 +140,7 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<DecodedTrack> {
             actual: payload.len(),
         });
     }
-    // Trailing bytes past the declared size are ignored, as `MessageInput` does.
+    // Trailing bytes past the declared size are ignored, as MessageInput does.
     let payload = &payload[..size];
 
     if payload.len() < 8 {
@@ -159,11 +159,11 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<DecodedTrack> {
     } else {
         1
     };
-    // Bounded on both sides, like `encode_to_bytes`. Version 0 is not a version
+    // Bounded on both sides, like encode_to_bytes. Version 0 is not a version
     // this codec can produce, so accepting it on the way in made
-    // `decode` → `encode_with_version(track.version)` — the round trip this
-    // crate's own tests establish — fail on input `decode` had just accepted: set
-    // the versioned flag and write a `0`, and the fields parse as v1 under a
+    // decode → encode_with_version(track.version) — the round trip this
+    // crate's own tests establish — fail on input decode had just accepted: set
+    // the versioned flag and write a 0, and the fields parse as v1 under a
     // version number nothing can write back.
     if version == 0 || version > TRACK_INFO_VERSION {
         return Err(CodecError::UnsupportedVersion(version));
@@ -175,8 +175,8 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<DecodedTrack> {
     let identifier = input.read_utf()?;
     let is_stream = input.read_bool()?;
     // Present on the wire from version 2 on; a version-1 (or unversioned) track
-    // has no `uri` bytes at all, and `sourceName`'s length prefix follows
-    // `isStream` directly — reading unconditionally here would desync every
+    // has no uri bytes at all, and sourceName's length prefix follows
+    // isStream directly — reading unconditionally here would desync every
     // field after it for a genuinely old track.
     let uri = if version >= VERSION_WITH_URI {
         input.read_nullable_utf()?

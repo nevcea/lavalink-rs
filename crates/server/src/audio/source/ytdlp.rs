@@ -254,7 +254,7 @@ impl YtDlp {
         let tracks = into_tracks(results.entries, kind)?;
 
         // The track a "…&list=…" URL names is the entry point. When it is not in the
-        // playlist — a private entry, or past the limit above — `-1` says so rather
+        // playlist — a private entry, or past the limit above — -1 says so rather
         // than silently pointing at the wrong track.
         let selected_track = selected
             .and_then(|id| tracks.iter().position(|track| track.info.identifier == id))
@@ -289,7 +289,7 @@ impl YtDlp {
 
     /// Runs a search. `target` is a full yt-dlp search spec, e.g. `ytsearch10:query`.
     pub(super) fn search(&self, target: &str, kind: SourceKind) -> Result<SourceLoad, SourceError> {
-        // `--flat-playlist` skips a full extraction per result. A search that
+        // --flat-playlist skips a full extraction per result. A search that
         // resolved every hit would take tens of seconds.
         let mut args = vec!["-J", "--flat-playlist"];
         args.extend(self.proxy_args());
@@ -376,7 +376,7 @@ impl Video {
             .filter(|_| !is_stream)
             .unwrap_or(i64::MAX);
 
-        // `--flat-playlist` entries carry `url` but not always `webpage_url`, so both
+        // --flat-playlist entries carry url but not always webpage_url, so both
         // are consulted before falling back to a URL built from the id.
         let page_url = self
             .webpage_url
@@ -428,10 +428,10 @@ fn run(program: &str, args: &[&str], timeout: Duration) -> Result<String, Source
             _ => SourceError::Internal(format!("could not start {program}: {error}")),
         })?;
 
-    // `-J` output regularly exceeds the OS pipe buffer (64KiB on Linux). Draining
+    // -J output regularly exceeds the OS pipe buffer (64KiB on Linux). Draining
     // both pipes on their own threads, concurrently with the wait loop below, is
     // what keeps a large stdout from deadlocking against a full pipe: without this,
-    // yt-dlp blocks on write() while we are only polling `try_wait`, and the process
+    // yt-dlp blocks on write() while we are only polling try_wait, and the process
     // just sits there until it is killed at the deadline.
     let mut stdout_pipe = child.stdout.take().expect("stdout is piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr is piped");
@@ -559,7 +559,7 @@ mod tests {
             }
             other => panic!("expected Unplayable, got {other:?}"),
         }
-        // Nothing yt-dlp reports is our fault, so nothing here is `fault`.
+        // Nothing yt-dlp reports is our fault, so nothing here is fault.
         assert_ne!(
             classify("ERROR: whatever").to_exception().severity,
             lavalink_protocol::Severity::Fault

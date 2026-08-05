@@ -46,7 +46,7 @@ pub async fn get_player(
     let session = session(&state, &session_id)?;
     let guild_id = parse_guild_id(&guild_id)?;
 
-    // `GET` does not create a player — the original's 404 here is the difference
+    // GET does not create a player — the original's 404 here is the difference
     // between "no player" and "an idle player", and clients use it.
     let handle = session
         .player(guild_id)
@@ -127,23 +127,23 @@ pub async fn patch_player(
         },
     };
 
-    // `None` here means the session was torn down (resume swept, or its sink
+    // None here means the session was torn down (resume swept, or its sink
     // overflowed) while this request was resolving the track above — the same
-    // outcome `patch`'s own `PlayerGone` gets below, reported the same way.
+    // outcome patch's own PlayerGone gets below, reported the same way.
     //
     // The voice connection comes from this same call, not a second
-    // `session.voice(guild_id)` lookup: a teardown landing between two
+    // session.voice(guild_id) lookup: a teardown landing between two
     // independent lookups could make the second one silently see a different
     // (or torn-down) guild than the first, which is exactly the race
-    // `AppState::player`'s pairing exists to close.
+    // AppState::player's pairing exists to close.
     let (handle, connection) = state
         .player(&session, guild_id)
         .ok_or_else(player_gone)?;
 
     // Connecting happens here, awaited, before the actor is told anything, so a
     // failure can become a status code. The original wraps this in
-    // `.exceptionally { throw … }` and then `.join()`s it, so the intended 500 is
-    // buried inside a `CompletionException` and the client sees something else.
+    // .exceptionally { throw … } and then .join()s it, so the intended 500 is
+    // buried inside a CompletionException and the client sees something else.
     if let Omissible::Present(voice) = &update.voice {
         connection.connect(voice).await.map_err(|error| {
             tracing::warn!(guild_id, %error, "voice connection failed");
@@ -153,19 +153,17 @@ pub async fn patch_player(
             )
         })?;
 
-        // A `DELETE` landing in the window between `state.player()` above and this
-        // `await` already tore this guild's player down — `engine.shutdown()` calls
-        // `voice.leave()` — and nothing owns the connection this `connect` just
-        // re-established. Leave again rather than hand a patch to an actor that is
-        // no longer registered.
+        // A DELETE landing between state.player() above and this await already
+        // tore this guild's player down — engine.shutdown() calls voice.leave() —
+        // and nothing owns the connection this connect just re-established.
+        // Leave again rather than hand a patch to an actor no longer registered.
         //
         // Checked by identity, not just presence: a fresh player (and voice
         // connection) can already have been built in its place by the time this
-        // `await` returns. `session.player(guild_id).is_none()` alone can't tell
-        // that case apart from "still ours" — it would leave `connection` (this
-        // stale one) IDENTIFY'd to Discord for the guild while a *different*,
-        // freshly-registered connection is also live for it, racing or knocking
-        // out the new player's real connection before this one is finally dropped.
+        // await returns, and session.player(guild_id).is_none() alone can't tell
+        // that apart from "still ours" — it would leave this stale connection
+        // IDENTIFY'd to Discord while a different, freshly-registered connection
+        // is also live for the guild, racing or knocking out the real one.
         if !is_current_connection(&session, guild_id, &connection) {
             connection.leave().await;
             return Err(player_gone());
@@ -219,19 +217,17 @@ pub async fn delete_player(
     let guild_id = parse_guild_id(&guild_id)?;
 
     // Removed whether or not the actor acknowledges, because dropping the last
-    // `PlayerHandle` is itself a teardown: the destroy channel is held only by the
-    // handle, so the actor's own `recv` reports every sender gone and it runs
-    // `engine.shutdown()` on its way out. Keeping the entry on a failed `destroy`
-    // used to be the careful choice — nothing else pointed at the actor, and the
-    // engine's clone of the *command* sender meant that queue could never report
-    // closed — but it wedged the guild instead: every later `PATCH` found the same
-    // unresponsive handle and answered 503 for good, while the client had been told
-    // 204 here.
+    // PlayerHandle is itself a teardown: the destroy channel is held only by the
+    // handle, so the actor's own recv reports every sender gone and it runs
+    // engine.shutdown() on its way out. Keeping the entry on a failed destroy
+    // looked like the careful choice, but wedged the guild instead — every later
+    // PATCH found the same unresponsive handle and answered 503 for good, while
+    // the client had already been told 204 here.
     if let Some(handle) = session.remove_player(guild_id) {
         let _ = handle.destroy().await;
     }
 
-    // Deleting a player that is not there succeeds; the original's `destroyPlayer`
+    // Deleting a player that is not there succeeds; the original's destroyPlayer
     // is a no-op in that case.
     Ok(StatusCode::NO_CONTENT)
 }

@@ -340,7 +340,7 @@ lavalink:
         let disabled = config.disabled_filters();
         // Configured off.
         assert!(disabled.contains(&"lowPass".to_owned()));
-        // Implemented (see `audio::filter`) and enabled — every filter now is.
+        // Implemented (see audio::filter) and enabled — every filter now is.
         assert!(!disabled.contains(&"timescale".to_owned()));
         assert!(!disabled.contains(&"volume".to_owned()));
         assert!(!disabled.contains(&"equalizer".to_owned()));
@@ -411,7 +411,7 @@ lavalink:
             Some("http://localhost:3128")
         );
         assert_eq!(http_config.basic_auth(), Some(("alice", "hunter2")));
-        // yt-dlp's `--proxy` flag has no separate auth mechanism.
+        // yt-dlp's --proxy flag has no separate auth mechanism.
         assert_eq!(
             http_config.ytdlp_proxy_arg().as_deref(),
             Some("http://alice:hunter2@localhost:3128")

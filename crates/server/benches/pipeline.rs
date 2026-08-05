@@ -77,8 +77,8 @@ fn equalizer() -> Filters {
 }
 
 fn bench_pipeline(c: &mut Criterion) {
-    // Includes the pid so a concurrent `cargo test` and `cargo bench` (both of
-    // which write a fixed-name file under `pump.rs`'s tests, and this one) do not
+    // Includes the pid so a concurrent cargo test and cargo bench (both of
+    // which write a fixed-name file under pump.rs's tests, and this one) do not
     // collide on the same path.
     let path =
         std::env::temp_dir().join(format!("lavalink-rs-bench-pipeline-{}.wav", std::process::id()));
@@ -90,7 +90,7 @@ fn bench_pipeline(c: &mut Criterion) {
 
     // Two cases, because the filter chain is not just extra arithmetic: turning any
     // filter on also makes the pump transpose every buffer to planar and back
-    // (`pump::filter_interleaved`). The unfiltered case alone would hide that
+    // (pump::filter_interleaved). The unfiltered case alone would hide that
     // entirely, and it is the case most tracks with an equalizer actually run.
     for (name, filters) in [
         ("5s_44100_stereo_wav", Filters::default()),
@@ -123,7 +123,7 @@ fn bench_pipeline(c: &mut Criterion) {
                 let outcome = pump::run(config, writer, commands_rx, position, &|| {});
 
                 // Drain so the reader's thread-local state doesn't accumulate across
-                // iterations; the ring itself is dropped with `reader` regardless.
+                // iterations; the ring itself is dropped with reader regardless.
                 let mut sink = [0u8; 4096];
                 while reader.read(&mut sink).unwrap_or(0) > 0 {}
 

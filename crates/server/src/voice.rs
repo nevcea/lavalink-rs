@@ -116,9 +116,9 @@ impl VoiceConnection {
 
         let info = self.connection_info(voice)?;
         // A failed attempt still tears down whatever songbird had before it, so
-        // `current` must not keep pointing at that now-dead connection — otherwise
+        // current must not keep pointing at that now-dead connection — otherwise
         // a client retrying with the same (last known-good) voice state would hit
-        // `needs_reconnect == false` and never call `driver.connect` again,
+        // needs_reconnect == false and never call driver.connect again,
         // stranding the guild disconnected until a byte-for-byte different voice
         // state happens to arrive.
         if let Err(error) = state.driver.connect(info).await {
@@ -178,16 +178,14 @@ struct ActorNotifier {
 impl EventHandler for ActorNotifier {
     async fn act(&self, context: &EventContext<'_>) -> Option<Event> {
         let update = match context {
-            // songbird's own docs on `CoreEvent::DriverReconnect`: it "fires when
-            // this driver successfully reconnects after a network error" — both
-            // firing sites are the `Ok` arm of a connect attempt
-            // (`driver/tasks/mod.rs`'s `RetryConnect`/`FullReconnect` handling).
-            // It is a *success* event, not "reconnecting in progress", so it is
-            // reported the same way an initial connect is. Mapping it to
-            // `Reconnecting` left `connected` false (and `ping` stuck at -1) for
-            // the rest of the session after every network blip that recovered on
-            // its own, with no event left to correct it — songbird never fires
-            // `DriverConnect` again on the same session.
+            // songbird's docs on CoreEvent::DriverReconnect: it "fires when this
+            // driver successfully reconnects after a network error" — both
+            // firing sites are the Ok arm of a connect attempt. It's a success
+            // event, not "reconnecting in progress", so it's reported the same
+            // way an initial connect is. Mapping it to Reconnecting left
+            // connected false (ping stuck at -1) for the rest of the session
+            // after every network blip that recovered on its own, since songbird
+            // never fires DriverConnect again on the same session.
             EventContext::DriverConnect(_) | EventContext::DriverReconnect(_) => {
                 Some(VoiceUpdate::Connected {
                     // songbird has no latency measurement at connect time. -1 is
@@ -206,10 +204,10 @@ impl EventHandler for ActorNotifier {
                 // On its own channel, not the general command queue, precisely so
                 // a burst of REST traffic sharing that queue can't fill it out
                 // from under a voice transition — the case this used to drop in
-                // (see git history) and misreport `connected` until some later,
+                // (see git history) and misreport connected until some later,
                 // unrelated transition happened to come along and correct it.
                 // Only a wedged actor (never draining anything) can still fill
-                // this one, which is what `try_send` still allows dropping.
+                // this one, which is what try_send still allows dropping.
                 let _ = voice_updates.try_send(update);
             }
         }
@@ -230,7 +228,7 @@ fn disconnect_update(reason: Option<DisconnectReason>) -> VoiceUpdate {
         },
         // Everything else — requested, an ordinary teardown, a failed attempt — is
         // reported the same way. None of them are a websocket close, and emitting
-        // `WebSocketClosedEvent` for one would have clients trying to recover from
+        // WebSocketClosedEvent for one would have clients trying to recover from
         // something they asked for, or from a failure the code cannot describe.
         _ => VoiceUpdate::Disconnected,
     }

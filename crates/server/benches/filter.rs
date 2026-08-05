@@ -175,7 +175,7 @@ fn bench_filter_stages(c: &mut Criterion) {
         });
     }
 
-    // 15 is `EQUALIZER_BAND_COUNT`, i.e. every band the protocol has. The bands are
+    // 15 is EQUALIZER_BAND_COUNT, i.e. every band the protocol has. The bands are
     // a parallel filterbank — each one reads the same input sample and only its own
     // history — so the cost should be linear in the count; a curve that flattens
     // instead would mean the per-band work is hidden behind the serial dependency
@@ -217,8 +217,8 @@ fn bench_filter_interleaved(c: &mut Criterion) {
     ] {
         group.bench_function(BenchmarkId::new("process", name), |b| {
             let mut chain = FilterChain::new(&filters, CHANNELS);
-            // The pump's own scratch, reused across buffers (`pump.rs`'s `planar`
-            // and `filtered`), so this measures the transpose and not a per-buffer
+            // The pump's own scratch, reused across buffers (pump.rs's planar
+            // and filtered), so this measures the transpose and not a per-buffer
             // allocation.
             let mut scratch = vec![Vec::new(); CHANNELS];
             let mut out = Vec::new();

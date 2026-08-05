@@ -114,9 +114,9 @@ async fn run(
         }
     };
 
-    // `ready` is the first thing on the wire, before any queued replay: a
+    // ready is the first thing on the wire, before any queued replay: a
     // resumed session's essential lane can already hold a backlog from the
-    // reconnect window, and plain `send` would put this behind it.
+    // reconnect window, and plain send would put this behind it.
     let _ = session.send_first(Message::Ready {
         resumed,
         session_id: session.id.clone(),
@@ -129,10 +129,10 @@ async fn run(
     let destroyed = pump(&state, &session, socket).await;
 
     // The socket is gone. Either the session waits to be resumed or it is over.
-    // `destroyed` is checked first: `pump` already tore the session down (write
-    // timeout / overflow), so `on_disconnect` finding nothing left in the
+    // destroyed is checked first: pump already tore the session down (write
+    // timeout / overflow), so on_disconnect finding nothing left in the
     // registry means exactly that, not "went Resumable" — the two share the
-    // same `None` otherwise.
+    // same None otherwise.
     if destroyed {
         tracing::info!(session = %session.id, "session closed");
     } else if let Some(session) = state.sessions.on_disconnect(&session.id, Instant::now()) {
@@ -154,12 +154,10 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
     let (mut writer, mut reader) = socket.split();
     let mut shutdown = state.shutdown.clone();
     // A session resumed with a backlog already over OVERFLOW_THRESHOLD (built up
-    // while nobody was connected to read it — resume only reclaims it at the
-    // sink's own, much higher ESSENTIAL_CAPACITY) must get a chance to drain that
-    // backlog rather than being 1008-closed on its very first loop iteration for
-    // a client that hasn't had any opportunity to prove it isn't draining.
-    // Enforcement only arms once the backlog has been observed under threshold at
-    // least once since this connection began.
+    // while nobody was connected to read it) must get a chance to drain it
+    // rather than being 1008-closed on its first loop iteration, before the
+    // client has had any chance to prove it isn't draining. Enforcement only
+    // arms once the backlog has been observed under threshold at least once.
     let mut overflow_armed = session.sink.pending_essentials() < OVERFLOW_THRESHOLD;
 
     loop {
@@ -178,7 +176,7 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
             }
 
             // v4 has no client-to-server messages; the original logs and ignores
-            // them (`SocketServer.kt:172`). We still have to read, or close frames
+            // them (SocketServer.kt:172). We still have to read, or close frames
             // and pings never arrive.
             incoming = reader.next() => {
                 match incoming {
@@ -382,7 +380,7 @@ mod tests {
         session.send(event("1")).unwrap();
         session.send(event("2")).unwrap();
 
-        // What ws.rs's pump() does with the message `recv()` just handed it,
+        // What ws.rs's pump() does with the message recv() just handed it,
         // once the write for it failed.
         restore_undelivered(&session, event("0"));
 

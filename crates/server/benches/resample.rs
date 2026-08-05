@@ -40,7 +40,7 @@ fn bench_into(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::
         let input = interleaved(source_channels, FRAMES);
         let mut out = Vec::new();
         resampler.reset();
-        // Warm `out` to its steady-state capacity, for the same reason `reset` is
+        // Warm out to its steady-state capacity, for the same reason reset is
         // outside the loop: the pump never pays that growth twice either.
         resampler.process_into(&input, &mut out);
         b.iter(|| {
@@ -60,13 +60,13 @@ fn bench_resample(c: &mut Criterion) {
     bench_into(&mut group, "44100_mono_to_48000_stereo", 44_100, 1, ResamplingQuality::Low);
     // The no-op path: source already matches the ring's format, so this measures
     // the pass-through cost rather than any interpolation. Quality is irrelevant
-    // here — `Resampler::new` never builds a `SincEngine` when no rate conversion
-    // is needed — but `Low` is passed for consistency with the other cases.
+    // here — Resampler::new never builds a SincEngine when no rate conversion
+    // is needed — but Low is passed for consistency with the other cases.
     bench_into(&mut group, "48000_stereo_passthrough", 48_000, CHANNELS, ResamplingQuality::Low);
 
-    // The `rubato`-backed tiers, same source shape as the first case above, so the
+    // The rubato-backed tiers, same source shape as the first case above, so the
     // three numbers are directly comparable: this is the cost lavaplayer itself
-    // pays for `Medium`/`High`, not a Catmull-Rom regression.
+    // pays for Medium/High, not a Catmull-Rom regression.
     bench_into(&mut group, "44100_stereo_to_48000_medium", 44_100, CHANNELS, ResamplingQuality::Medium);
     bench_into(&mut group, "44100_stereo_to_48000_high", 44_100, CHANNELS, ResamplingQuality::High);
 

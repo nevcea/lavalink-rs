@@ -201,7 +201,7 @@ mod tests {
             Omissible::Present(t) => t.encoded,
             Omissible::Omitted => panic!("track should be present"),
         };
-        // Present(None) is the "stop" signal the original spells `?: player.stop()`.
+        // Present(None) is the "stop" signal the original spells ?: player.stop().
         assert_eq!(encoded, Omissible::Present(None));
 
         let untouched: PlayerUpdate = serde_json::from_str(r#"{"track":{}}"#).unwrap();

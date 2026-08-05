@@ -238,7 +238,7 @@ fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
     };
 
     // Starting mid-track is the same operation as seeking; doing it here rather than
-    // decoding and discarding keeps `position` in a play request cheap.
+    // decoding and discarding keeps position in a play request cheap.
     let mut start_position_ms = config.start_position_ms;
     if start_position_ms > 0 && !state.seek(start_position_ms) {
         // The source is not seekable (a live stream, an unindexed container): decoding
@@ -288,9 +288,9 @@ impl State {
                     // The stream changed format mid-flight (a chained Ogg segment is
                     // the common case), which for us means the decoder's state is
                     // stale and the resampler's *configuration* — the source rate and
-                    // channel count `open` read once — is stale too, not just its
+                    // channel count open read once — is stale too, not just its
                     // interpolation state. Rebuilding it from the track's current
-                    // codec params is what `resampler.reset()` alone did not do.
+                    // codec params is what resampler.reset() alone did not do.
                     self.decoder.reset();
                     let params = self
                         .format
@@ -327,13 +327,13 @@ impl State {
                     continue;
                 }
                 // The source gave up a stalled reconnect early because a command
-                // was waiting (see `stream.rs`'s `interrupt` field) — not a real
-                // failure, just a cue to go check that command right now instead
-                // of burning the rest of the reconnect budget on it first.
+                // was waiting (see stream.rs's interrupt field) — not a real
+                // failure, just a cue to check that command now instead of
+                // burning the rest of the reconnect budget first.
                 //
-                // Matched on the payload type rather than on `ErrorKind`, because
-                // the kind that says this best is the one kind symphonia retries
-                // instead of propagating — see [`stream::CommandPending`].
+                // Matched on the payload type, not ErrorKind: the kind that says
+                // this best is the one symphonia retries instead of propagating
+                // — see stream::CommandPending.
                 Err(SymphoniaError::IoError(error)) if stream::is_command_pending(&error) => {
                     continue;
                 }
@@ -369,8 +369,8 @@ impl State {
                 continue;
             }
 
-            // Taken out of `self` because `apply_volume` takes `&self` — a field
-            // can't also be passed to it by `&mut` while still attached. Moved back
+            // Taken out of self because apply_volume takes &self — a field
+            // can't also be passed to it by &mut while still attached. Moved back
             // in below, regardless of which path out of the loop is taken.
             let mut pcm = std::mem::take(&mut self.pcm);
             self.resampler.process_into(&self.interleaved, &mut pcm);
@@ -424,8 +424,8 @@ impl State {
             match self.drain_commands(commands, writer) {
                 ControlFlow::Stopped => return ControlFlow::Stopped,
                 // A seek that landed already discarded the ring's stale
-                // buffered audio (`RingWriter::reset`, called from within
-                // `drain_commands`) — `remaining` is exactly that kind of
+                // buffered audio (RingWriter::reset, called from within
+                // drain_commands) — remaining is exactly that kind of
                 // stale audio, decoded before the seek, so it must be dropped
                 // rather than appended right back after the discard.
                 ControlFlow::Continue { reset: true } => {
@@ -460,8 +460,8 @@ impl State {
                         writer.reset(position_ms);
                         reset = true;
                     } else {
-                        // The engine's `begin_seek` already announced this target
-                        // (see `RingWriter::begin_seek`'s docs) before the command
+                        // The engine's begin_seek already announced this target
+                        // (see RingWriter::begin_seek's docs) before the command
                         // ever reached here — a failure must give position
                         // reporting back to the real, unmoved position instead of
                         // holding at a target that is never going to land.
@@ -607,15 +607,13 @@ fn to_interleaved(buffer: &GenericAudioBufferRef<'_>, out: &mut Vec<f32>) {
             let frames = $buffer.frames();
             out.reserve(frames * channels);
 
-            // `plane` resolves a channel's slice out of an `Option`, so calling it
-            // from inside the frame loop re-resolves the same `channels` slices
-            // once per *sample* — `frames * channels` lookups to reach the same
-            // handful of slices. Each plane is resolved once here instead.
+            // plane resolves a channel's slice out of an Option, so calling it
+            // inside the frame loop would re-resolve the same slices once per
+            // sample. Each plane is resolved once here instead.
             //
-            // Stereo gets its own arm because it is what almost everything decodes
-            // to, and because reading the pair in step keeps both the loads and the
-            // pushes sequential; the general arm has to write with a stride, which
-            // is why it is not worth using for the case that does not need it.
+            // Stereo gets its own arm because it's what almost everything decodes
+            // to, and reading the pair in step keeps loads and pushes sequential;
+            // the general arm has to write with a stride, not worth it here.
             if channels == 2 {
                 let (left, right) = $buffer.plane_pair(0, 1).unwrap();
                 for frame in 0..frames {
@@ -1011,8 +1009,8 @@ mod tests {
         ) -> symphonia::core::errors::Result<Option<symphonia::core::packet::Packet>> {
             if !self.fired {
                 self.fired = true;
-                // The same marker a stalled `HttpMediaSource` produces. Not
-                // `ErrorKind::Interrupted`: that is what this used to be, and it
+                // The same marker a stalled HttpMediaSource produces. Not
+                // ErrorKind::Interrupted: that is what this used to be, and it
                 // is exactly why the mock passed while the real demuxer path did
                 // not — symphonia retries that kind rather than propagating it.
                 return Err(SymphoniaError::IoError(std::io::Error::other(
@@ -1055,9 +1053,9 @@ mod tests {
             fired: false,
         });
 
-        // Kept alive (unlike most tests here) so later `try_recv` calls in the
-        // rest of the loop see `Empty` rather than `Disconnected` — a dropped
-        // sender would end the track as `Stopped` regardless of the interrupt,
+        // Kept alive (unlike most tests here) so later try_recv calls in the
+        // rest of the loop see Empty rather than Disconnected — a dropped
+        // sender would end the track as Stopped regardless of the interrupt,
         // which is not what this test is about.
         let (commands_tx, commands_rx) = std::sync::mpsc::channel();
         commands_tx.send(PumpCommand::SetVolume(50)).unwrap();
@@ -1091,7 +1089,7 @@ mod tests {
 
         let mut state = open(&config, &writer).unwrap();
         state.format = Box::new(FailingSeekFormat(state.format));
-        // `open` already reset the writer to 0; move it away from 0 so a
+        // open already reset the writer to 0; move it away from 0 so a
         // spurious rebase toward the requested target (5000) is observable.
         writer.reset(250);
 
@@ -1130,8 +1128,8 @@ mod tests {
 
         let mut state = open(&config, &writer).unwrap();
 
-        // Fill the ring completely — nobody is draining `_reader`, the same
-        // situation `set_paused` deliberately creates.
+        // Fill the ring completely — nobody is draining _reader, the same
+        // situation set_paused deliberately creates.
         let capacity_samples =
             (super::super::ring::SAMPLE_RATE as usize * buffer_ms as usize / 1000) * CHANNELS;
         let (filled, closed) = writer.try_write(&vec![0.0; capacity_samples]);
@@ -1185,8 +1183,8 @@ mod tests {
         assert_eq!(filled, capacity_samples);
 
         // Kept alive (unlike the other tests here) so that after this one
-        // message, `try_recv` reports empty rather than disconnected — a
-        // dropped sender would make `drain_commands` return `Stopped`
+        // message, try_recv reports empty rather than disconnected — a
+        // dropped sender would make drain_commands return Stopped
         // regardless of the seek, which is not what this test is about.
         let (commands_tx, commands_rx) = std::sync::mpsc::channel();
         commands_tx.send(PumpCommand::Seek { position_ms: 500 }).unwrap();
@@ -1196,7 +1194,7 @@ mod tests {
         let flow = state.write_interruptibly(&writer, &stale_remainder, &commands_rx);
         assert!(matches!(flow, ControlFlow::Continue { reset: true }));
 
-        // The marker value must never surface: `reset` cleared the pre-seek
+        // The marker value must never surface: reset cleared the pre-seek
         // buffer, and the stale remainder must not have been appended back in
         // afterward.
         let mut out = vec![0u8; capacity_samples * 4 + 64];
@@ -1345,8 +1343,8 @@ mod tests {
             &|| {},
         );
 
-        // `started: false` is what makes the actor report `loadFailed` rather than
-        // `finished`.
+        // started: false is what makes the actor report loadFailed rather than
+        // finished.
         assert!(matches!(
             outcome,
             PumpOutcome::Failed { started: false, .. }

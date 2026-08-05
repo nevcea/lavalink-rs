@@ -95,7 +95,7 @@ impl PlayerModel {
             voice: VoiceState::default(),
             connection: VoiceConnection::Disconnected,
             // -1 is what the original reports with no connection
-            // (`SocketServer.kt:77`).
+            // (SocketServer.kt:77).
             ping_ms: -1,
             last_progress: None,
         }
@@ -229,7 +229,7 @@ mod tests {
     fn stopping_a_playing_player_owes_an_event_and_lands_in_stopped() {
         let mut model = model();
         model.play(track("title"), false, Instant::now());
-        // Handed back, not just signalled: the caller emits `TrackEndEvent` with it.
+        // Handed back, not just signalled: the caller emits TrackEndEvent with it.
         assert!(model.stop().is_some());
         assert_eq!(model.playback, Playback::Stopped);
         assert!(model.track.is_none());

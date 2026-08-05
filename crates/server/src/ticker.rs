@@ -44,7 +44,7 @@ async fn player_update_tick(state: AppState) {
                 continue;
             }
             for player in session.players() {
-                // `try_send`: if an actor's queue is full it is busy with real work,
+                // try_send: if an actor's queue is full it is busy with real work,
                 // and a skipped update is replaced by the next tick.
                 let _ = player.try_send(Command::EmitUpdate);
             }
@@ -61,7 +61,7 @@ async fn stats_tick(state: AppState) {
 
         let sessions = state.sessions.all();
         // One walk of every session's roster, reused for all three numbers below.
-        // Each `Session::players` call takes that session's guild lock and clones a
+        // Each Session::players call takes that session's guild lock and clones a
         // handle per player, so collecting once rather than per number is the whole
         // point — this tick used to do it three times over the same players.
         let rosters = crate::stats::rosters(&sessions);
@@ -71,13 +71,12 @@ async fn stats_tick(state: AppState) {
         let node = state.stats.sample(players, playing);
         let now_ms = crate::player::now_epoch_ms();
         for (session, roster) in sessions.iter().zip(&rosters) {
-            // Per session, not per node: the original's `StatsCollector.retrieveStats`
-            // takes a `SocketContext` and only aggregates that session's own players,
-            // unlike `players`/`playingPlayers`/`cpu`/`memory` above, which are the
-            // same for everyone. Every player's counters are drained here regardless
-            // of usability — see `FrameCounters::take`'s docs — so a player that sits
-            // just under the usability threshold does not have frames silently pile up
-            // for next tick.
+            // Per session, not per node: the original's StatsCollector.retrieveStats
+            // takes a SocketContext and only aggregates that session's own players,
+            // unlike players/playingPlayers/cpu/memory above, which are the same for
+            // everyone. Every player's counters are drained here regardless of
+            // usability (see FrameCounters::take's docs), so one sitting just under
+            // the usability threshold doesn't have frames silently pile up.
             let frame_stats = crate::stats::frame_stats(roster.iter().map(|player| {
                 let (sent, nulled) = player.take_frame_stats();
                 let since = player.playing_since_ms();
@@ -86,14 +85,13 @@ async fn stats_tick(state: AppState) {
                 (sent, nulled, usable)
             }));
 
-            // A paused session's sink drops every snapshot it is handed
-            // (`Sink::send`'s own `paused` branch) — `Stats` included, since it
-            // coalesces the same way `PlayerUpdate` does. Sending it here anyway
-            // used to mean this minute's frame counts, already drained above,
-            // were silently discarded rather than reported on resume; skipping
-            // the send is the same behaviour `player_update_tick` already applies
-            // to `PlayerUpdate`, just made explicit instead of relying on the sink
-            // to swallow it.
+            // A paused session's sink drops every snapshot it's handed
+            // (Sink::send's paused branch) — Stats included, since it coalesces
+            // the same way PlayerUpdate does. Sending it here anyway used to mean
+            // this tick's frame counts, already drained above, were silently
+            // discarded instead of reported on resume; skipping the send just
+            // makes that behavior explicit instead of relying on the sink to
+            // swallow it.
             if session.sink.is_paused() {
                 continue;
             }

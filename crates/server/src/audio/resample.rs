@@ -108,9 +108,9 @@ impl Resampler {
     pub fn process_into(&mut self, input: &[f32], out: &mut Vec<f32>) {
         out.clear();
 
-        // Already 48kHz stereo: `fill_stereo_frames` plus a flatten below would be two
-        // full-buffer copies for zero conversion. `is_passthrough` names the same
-        // condition this used to check inline (`source_rate == SAMPLE_RATE`) without
+        // Already 48kHz stereo: fill_stereo_frames plus a flatten below would be two
+        // full-buffer copies for zero conversion. is_passthrough names the same
+        // condition this used to check inline (source_rate == SAMPLE_RATE) without
         // also covering channel count, which meant this path ran through the
         // planar round-trip even when there was nothing to convert.
         if self.is_passthrough() {
@@ -131,9 +131,9 @@ impl Resampler {
             return;
         }
 
-        // Sinc quality: no prologue, no manual cursor — `fill_stereo_frames` only
+        // Sinc quality: no prologue, no manual cursor — fill_stereo_frames only
         // needs to do the channel conversion (mono duplication, surround crop),
-        // and `SincEngine` owns everything about the rate conversion itself.
+        // and SincEngine owns everything about the rate conversion itself.
         if self.sinc.is_some() {
             self.fill_stereo_frames(input, 0);
             let Resampler { frames, sinc, .. } = self;
@@ -152,8 +152,8 @@ impl Resampler {
         let source = &self.frames;
 
         let step = f64::from(self.source_rate) / f64::from(SAMPLE_RATE);
-        // `self.cursor` was already rebased onto the retained history at the end of
-        // the previous call, so index 0 of `source` is exactly where it points.
+        // self.cursor was already rebased onto the retained history at the end of
+        // the previous call, so index 0 of source is exactly where it points.
         let mut cursor = self.cursor;
 
         // Stop two frames short: the last two have no right-hand neighbours yet, and
@@ -167,7 +167,7 @@ impl Resampler {
         // not a guarantee that they can't.
         out.reserve((((usable - cursor).max(0.0) / step).ceil() as usize) * CHANNELS);
 
-        // `needless_range_loop`: `channel` is not indexing one slice, it is picking
+        // needless_range_loop: channel is not indexing one slice, it is picking
         // the same lane out of four separate frames. Iterating any one of them would
         // not give the other three, so the index is the point.
         #[allow(clippy::needless_range_loop)]
@@ -177,7 +177,7 @@ impl Resampler {
             let t = (cursor - base) as f32;
 
             if index == 0 {
-                // The one frame with no left-hand neighbour, so `p0` repeats `p1`.
+                // The one frame with no left-hand neighbour, so p0 repeats p1.
                 // This is what the clamp used to produce, hoisted out of the inner
                 // loop: it is true for at most the first output frame of a buffer,
                 // and was being re-decided for every tap of every frame.
@@ -191,7 +191,7 @@ impl Resampler {
                     ));
                 }
             } else {
-                // `cursor < usable` means `index <= source.len() - 3`, so all four
+                // cursor < usable means index <= source.len() - 3, so all four
                 // taps are in range on their own — the upper clamp never bound
                 // anything. Taking the window once lets the four reads share a
                 // single bounds check instead of paying one each.
@@ -266,19 +266,19 @@ impl std::fmt::Debug for SincEngine {
 impl SincEngine {
     fn new(quality: ResamplingQuality, source_rate: u32) -> Self {
         let params = match quality {
-            // `Resampler::new` never constructs a `SincEngine` for `Low`.
+            // Resampler::new never constructs a SincEngine for Low.
             ResamplingQuality::Low => unreachable!("Low stays on the Catmull-Rom path"),
             // sinc_len/oversampling_factor scaled down from rubato's own
             // documented "high quality" preset (256/256/Cubic/BlackmanHarris2);
-            // cheaper interpolation (`Linear`) too, since `Medium` exists
-            // specifically to cost less than `High`.
+            // cheaper interpolation (Linear) too, since Medium exists
+            // specifically to cost less than High.
             ResamplingQuality::Medium => sinc_params(128, 128, SincInterpolationType::Linear),
             ResamplingQuality::High => sinc_params(256, 256, SincInterpolationType::Cubic),
         };
 
         let ratio = f64::from(SAMPLE_RATE) / f64::from(source_rate);
-        // `max_resample_ratio_relative: 1.0` — the ratio is fixed for the whole
-        // track, never ramped, so `input_frames_next()` stays constant too.
+        // max_resample_ratio_relative: 1.0 — the ratio is fixed for the whole
+        // track, never ramped, so input_frames_next() stays constant too.
         let resampler = SincFixedIn::<f32>::new(ratio, 1.0, params, 1024, CHANNELS)
             .expect("static parameters and a positive ratio are always valid");
         let chunk = resampler.input_frames_next();
@@ -609,9 +609,9 @@ mod tests {
     fn sinc_mono_is_duplicated_to_both_channels() {
         for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
             let mut resampler = Resampler::new(SAMPLE_RATE, 1, quality);
-            // No rate conversion at `SAMPLE_RATE`, so this exercises
-            // `fill_stereo_frames` only — `SincEngine` is never built here (see
-            // `low_and_passthrough_never_construct_a_sinc_engine`).
+            // No rate conversion at SAMPLE_RATE, so this exercises
+            // fill_stereo_frames only — SincEngine is never built here (see
+            // low_and_passthrough_never_construct_a_sinc_engine).
             assert_eq!(resampler.process(&[0.25, -0.75]), vec![0.25, 0.25, -0.75, -0.75]);
         }
     }
@@ -621,7 +621,7 @@ mod tests {
         for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
             let out = resample_sine_quality(44_100, 2, 2.0, 1024, quality);
             let frames = out.len() / CHANNELS;
-            // Sinc filters carry a startup/output delay (`output_delay()`) on top
+            // Sinc filters carry a startup/output delay (output_delay()) on top
             // of the ordinary rate-ratio rounding a chunked accumulator adds, so
             // this needs more slack than the Catmull-Rom version of this test —
             // a couple of hundred frames at 48kHz is a few milliseconds.
@@ -764,7 +764,7 @@ mod tests {
     #[test]
     fn hoisting_the_clamp_changes_no_sample() {
         // Each case is one buffer from a cold start, which is the only time the
-        // `index == 0` branch — the sole case the clamp ever actually bound — runs.
+        // index == 0 branch — the sole case the clamp ever actually bound — runs.
         for (rate, channels) in [(44_100, 2), (22_050, 2), (44_100, 1), (96_000, 2)] {
             let input: Vec<f32> = (0..4096 * channels)
                 .map(|i| ((i % 997) as f32 / 997.0) * 2.0 - 1.0)

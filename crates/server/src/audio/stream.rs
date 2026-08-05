@@ -97,9 +97,9 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 3;
 /// been running for an implausibly long time instead of leaking its thread
 /// forever — a fixed, attributable failure instead of an unbounded one.
 // ponytail: a generous fixed ceiling, not a real idle-read timeout — replace with
-// one if reqwest's blocking client ever exposes `ClientBuilder::read_timeout`
+// one if reqwest's blocking client ever exposes ClientBuilder::read_timeout
 // publicly (it already exists on the async client; the blocking wrapper's own
-// `with_inner` that could reach it is a private method, not part of its API).
+// with_inner that could reach it is a private method, not part of its API).
 const MAX_REQUEST_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Opens byte streams for resolved tracks.
@@ -168,8 +168,8 @@ impl StreamOpener {
                 let url = info.uri.clone().unwrap_or_else(|| info.identifier.clone());
                 self.open_http(&url, None, interrupt)
             }
-            // Unlike "http", `identifier` here is the direct CDN video URL and
-            // `uri` is the original getyarn.io page — the two are not
+            // Unlike "http", identifier here is the direct CDN video URL and
+            // uri is the original getyarn.io page — the two are not
             // interchangeable the way they are for a plain http(s) track.
             "getyarn.io" => self.open_http(&info.identifier, None, interrupt),
             "youtube" | "soundcloud" | "bandcamp" => {
@@ -188,7 +188,7 @@ impl StreamOpener {
                 // otherwise carry a dead URL.
                 let url = ytdlp.resolve_stream_url(&kind.playback_url(&info.identifier))?;
                 // Fetched under the same User-Agent yt-dlp resolved it with —
-                // googlevideo.com 403s a mismatch. See `STREAM_USER_AGENT`.
+                // googlevideo.com 403s a mismatch. See STREAM_USER_AGENT.
                 self.open_http(&url, Some(STREAM_USER_AGENT), interrupt)
             }
             // Deezer's own API never hands back more than a 30-second preview, so
@@ -324,17 +324,14 @@ impl ReaderChannel {
         if self.leftover_pos >= self.leftover.len() {
             match self.chunks.recv_timeout(timeout) {
                 Ok(Ok(data)) => {
-                    // `spawn` sends an empty chunk to mark the end of the response
-                    // before it exits. That is not a throughput sample and must
-                    // not be charged as one: `recv_timeout` is paced by playback
-                    // (the pump runs at most `frameBufferDurationMs` ahead), so on
-                    // any stream whose `READ_CHUNK_BYTES` chunk lasts longer than
-                    // `timeout` — under roughly 87 kbps — every chunk resets the
-                    // window, leaving `window_bytes` at 0 when the marker lands one
-                    // gap later. Counting it turned a clean end-of-stream into a
-                    // stall on every such track: on a non-seekable source that
-                    // reaches `decode_loop` as `PumpOutcome::Failed`, so the client
-                    // sees a playback exception where the track simply finished.
+                    // spawn sends an empty chunk to mark the end of the response
+                    // before it exits — not a throughput sample, and must not be
+                    // charged as one: recv_timeout is paced by playback (the pump
+                    // runs at most frameBufferDurationMs ahead), so on any stream
+                    // under roughly 87 kbps every chunk resets the window, leaving
+                    // window_bytes at 0 when the marker lands. Counting it turned
+                    // a clean end-of-stream into a stall on every such track — a
+                    // playback exception where the track simply finished.
                     let end_of_stream = data.is_empty();
                     self.window_bytes += data.len();
                     self.leftover = data;
@@ -343,7 +340,7 @@ impl ReaderChannel {
                     // Evaluated on the same clock as the idle-gap timeout above,
                     // but only once a whole window has actually elapsed — so a
                     // source that goes quiet between chunks (a paused player never
-                    // calls `read` at all) is never charged for time nobody asked
+                    // calls read at all) is never charged for time nobody asked
                     // it to spend.
                     if !end_of_stream && self.window_start.elapsed() >= timeout {
                         if self.window_bytes < MIN_WINDOW_BYTES {
@@ -357,7 +354,7 @@ impl ReaderChannel {
                     }
                 }
                 Ok(Err(error)) => return Err(error),
-                // The reader thread hasn't produced a byte in `timeout` — treated
+                // The reader thread hasn't produced a byte in timeout — treated
                 // the same as any other read error, so the caller's reconnect
                 // logic kicks in instead of the track hanging until it is
                 // reported stuck with no way to recover on its own.
@@ -413,12 +410,11 @@ impl HttpMediaSource {
         interrupt: Arc<AtomicBool>,
     ) -> Result<Self, SourceError> {
         // No client-level overall request timeout: this is a whole track, and a
-        // long one is not a stuck one. `reqwest::blocking` has no idle read timeout
-        // of its own (unlike the async client), so `ReaderChannel::spawn` below
-        // reads on a dedicated thread and applies `read_timeout` on the receiving
-        // end — stalls surface as read errors, same as a dropped connection would.
-        // `connect` below applies `request_duration` per request instead, as a
-        // ceiling on how long any one request (and the thread reading it) may run.
+        // long one is not a stuck one. reqwest::blocking has no idle-read timeout
+        // of its own, so ReaderChannel::spawn below reads on a dedicated thread
+        // and applies read_timeout on the receiving end — stalls surface as read
+        // errors, same as a dropped connection. connect applies request_duration
+        // per request instead, as a ceiling on how long any one request may run.
         let mut builder = Client::builder()
             .connect_timeout(connect_timeout)
             .user_agent(user_agent.unwrap_or(concat!("lavalink-rs/", env!("CARGO_PKG_VERSION"))));
@@ -459,18 +455,16 @@ impl HttpMediaSource {
         let status = response.status();
 
         // A range request landing exactly at (or past) the end of the resource is a
-        // valid "nothing left to read" answer, not a failure — symphonia's probe now
-        // seeks near the end of the stream looking for trailing metadata (ID3v1/APE),
-        // which a seekable-but-short source can legitimately walk past the end of.
+        // valid "nothing left to read" answer, not a failure — symphonia's probe
+        // seeks near the end of the stream for trailing metadata (ID3v1/APE),
+        // which a seekable-but-short source can legitimately walk past.
         //
-        // Only past an end we actually know, though. A 416 for a range that is *within*
-        // the length the first response declared means the resource changed underneath
-        // us — an expired or rotated CDN URL, the same situation the length check
-        // further down catches — and swallowing that as a clean EOF ends the track
-        // mid-way as `finished`, with nothing anywhere saying why. It falls through to
-        // the failure below instead. A source whose length is unknown can never reach
-        // here: `Seek` refuses a seek from the end of one, so nothing asks for a range
-        // past an end it cannot name.
+        // Only past an end we actually know, though. A 416 for a range within the
+        // length the first response declared means the resource changed
+        // underneath us (an expired or rotated CDN URL) — swallowing that as a
+        // clean EOF would end the track mid-way as finished with no explanation,
+        // so it falls through to the failure below instead. A source with unknown
+        // length can never reach here: Seek refuses a seek from the end of one.
         let past_known_end = self.length.is_some_and(|length| offset >= length);
         if offset > 0 && status == StatusCode::RANGE_NOT_SATISFIABLE && past_known_end {
             self.position = offset;
@@ -571,9 +565,9 @@ impl Read for HttpMediaSource {
 
             // A pump command is waiting: give up the remaining retry budget rather
             // than making it wait out however many attempts are left, each up to
-            // `connect_timeout + read_timeout`. `decode_loop` treats this
+            // connect_timeout + read_timeout. decode_loop treats this
             // particular error kind as "go check the command queue", not a real
-            // failure — see its `next_packet()` match arm.
+            // failure — see its next_packet() match arm.
             if self.interrupt.load(Ordering::Relaxed) {
                 return Err(io::Error::other(CommandPending));
             }
@@ -995,8 +989,8 @@ mod tests {
             MediaSourceStreamOptions::default(),
         );
 
-        // Fully qualified: `read_buf_exact` collides with a std method name that
-        // is still unstable, which `unstable_name_collisions` warns on.
+        // Fully qualified: read_buf_exact collides with a std method name that
+        // is still unstable, which unstable_name_collisions warns on.
         let mut packet = [0u8; 256];
         let error = ReadBytes::read_buf_exact(&mut stream, &mut packet).unwrap_err();
 
@@ -1108,14 +1102,13 @@ mod tests {
             consume_request(&stream);
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n").unwrap();
             stream.write_all(b"partial").unwrap();
-            // Holds the connection open and silent for far longer than the request
-            // ceiling below but well under the (deliberately larger) idle-gap
-            // timeout, so only the ceiling can be what recovers this — an implicit
-            // close from the thread ending and dropping `stream` would otherwise
-            // let the test pass for the wrong reason. 1s keeps that margin (5x the
-            // ceiling, a tenth of the idle-gap) without leaving this thread
-            // sleeping in the background for a full 5s after the test itself
-            // has already finished with it.
+            // Holds the connection open and silent for longer than the request
+            // ceiling but well under the (deliberately larger) idle-gap timeout,
+            // so only the ceiling can recover this — otherwise an implicit close
+            // from the thread ending would let the test pass for the wrong
+            // reason. 1s keeps that margin (5x the ceiling, a tenth of the
+            // idle-gap) without sleeping this thread for a full 5s after the test
+            // has finished with it.
             std::thread::sleep(Duration::from_secs(1));
         });
 

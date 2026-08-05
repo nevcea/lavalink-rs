@@ -131,7 +131,7 @@ impl Handler {
             "play" => self.play(guild, opt_str(&options, "query").unwrap_or_default()).await,
             "search" => self.search(opt_str(&options, "query").unwrap_or_default()).await,
             "stop" => {
-                // `Present(None)` on the track is the stop signal — an omitted track
+                // Present(None) on the track is the stop signal — an omitted track
                 // would mean "leave whatever is playing alone".
                 self.patch_with(guild, |u| {
                     u.track = Omissible::Present(PlayerUpdateTrack {
@@ -176,7 +176,7 @@ impl Handler {
                 })
             }
             // The node-wide view, which is what the ten-player resource measurement
-            // needs — `/np` only ever describes the guild it was typed in.
+            // needs — /np only ever describes the guild it was typed in.
             "players" => {
                 let players = self.node.players().await?;
                 if players.0.is_empty() {
@@ -205,7 +205,7 @@ impl Handler {
                 self.apply_filters(guild, |filters| {
                     // Replacing an existing entry rather than appending: the node
                     // applies the last value for a band, but sending duplicates
-                    // makes the echoed `filters` object unreadable while testing.
+                    // makes the echoed filters object unreadable while testing.
                     let mut bands = match filters.equalizer.clone() {
                         Omissible::Present(bands) => bands,
                         Omissible::Omitted => Vec::new(),
@@ -299,7 +299,7 @@ impl Handler {
                 (tracks.remove(0), format!(" (1 of {} matches)", tracks.len() + 1))
             }
             LoadResult::Playlist(playlist) => {
-                // `selectedTrack` is -1 when the playlist names no entry point, and
+                // selectedTrack is -1 when the playlist names no entry point, and
                 // an out-of-range index is a node bug rather than something to
                 // paper over — so it is clamped only for the negative case.
                 let index = usize::try_from(playlist.info.selected_track).unwrap_or(0);
@@ -422,9 +422,9 @@ fn bad(message: impl Into<String>) -> NodeError {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Loads `.env` from the current directory if present; a real env var always
+    // Loads .env from the current directory if present; a real env var always
     // wins over one set there. Missing entirely is fine — just falls through to
-    // `DISCORD_TOKEN` below, which reports the actual problem.
+    // DISCORD_TOKEN below, which reports the actual problem.
     dotenvy::dotenv().ok();
 
     tracing_subscriber::fmt()
@@ -444,8 +444,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let password = std::env::var("LAVALINK_PASSWORD").unwrap_or_else(|_| "youshallnotpass".into());
 
     let songbird = Songbird::serenity();
-    // `Handler` is moved into the builder below, before the `Client` (and its
-    // `shard_manager`) exists — shared so it can be filled in afterwards.
+    // Handler is moved into the builder below, before the Client (and its
+    // shard_manager) exists — shared so it can be filled in afterwards.
     let shard_manager_slot = Arc::new(OnceLock::new());
     let handler = Handler {
         node: Node::new(&host, &password),
@@ -456,9 +456,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ws_started: OnceLock::new(),
     };
 
-    // `GUILD_VOICE_STATES` is what makes the caller's current voice channel
+    // GUILD_VOICE_STATES is what makes the caller's current voice channel
     // knowable. Slash commands need no message-content access, so unlike the old
-    // `!`-prefix commands, nothing here requires the privileged `MESSAGE_CONTENT`
+    // !-prefix commands, nothing here requires the privileged MESSAGE_CONTENT
     // intent.
     let intents = GatewayIntents::GUILDS | GatewayIntents::GUILD_VOICE_STATES;
 

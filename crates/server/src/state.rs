@@ -133,9 +133,9 @@ impl AppState {
 
         session.get_or_create_player(guild_id, move || {
             // The engine and the voice connection both report to an actor that
-            // does not exist yet, so they share slots that `PlayerActor::new`
+            // does not exist yet, so they share slots that PlayerActor::new
             // fills in — one per channel, since voice transitions get their own
-            // (see `PlayerHandle::voice_updates`'s docs).
+            // (see PlayerHandle::voice_updates's docs).
             let events = crate::player::EventSlot::default();
             let voice_updates = crate::player::VoiceUpdateSlot::default();
             let voice = Arc::new(VoiceConnection::new(
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn info_reports_the_v4_wire_protocol_not_the_crate_version() {
         let state = state();
-        // Clients gate on `version.major < 4` and refuse to connect below it.
+        // Clients gate on version.major < 4 and refuse to connect below it.
         assert_eq!(state.info.version.semver, "4.0.0");
         assert_eq!(state.info.version.major, 4);
     }

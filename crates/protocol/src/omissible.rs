@@ -60,7 +60,7 @@ impl<T: Serialize> Serialize for Omissible<T> {
         match self {
             Omissible::Present(v) => v.serialize(serializer),
             // Unreachable in practice: every Omissible field carries
-            // `skip_serializing_if = "Omissible::is_omitted"`. Erroring rather than
+            // skip_serializing_if = "Omissible::is_omitted". Erroring rather than
             // emitting null keeps a missed attribute loud instead of silently
             // turning "untouched" into "explicit clear" on the wire.
             Omissible::Omitted => Err(S::Error::custom(

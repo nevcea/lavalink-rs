@@ -272,8 +272,8 @@ impl RingWriter {
         let mut buffer = lock(&self.shared.buffer);
         let room = self.shared.capacity.saturating_sub(buffer.len());
         let take = room.min(samples.len());
-        // `extend(&[f32])` and not `extend(iter().copied())`: only `Extend<&T> where
-        // T: Copy` specialises to a slice copy, and the `f32`-yielding form falls
+        // extend(&[f32]) and not extend(iter().copied()): only `Extend<&T> where
+        // T: Copy specialises to a slice copy, and the f32`-yielding form falls
         // back to appending one element at a time with a wraparound check each. This
         // runs with the lock held and the reader is on a 20ms deadline behind it, so
         // the shape of this copy is the reader's problem too, not just the pump's.
@@ -434,29 +434,26 @@ impl Read for RingReader {
                 return Ok(0);
             }
             // Silence still advances playback: the listener heard 20ms of nothing,
-            // and a position that stalled during a stutter would be wrong. This
-            // happens before the buffer lock is released — matching the section
-            // `RingWriter::reset` holds the same lock across — so a concurrent
-            // seek can never have its rebase clobbered by a read that started
-            // before it, or vice versa.
+            // and a stalled position during a stutter would be wrong. Done before
+            // the buffer lock is released — matching the section RingWriter::reset
+            // holds the same lock across — so a concurrent seek's rebase can't be
+            // clobbered by a read that started before it, or vice versa.
             //
-            // Counted in samples, like wanted_samples/take below, and handed to
-            // out the same two ways they are: a whole number of 4-byte samples
-            // written straight in, with a leftover partial sample (only possible
-            // when out.len() < 4) routed through leftover instead of written
-            // directly. Silence used to just fill out.len().min(FRAME_SAMPLES * 4)
-            // bytes outright, which was not a multiple of 4 whenever out.len()
-            // itself was not — permanently misaligning every read after it by
-            // whatever fraction of a sample was short, since nothing carried the
-            // remainder forward.
+            // Counted in samples like wanted_samples/take below, and written to out
+            // the same two ways: whole 4-byte samples straight in, with a leftover
+            // partial sample (only when out.len() < 4) routed through leftover.
+            // Silence used to just fill out.len().min(FRAME_SAMPLES * 4) bytes
+            // outright, which wasn't a multiple of 4 whenever out.len() wasn't —
+            // permanently misaligning every later read by the short fraction,
+            // since nothing carried the remainder forward.
             let silence_samples = wanted_samples.min(FRAME_SAMPLES);
             self.shared.advance_frames(silence_samples as i64);
             self.shared.refresh_position();
             drop(buffer);
             // Starved: the pump has not kept up. Hand back silence rather than
             // blocking the mixer, and account for it as a lost frame — exactly what
-            // the original counts as `nulled`. No producer can be waiting on space
-            // here (the buffer was empty), so there is nothing to `notify_all`.
+            // the original counts as nulled. No producer can be waiting on space
+            // here (the buffer was empty), so there is nothing to notify_all.
             self.shared.frames.record_nulled(silence_samples);
             let written = if out.len() >= 4 {
                 let silence_bytes = silence_samples * 4;
@@ -476,22 +473,22 @@ impl Read for RingReader {
 
         // The common case: wanted_samples = out.len() / 4, so take * 4 <= out.len()
         // always holds today, and every drained sample is written straight into out
-        // with nothing left over. That bound comes from how wanted_samples above is
-        // computed, not from anything the zip loop below checks itself — it sums
+        // with nothing left over. That bound comes from how wanted_samples is
+        // computed, not from anything the zip loop below checks — it sums
         // source.len() * 4 into written unconditionally, trusting the bound rather
-        // than verifying it, so a future change to wanted_samples that let take * 4
-        // exceed out.len() would silently under-report written (zip stops at
-        // whichever side runs out first) instead of panicking. The exception today
-        // is out.len() < 4 (the .max(1) above), where a single sample can't fit —
-        // that's the one case still routed through leftover.
+        // than verifying it, so a future change letting take * 4 exceed out.len()
+        // would silently under-report written (zip stops at whichever side runs
+        // out first) instead of panicking. The exception today is out.len() < 4
+        // (the .max(1) above), where a single sample can't fit — routed through
+        // leftover instead.
         let written = if out.len() >= 4 {
-            // Copied off `as_slices` rather than straight through `drain`: a
-            // `VecDeque`'s drain iterator carries the wraparound check into every
-            // step, so the conversion loop stays scalar however simple its body is.
-            // Over a contiguous `&[f32]` the same `to_le_bytes`-and-write is a shape
-            // the optimiser can widen — on a little-endian target it is a memcpy.
-            // Two segments because the head may sit anywhere in the ring; a ring that
-            // has been playing for any length of time is always split.
+            // Copied off as_slices rather than through drain directly: a
+            // VecDeque's drain iterator carries the wraparound check into every
+            // step, keeping the conversion loop scalar however simple its body
+            // is. Over a contiguous &[f32] the same to_le_bytes-and-write is a
+            // shape the optimiser can widen — on little-endian, a memcpy. Two
+            // segments because the head may sit anywhere in the ring; a ring
+            // that's been playing any length of time is always split.
             let (front, back) = buffer.as_slices();
             let from_front = take.min(front.len());
             let mut written = 0;
@@ -501,7 +498,7 @@ impl Read for RingReader {
                 }
                 written += source.len() * 4;
             }
-            // Drops the samples just copied. `Drain` removes its range on drop, so
+            // Drops the samples just copied. Drain removes its range on drop, so
             // this is the removal — nothing is left to iterate.
             buffer.drain(..take);
             written
@@ -538,8 +535,8 @@ impl Seek for RingReader {
 }
 
 // Implemented against songbird's own vendored symphonia-core (currently 0.5.x,
-// re-exported as `songbird::input::core`), not this crate's own `symphonia`
-// dependency — `RawAdapter` requires the trait from songbird's copy specifically,
+// re-exported as songbird::input::core), not this crate's own symphonia
+// dependency — RawAdapter requires the trait from songbird's copy specifically,
 // and the two are unrelated crate instances once their versions diverge.
 impl songbird::input::core::io::MediaSource for RingReader {
     /// Always false, and this is load-bearing.
@@ -636,7 +633,7 @@ mod tests {
             assert_eq!(writer.try_write(&chunk).0, CHUNK);
             next += CHUNK;
             // Checked while the samples are still in the ring: once the head has
-            // moved off zero, `as_slices` reports a non-empty second segment.
+            // moved off zero, as_slices reports a non-empty second segment.
             wrapped |= !lock(&reader.shared.buffer).as_slices().1.is_empty();
             got.extend(read_samples(&mut reader, CHUNK));
         }
@@ -839,7 +836,7 @@ mod tests {
         assert!(before_seek > 0);
 
         // The engine announces the seek before the pump has done anything —
-        // no `reset` yet, so the ring's own base/consumed_frames are still
+        // no reset yet, so the ring's own base/consumed_frames are still
         // exactly where they were.
         writer.begin_seek(90_000);
         assert_eq!(
@@ -853,7 +850,7 @@ mod tests {
         read_samples(&mut reader, FRAME_SAMPLES);
         assert_eq!(position.load(Ordering::Relaxed), 90_000);
 
-        // Only once the pump's `reset` actually lands does the ring go back to
+        // Only once the pump's reset actually lands does the ring go back to
         // tracking frames for real — from the target, not from zero.
         writer.reset(90_000);
         assert_eq!(position.load(Ordering::Relaxed), 90_000);
@@ -991,7 +988,7 @@ mod tests {
             "the live ring should be reporting its own position"
         );
 
-        // What `stop_active` does the moment this ring is superseded, before the
+        // What stop_active does the moment this ring is superseded, before the
         // replacement ring exists.
         writer.detach_position();
         // The replacement's position, as the engine and the new ring write it.
@@ -1030,7 +1027,7 @@ mod tests {
                     let mut out = vec![0u8; FRAME_SAMPLES * 4];
                     // Real audio, then starvation once it runs out — either kind of
                     // read still refreshes the position, so the loop keeps racing
-                    // `detach_position` for as long as the main thread wants.
+                    // detach_position for as long as the main thread wants.
                     while keep_reading.load(Ordering::Relaxed) {
                         let _ = reader.read(&mut out);
                     }

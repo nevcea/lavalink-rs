@@ -114,7 +114,7 @@ impl StatsCollector {
         let (memory, cpu) = self.machine();
 
         StatsData {
-            // Always None here: `GET /v4/stats` omits the key entirely, and the
+            // Always None here: GET /v4/stats omits the key entirely, and the
             // websocket event attaches the per-session value itself.
             frame_stats: None,
             players,
@@ -146,7 +146,7 @@ impl StatsCollector {
         let process = system.process(self.pid);
 
         // The original reports JVM heap numbers. There is no heap here, so these are
-        // the process's own memory: `used` is RSS, and `allocated`/`reservable` are
+        // the process's own memory: used is RSS, and allocated/reservable are
         // the machine's total, which is the honest analogue of "how much more could
         // this process take". Clients display these; none of them branch on the
         // relationship between the four.
@@ -165,7 +165,7 @@ impl StatsCollector {
             lavalink_load: process
                 .map(|process| {
                     // sysinfo reports process CPU as a percentage of one core;
-                    // Lavalink's `lavalinkLoad` is a fraction of the whole machine.
+                    // Lavalink's lavalinkLoad is a fraction of the whole machine.
                     (process.cpu_usage() as f64 / 100.0 / self.cores.max(1) as f64).clamp(0.0, 1.0)
                 })
                 .unwrap_or(0.0),
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn uptime_is_measured_from_the_start_instant() {
-        // A `started_at` already 50ms in the past, so a hardcoded-zero or
+        // A started_at already 50ms in the past, so a hardcoded-zero or
         // measured-from-somewhere-else uptime would fail this, not just "uptime
         // isn't negative".
         let started_at = Instant::now() - Duration::from_millis(50);
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(stats.players, 3);
         assert_eq!(stats.playing_players, 1);
         assert!(stats.uptime >= 50, "uptime was {}, expected at least 50ms", stats.uptime);
-        // `GET /v4/stats` drops the key entirely rather than sending null.
+        // GET /v4/stats drops the key entirely rather than sending null.
         assert!(stats.frame_stats.is_none());
     }
 }

@@ -42,11 +42,11 @@ fn bench_ring_read(c: &mut Criterion) {
     // The steady state: the pump is comfortably ahead, so every read is a full
     // frame straight out of the buffer. This is the number that matters.
     //
-    // Refilling happens inside the timed closure because it has to — a read drains
-    // the ring, and topping it up outside would need `iter_batched`, whose per-batch
-    // setup is far more expensive than the write itself. The write is a single
-    // `extend` of the same length the read takes, so it is a constant addend, not a
-    // term that changes when the read path does.
+    // Refilling happens inside the timed closure because it has to — a read
+    // drains the ring, and topping it up outside would need iter_batched, whose
+    // per-batch setup is far more expensive than the write itself. The write is
+    // a constant addend of the same length as the read, not a term that changes
+    // with the read path.
     group.bench_function(BenchmarkId::new("read", "20ms_frame"), |b| {
         let (writer, mut reader) = ring_pair(1000);
         let chunk = samples(FRAME_SAMPLES);
@@ -56,7 +56,7 @@ fn bench_ring_read(c: &mut Criterion) {
         });
     });
 
-    // The same read, but with the deque's head parked mid-buffer so `as_slices`
+    // The same read, but with the deque's head parked mid-buffer so as_slices
     // reports two segments instead of one. A ring that has been playing for any
     // length of time is always in this state; a freshly filled one may not be, and
     // benchmarking only the contiguous case would miss the split entirely.

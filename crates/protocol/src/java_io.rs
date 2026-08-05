@@ -154,7 +154,7 @@ impl DataOutput {
             }
             // Roll back, or the half-written string stays in the buffer and every
             // field after it decodes as garbage. The error is recoverable for the
-            // caller only if `self` is still usable.
+            // caller only if self is still usable.
             Err(_) => {
                 self.bytes.truncate(start);
                 Err(JavaIoError::StringTooLong { len })
@@ -212,13 +212,13 @@ fn encode_modified_utf8_into(value: &str, out: &mut Vec<u8>) {
 /// normalised: it re-encodes shorter. See the surrogate caveat below for the other
 /// input this can't preserve.
 pub fn decode_modified_utf8(bytes: &[u8]) -> std::result::Result<String, usize> {
-    // Modified UTF-8 and UTF-8 agree byte-for-byte over `0x00..=0x7F`, which is what
-    // the overwhelming majority of these fields are. `\0` is the one ASCII character
-    // the two encodings disagree on, and it encodes to `0xC0 0x80` — not ASCII, so
+    // Modified UTF-8 and UTF-8 agree byte-for-byte over 0x00..=0x7F, which is what
+    // the overwhelming majority of these fields are. \0 is the one ASCII character
+    // the two encodings disagree on, and it encodes to 0xC0 0x80 — not ASCII, so
     // it fails this check and takes the loop below. Same for every multi-byte
     // sequence and every surrogate half.
     if bytes.is_ascii() {
-        // `is_ascii` already established this is valid UTF-8.
+        // is_ascii already established this is valid UTF-8.
         return Ok(String::from_utf8_lossy(bytes).into_owned());
     }
 
@@ -256,11 +256,11 @@ pub fn decode_modified_utf8(bytes: &[u8]) -> std::result::Result<String, usize> 
     }
 
     // Unpaired surrogates are possible here — Java permits them — but a Rust
-    // `String` cannot hold one, so `from_utf16_lossy` replaces each with U+FFFD
-    // rather than preserving it. That is a real, accepted divergence from Java's
-    // `readUTF`, not a round trip: re-encoding a title that had one produces a
-    // different byte sequence (and a different length) than the input. See
-    // `encoded_track.rs`'s module docs for what "byte-for-byte" is scoped to.
+    // String can't hold one, so from_utf16_lossy replaces each with U+FFFD
+    // instead. A real, accepted divergence from Java's readUTF, not a round
+    // trip: re-encoding a title that had one produces a different byte sequence
+    // than the input. See encoded_track.rs's module docs for what "byte-for-byte"
+    // is scoped to.
     Ok(String::from_utf16_lossy(&units))
 }
 
