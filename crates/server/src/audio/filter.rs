@@ -589,14 +589,22 @@ const MIN_SPEED_FACTOR: f32 = 1e-3;
 
 impl TimescaleFilter {
     fn new(config: Timescale, channels: usize) -> Self {
-        let speed_factor = ((config.speed * config.rate) as f32).max(MIN_SPEED_FACTOR);
+        // Same non-finite guard as pitch_factor below, and for the same reason:
+        // .max on a +inf operand returns +inf, not the floor. An infinite
+        // speed_factor makes out_frames below (in_frames / speed_factor) round
+        // to 0, so the chain emits nothing at all for the rest of the track —
+        // the ring never fills, the pump spins through the whole source at
+        // decode speed, and the player looks like it is playing silence with
+        // no TrackStuckEvent to say otherwise (on_progress keeps firing).
+        // 1.0 is the neutral speed, the same fallback pitch_factor uses.
+        let speed_factor = (config.speed * config.rate) as f32;
+        let speed_factor = finite(speed_factor, 1.0).max(MIN_SPEED_FACTOR);
         // pitch/rate are each individually in-range f64s, but their product can
-        // still overflow to infinity at multiplication time (.max on a +inf
-        // operand returns +inf, not the floor), and that would cross into
-        // Stretch::set_transpose_factor's C++ FFI unchecked. A non-finite product
-        // falls back to the neutral 1.0 (no pitch shift); a finite but
-        // non-positive one is floored like speed_factor, since a zero or
-        // negative multiplier is just as meaningless here.
+        // still overflow to infinity at multiplication time, and that would
+        // cross into Stretch::set_transpose_factor's C++ FFI unchecked. A
+        // non-finite product falls back to the neutral 1.0 (no pitch shift); a
+        // finite but non-positive one is floored like speed_factor, since a
+        // zero or negative multiplier is just as meaningless here.
         let pitch_factor = (config.pitch * config.rate) as f32;
         let pitch_factor = finite(pitch_factor, 1.0).max(MIN_SPEED_FACTOR);
 
@@ -1727,6 +1735,33 @@ mod tests {
             assert!(channels[0].len() <= 960 * 1000, "runaway output buffer for {json}");
             assert_eq!(channels[0].len(), channels[1].len());
         }
+    }
+
+    /// The mirror of `a_non_finite_pitch_does_not_reach_the_stretcher` below,
+    /// on the field that was still missing the guard: `speed_factor` went
+    /// through `.max(MIN_SPEED_FACTOR)` alone, and `.max` on a `+inf` operand
+    /// returns `+inf` rather than the floor. `speed * rate` overflowing `f64`
+    /// therefore left `out_frames` (`in_frames / speed_factor`) rounding to 0,
+    /// so the chain emitted nothing at all for the rest of the track — the ring
+    /// never filled, the pump raced through the whole source at decode speed,
+    /// and the player reported `Playing` with no `TrackStuckEvent` to
+    /// contradict it (`on_progress` keeps firing). A finite output length is
+    /// what pins it: not merely bounded above, as the zero/negative case
+    /// checks, but actually non-empty.
+    #[test]
+    fn a_non_finite_speed_still_produces_audio() {
+        let mut chain =
+            FilterChain::new(&filters(r#"{"timescale":{"rate":1.7e308,"speed":1.7e308}}"#), 2);
+        let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+        chain.process(&mut channels);
+
+        assert!(
+            !channels[0].is_empty(),
+            "an overflowed speed must fall back to neutral, not silence the track"
+        );
+        assert!(channels[0].len() <= 960 * 1000, "runaway output buffer");
+        assert!(channels[0].iter().all(|sample| sample.is_finite()));
+        assert_eq!(channels[0].len(), channels[1].len());
     }
 
     /// `pitch_factor` had no equivalent guard to `speed_factor`'s
