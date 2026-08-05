@@ -98,10 +98,21 @@ impl Sink {
 
             match SnapshotKey::of(&message) {
                 Some(key) => {
-                    // While paused, snapshots are not queued at all: on resume we
-                    // send fresh ones, so a replayed stale position would only be
-                    // wrong. The original does the same
-                    // (`SocketContext.kt:193` re-sends current state on resume).
+                    // While paused, snapshots are not queued at all — a genuine
+                    // divergence, not a port of the original: `SocketContext.kt`
+                    // queues *every* payload while paused, `playerUpdate`/`Stats`
+                    // included, in its own unbounded `resumeEventQueue`, and
+                    // replays the whole thing verbatim on resume before also
+                    // sending one fresh update per player (`SocketContext.kt:193`).
+                    // Queuing a growing backlog of stale positions is exactly the
+                    // unbounded-growth shape this module's own docs reject for
+                    // essentials; a stale `playerUpdate` is also strictly less
+                    // useful than the fresh one that immediately follows it, so
+                    // dropping it here loses nothing a client can act on. The end
+                    // state a client observes still matches: `ws.rs::run` sends
+                    // that same per-player fresh update at resume, so the queued
+                    // replay the original does is redundant work we skip, not a
+                    // wire-visible difference in what the client ends up seeing.
                     if inner.paused {
                         return Ok(());
                     }

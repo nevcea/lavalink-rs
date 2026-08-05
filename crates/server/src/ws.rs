@@ -122,6 +122,10 @@ async fn run(
         session_id: session.id.clone(),
     });
 
+    if resumed {
+        emit_fresh_updates(&session);
+    }
+
     let destroyed = pump(&state, &session, socket).await;
 
     // The socket is gone. Either the session waits to be resumed or it is over.
@@ -255,6 +259,26 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
     false
 }
 
+/// Sends `Command::EmitUpdate` to every player in `session`, non-blocking.
+///
+/// `SocketContext.kt:193`: after replaying its queue, the original sends a
+/// fresh `playerUpdate` for every player unconditionally, right at resume —
+/// not waiting for the next periodic tick. Our sink drops snapshot messages
+/// entirely while paused (`Sink::send`'s docs), so without this a resumed
+/// client sees nothing for a guild whose state didn't happen to change since
+/// disconnecting, and stale-until-corrected state for one that did, for up to
+/// `playerUpdateInterval` (5s default).
+///
+/// `try_send`, not an awaited `send`: this must not hold up completing the
+/// handshake behind a busy actor, and a skipped one is superseded by the next
+/// periodic tick regardless — the same trade `ticker.rs`'s own use of
+/// `EmitUpdate` makes.
+fn emit_fresh_updates(session: &Session) {
+    for player in session.players() {
+        let _ = player.try_send(crate::player::Command::EmitUpdate);
+    }
+}
+
 /// Puts an essential `message` that `recv()` already dequeued back at the front
 /// of the essential lane, after the write that was going to deliver it failed or
 /// timed out.
@@ -337,6 +361,31 @@ mod tests {
         crate::session::SessionRegistry::new().open(1, None)
     }
 
+    /// `sink` is the session's own — matching `AppState::player`'s production
+    /// wiring — so an event a spawned actor emits (here, the `PlayerUpdate`
+    /// `Command::EmitUpdate` triggers) lands where a test reading the
+    /// session's sink can see it.
+    fn dummy_pair(
+        guild_id: u64,
+        sink: std::sync::Arc<crate::sink::Sink>,
+    ) -> (crate::player::PlayerHandle, std::sync::Arc<crate::voice::VoiceConnection>) {
+        let voice_updates: crate::player::VoiceUpdateSlot = std::sync::Arc::new(std::sync::OnceLock::new());
+        let voice = std::sync::Arc::new(crate::voice::VoiceConnection::new(
+            guild_id,
+            1,
+            std::sync::Arc::clone(&voice_updates),
+        ));
+        let (actor, handle) = crate::player::PlayerActor::new(
+            guild_id,
+            Box::new(crate::audio::testing::RecordingEngine::new()),
+            sink,
+            std::time::Duration::from_secs(10),
+            voice_updates,
+        );
+        tokio::spawn(actor.run());
+        (handle, voice)
+    }
+
     /// The bug this guards: `recv()` already removed the message from the
     /// essential lane before a write that fails or times out ever runs, so
     /// without restoring it the message that was supposed to be delivered (or
@@ -364,6 +413,48 @@ mod tests {
         let session = dummy_session();
         restore_undelivered(&session, update("1", 42));
         assert_eq!(session.sink.try_recv(), None);
+    }
+
+    /// The bug this guards: `Sink::send` drops every `playerUpdate` while
+    /// paused (see its own docs on why), so a resumed session's sink starts
+    /// back up with nothing queued for any player whose state didn't happen
+    /// to change while detached — a client would see no update at all until
+    /// the next periodic tick, up to `playerUpdateInterval` (5s default)
+    /// later. `SocketContext.kt:193` closes exactly this gap in the original
+    /// by sending one immediately for every player on resume.
+    #[tokio::test]
+    async fn resuming_emits_a_fresh_update_for_every_player() {
+        let session = dummy_session();
+        session
+            .get_or_create_player(1, || dummy_pair(1, std::sync::Arc::clone(&session.sink)))
+            .unwrap();
+        session
+            .get_or_create_player(2, || dummy_pair(2, std::sync::Arc::clone(&session.sink)))
+            .unwrap();
+
+        // A paused sink is what a real resume transitions out of; snapshots
+        // sent while paused (nothing here, since nothing played) would have
+        // been dropped either way.
+        session.sink.pause();
+        session.sink.resume();
+
+        emit_fresh_updates(&session);
+
+        let mut guilds_seen = Vec::new();
+        for _ in 0..100 {
+            match session.sink.try_recv() {
+                Some(Message::PlayerUpdate { guild_id, .. }) => guilds_seen.push(guild_id),
+                Some(_) => {}
+                None => {
+                    if guilds_seen.len() == 2 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+        guilds_seen.sort();
+        assert_eq!(guilds_seen, vec!["1".to_owned(), "2".to_owned()]);
     }
 
     use axum::http::{HeaderName, HeaderValue};
