@@ -193,17 +193,6 @@ impl Loader {
     }
 
     async fn load_uncached(&self, identifier: &str) -> LoadResult {
-        let Some(index) = self
-            .managers
-            .iter()
-            .position(|manager| manager.matches(identifier))
-        else {
-            // No manager claims it. An unsupported source is 200 + "empty", not an
-            // error — clients treat "empty" as "try another node or give up", and an
-            // error as "something broke".
-            return LoadResult::Empty;
-        };
-
         let Ok(permit) = self.permits.clone().acquire_owned().await else {
             return LoadResult::Error(Exception::new(
                 Severity::Suspicious,
@@ -213,7 +202,10 @@ impl Loader {
         };
 
         let identifier = identifier.to_owned();
-        let manager = Arc::clone(&self.managers[index]);
+        // Cloned, not borrowed, because the thread below outlives this future
+        // (see the permit comment). A `Vec` of `Arc`s, so this is a pointer copy
+        // per registered manager.
+        let managers = self.managers.clone();
 
         // A dedicated thread rather than spawn_blocking — not for performance.
         // Blocking-pool threads still carry the runtime in thread-local context,
@@ -235,8 +227,23 @@ impl Loader {
             .name("loader".to_owned())
             .spawn(move || {
                 let _permit = permit;
+                // Choosing the manager happens here too, not on the caller's
+                // runtime thread. `matches` looks pure, and for every other
+                // source it is — but `LocalSource::matches` ends in
+                // `Path::is_file()`, a stat syscall, and it is reached for any
+                // identifier without a `://` that no earlier manager claimed
+                // (`ytsearch:`-style prefixes for a disabled source, bare
+                // filenames). On a slow or unresponsive mount that stalls a
+                // runtime worker, which is the whole reason the load itself was
+                // moved off the runtime in the first place.
+                //
+                // First match wins, as `main.rs::source_managers` orders them.
+                let result = managers
+                    .iter()
+                    .find(|manager| manager.matches(&identifier))
+                    .map(|manager| manager.load(&identifier));
                 // The receiver is gone if the caller was cancelled; nothing to do.
-                let _ = tx.send(manager.load(&identifier));
+                let _ = tx.send(result);
             });
 
         if let Err(error) = spawned {
@@ -246,11 +253,16 @@ impl Loader {
             );
         }
 
-        // The thread panicked. Report it as ours, and let everything else carry
-        // on: one bad load must not take the node with it.
-        let result = rx
-            .await
-            .unwrap_or_else(|_| Err(SourceError::Internal("the loader thread panicked".to_owned())));
+        let result = match rx.await {
+            Ok(Some(result)) => result,
+            // No manager claims it. An unsupported source is 200 + "empty", not
+            // an error — clients treat "empty" as "try another node or give
+            // up", and an error as "something broke".
+            Ok(None) => return LoadResult::Empty,
+            // The thread panicked. Report it as ours, and let everything else
+            // carry on: one bad load must not take the node with it.
+            Err(_) => Err(SourceError::Internal("the loader thread panicked".to_owned())),
+        };
 
         match result {
             Ok(SourceLoad::Track(track)) => match encode(track) {
