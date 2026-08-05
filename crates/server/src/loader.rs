@@ -29,6 +29,13 @@ use crate::lock;
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
+/// Hard cap on distinct cached identifiers. `sweep_expired` only runs once per
+/// tick, so a burst of distinct identifiers between ticks would otherwise grow
+/// the map without bound; this bounds it independently of how often the sweep
+/// runs. Past the cap a successful load still returns its result, it just is
+/// not cached — correctness is unaffected, the next request for it reloads.
+const MAX_CACHE_ENTRIES: usize = 10_000;
+
 /// How many loads may run at once. Bounded so a burst of `loadtracks` cannot
 /// saturate the blocking pool and starve everything else.
 const MAX_CONCURRENT_LOADS: usize = 16;
@@ -161,13 +168,20 @@ impl Loader {
             let result = self.load_uncached(identifier).await;
 
             if !matches!(result, LoadResult::Error(_)) {
-                lock(&self.cache).insert(
-                    identifier.to_owned(),
-                    CacheEntry {
-                        result: result.clone(),
-                        expires_at: Instant::now() + CACHE_TTL,
-                    },
-                );
+                let mut cache = lock(&self.cache);
+                if cache.len() >= MAX_CACHE_ENTRIES {
+                    let now = Instant::now();
+                    cache.retain(|_, entry| entry.expires_at > now);
+                }
+                if cache.len() < MAX_CACHE_ENTRIES {
+                    cache.insert(
+                        identifier.to_owned(),
+                        CacheEntry {
+                            result: result.clone(),
+                            expires_at: Instant::now() + CACHE_TTL,
+                        },
+                    );
+                }
             }
 
             // Removing before sending is safe: subscribers join under the same
@@ -599,6 +613,30 @@ mod tests {
         assert!(!cache.contains_key("https://example.invalid/a.mp3"));
         // Unexpired entries are untouched — the sweep is expiry, not a flush.
         assert!(cache.contains_key("https://example.invalid/b.mp3"));
+    }
+
+    /// Distinct identifiers past `MAX_CACHE_ENTRIES` must not grow the cache
+    /// without bound, even between sweep ticks.
+    #[tokio::test]
+    async fn the_cache_does_not_grow_past_its_cap() {
+        let (loader, _) = loader(ok_track);
+        for entry in 0..MAX_CACHE_ENTRIES + 10 {
+            lock(&loader.cache).insert(
+                format!("https://example.invalid/{entry}"),
+                CacheEntry {
+                    result: LoadResult::Empty,
+                    expires_at: Instant::now() + CACHE_TTL,
+                },
+            );
+        }
+        assert_eq!(lock(&loader.cache).len(), MAX_CACHE_ENTRIES + 10);
+
+        // One more successful load past the cap is served but not cached.
+        loader.load("https://example.invalid/one-more").await;
+        assert!(
+            !lock(&loader.cache).contains_key("https://example.invalid/one-more"),
+            "a load past the cache cap must not be cached"
+        );
     }
 
     #[test]
