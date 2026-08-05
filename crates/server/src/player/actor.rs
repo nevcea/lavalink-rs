@@ -58,9 +58,9 @@ pub enum Command {
     /// order in a single step so no other command can interleave halfway.
     Patch(Box<PatchRequest>, oneshot::Sender<Player>),
     Snapshot(oneshot::Sender<Player>),
-    /// Emit a `playerUpdate` to the session. Sent by the global tick, which does not
-    /// read player state itself — asking the actor to publish keeps the actor the
-    /// only reader of its own fields.
+    /// Emit a `playerUpdate` to the session. Sent by the global tick and on session
+    /// resume, neither of which reads player state itself — asking the actor to
+    /// publish keeps it the only reader of its own fields.
     EmitUpdate,
     /// The audio engine reported something.
     Engine(EngineEvent),
@@ -200,12 +200,12 @@ impl PlayerHandle {
 /// take this slot and it is filled in afterwards, exactly once — a `OnceLock`
 /// rather than a `Mutex` says so directly, instead of leaving it to the "called
 /// once, at construction" comment on [`Engine::attach`](crate::audio::Engine::attach).
-pub type EventSlot = Arc<std::sync::OnceLock<mpsc::Sender<Command>>>;
+type DeferredSlot<T> = Arc<std::sync::OnceLock<mpsc::Sender<T>>>;
 
-/// As [`EventSlot`], but for voice transitions — `VoiceConnection` is built
-/// before the actor exists, same as the engine, and needs somewhere to put
-/// its sender until [`PlayerActor::new`] fills it in.
-pub type VoiceUpdateSlot = Arc<std::sync::OnceLock<mpsc::Sender<VoiceUpdate>>>;
+pub type EventSlot = DeferredSlot<Command>;
+/// [`DeferredSlot`] for voice transitions — `VoiceConnection` is built before the
+/// actor exists, same as the engine.
+pub type VoiceUpdateSlot = DeferredSlot<VoiceUpdate>;
 
 /// The actor is gone — destroyed, or its task died.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -420,14 +420,7 @@ impl PlayerActor {
         }
 
         if let Some(position) = request.position.take_if(track_untouched) {
-            // The original clamps rather than rejects a negative seek target
-            // (LocalAudioTrackExecutor.setPosition: timecode < 0 becomes 0)
-            // instead of erroring, and this has to happen before the value
-            // reaches engine.seek: pump.rs's own seek clamps only what it hands
-            // the demuxer, not the unclamped value drain_commands separately
-            // hands writer.reset to rebase the ring's reported position, which
-            // would otherwise report negative for the next few seconds.
-            let position = position.max(0);
+            let position = clamp_start_position(position);
             if self.model.track.is_some() {
                 self.engine.seek(position);
                 // The optimistic value goes out now: the original reports the
@@ -493,12 +486,7 @@ impl PlayerActor {
                     self.stop_track(TrackEndReason::Replaced);
                 }
 
-                // Same clamp as the seek path above, and for the same reason:
-                // pump.rs's start_position_ms only skips seeking on a non-positive
-                // value, it does not clamp one, so an unclamped negative here would
-                // reach writer.reset and rebase the ring's reported position
-                // negative for the life of the track.
-                let position = request.position.into_option().unwrap_or(0).max(0);
+                let position = clamp_start_position(request.position.into_option().unwrap_or(0));
                 let end_time = request.end_time.into_option().flatten();
                 let mut track = *track;
                 if let Omissible::Present(user_data) = request.user_data {
@@ -653,6 +641,18 @@ impl PlayerActor {
     fn guild_id_string(&self) -> String {
         self.guild_id_str.clone()
     }
+}
+
+/// Clamps a negative start/seek position to 0, the way the original clamps rather
+/// than rejects one (`LocalAudioTrackExecutor.setPosition`: `timecode < 0` becomes
+/// 0). Must happen before the value reaches `engine.seek`/`engine.play`: `pump.rs`
+/// only clamps the value it hands the demuxer (seek) or only skips seeking on a
+/// non-positive value (play) — it does not clamp the value `drain_commands`
+/// separately hands `writer.reset` to rebase the ring's reported position, which
+/// would otherwise report negative for the next few seconds (seek) or for the life
+/// of the track (play).
+fn clamp_start_position(position: i64) -> i64 {
+    position.max(0)
 }
 
 pub fn now_epoch_ms() -> i64 {
