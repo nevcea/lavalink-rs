@@ -400,6 +400,29 @@ mod tests {
         assert_eq!(body["path"], "/v4/sessions/%ff/players");
     }
 
+    /// `util.kt`'s `decodeTrack` throws a bare `IllegalStateException`/
+    /// `IllegalArgumentException`, which no upstream handler catches — Spring's
+    /// uncaught-exception path is a plain 500, not the 400 a `FriendlyException`
+    /// (a genuine load failure) gets.
+    #[tokio::test]
+    async fn a_malformed_encoded_track_fails_decode_with_500() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v4/decodetrack?encodedTrack=not-valid-base64!!")
+                    .header(header::AUTHORIZATION, "test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(response).await;
+        assert_eq!(body["status"], 500);
+        assert_eq!(body["path"], "/v4/decodetrack");
+    }
+
     /// `RoutePlannerRestHandler.kt::getStatus` returns 204 with no body when no
     /// route planner is configured, which is the only state this node is ever
     /// in — not a 404 or 501.

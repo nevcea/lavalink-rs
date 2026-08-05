@@ -36,10 +36,29 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
 
-    /// A load or decode failure as a 400, preferring the exception's own message and
+    /// A load failure as a 400, preferring the exception's own message and
     /// falling back to its cause — the original never surfaces an empty one.
+    /// This is for `loadAudioItem`'s `FriendlyException`, which
+    /// `PlayerRestHandler.kt`/`AudioLoaderRestHandler.kt` explicitly catch and
+    /// turn into a 400 — not for `decodeTrack`, which throws a plain
+    /// `IllegalStateException`/`IllegalArgumentException` neither handler
+    /// catches, so it falls through to Spring's uncaught-exception 500 (see
+    /// [`Self::decode_failed`]).
     pub fn from_exception(exception: lavalink_protocol::Exception) -> Self {
         Self::bad_request(exception.message.unwrap_or(exception.cause))
+    }
+
+    /// A `decodeTrack` failure (bad base64, mismatched track version, missing
+    /// source manager) as a 500 — `util.kt`'s `decodeTrack` throws a plain
+    /// `IllegalStateException`/`IllegalArgumentException`, which no upstream
+    /// handler catches, so it falls through to Spring's uncaught-exception
+    /// path rather than the `FriendlyException`-only 400 [`Self::from_exception`]
+    /// models.
+    pub fn decode_failed(exception: lavalink_protocol::Exception) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            exception.message.unwrap_or(exception.cause),
+        )
     }
 
     /// The original's wording, which some clients match on

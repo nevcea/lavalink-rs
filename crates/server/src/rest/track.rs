@@ -47,7 +47,7 @@ pub async fn decode_track(
         .loader
         .decode(&encoded)
         .map(Json)
-        .map_err(ApiError::from_exception)
+        .map_err(ApiError::decode_failed)
 }
 
 pub async fn decode_tracks(
@@ -65,7 +65,7 @@ pub async fn decode_tracks(
             state
                 .loader
                 .decode(encoded)
-                .map_err(ApiError::from_exception)
+                .map_err(ApiError::decode_failed)
         })
         .collect::<Result<Vec<Track>, ApiError>>()?;
 

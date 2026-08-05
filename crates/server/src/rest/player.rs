@@ -109,28 +109,6 @@ pub async fn patch_player(
         }
     }
 
-    // Resolving happens before the actor is touched, so a slow source cannot hold
-    // up anything else in this guild.
-    let track = match &track_fields.encoded {
-        Omissible::Present(Some(encoded)) => Some(TrackChange::Play(Box::new(
-            state
-                .loader
-                .decode(encoded)
-                .map_err(ApiError::from_exception)?,
-        ))),
-        Omissible::Present(None) => Some(TrackChange::Clear),
-        Omissible::Omitted => match &track_fields.identifier {
-            Omissible::Present(identifier) => {
-                Some(TrackChange::Play(Box::new(load_one(&state, identifier).await?)))
-            }
-            Omissible::Omitted => None,
-        },
-    };
-
-    // None here means the session was torn down (resume swept, or its sink
-    // overflowed) while this request was resolving the track above — the same
-    // outcome patch's own PlayerGone gets below, reported the same way.
-    //
     // The voice connection comes from this same call, not a second
     // session.voice(guild_id) lookup: a teardown landing between two
     // independent lookups could make the second one silently see a different
@@ -139,6 +117,44 @@ pub async fn patch_player(
     let (handle, connection) = state
         .player(&session, guild_id)
         .ok_or_else(player_gone)?;
+
+    let wants_track_change = track_fields.encoded.is_present() || track_fields.identifier.is_present();
+
+    // noReplace with something already playing drops the request before a
+    // resolution is even attempted (`PlayerRestHandler.kt`: the check runs
+    // before `decodeTrack`/`loadAudioItem` are called), not merely after
+    // resolving succeeds or fails. A snapshot is a cheap round trip through
+    // the actor's own queue, not a blocking wait, so this does not reintroduce
+    // the slow-source-blocks-the-guild problem resolving-before-touching-the-
+    // actor exists to avoid.
+    let dropped_by_no_replace = wants_track_change
+        && query.no_replace
+        && handle
+            .snapshot()
+            .await
+            .is_ok_and(|player| player.track.is_some());
+
+    // Resolving happens before the actor sees a track change, so a slow source
+    // cannot hold up anything else in this guild.
+    let track = if dropped_by_no_replace {
+        None
+    } else {
+        match &track_fields.encoded {
+            Omissible::Present(Some(encoded)) => Some(TrackChange::Play(Box::new(
+                state
+                    .loader
+                    .decode(encoded)
+                    .map_err(ApiError::decode_failed)?,
+            ))),
+            Omissible::Present(None) => Some(TrackChange::Clear),
+            Omissible::Omitted => match &track_fields.identifier {
+                Omissible::Present(identifier) => {
+                    Some(TrackChange::Play(Box::new(load_one(&state, identifier).await?)))
+                }
+                Omissible::Omitted => None,
+            },
+        }
+    };
 
     // Connecting happens here, awaited, before the actor is told anything, so a
     // failure can become a status code. The original wraps this in
@@ -410,6 +426,53 @@ mod tests {
     /// from "replaced", which is why the check compares by pointer instead — this
     /// exercises `is_current_connection` the same way `patch_player` does, without
     /// a live voice connection or HTTP round trip.
+    /// `noReplace` must stop a resolution attempt from ever starting, not just
+    /// discard its result: `PlayerRestHandler.kt` checks `noReplace &&
+    /// player.track != null` before calling `decodeTrack`/`loadAudioItem` at
+    /// all, so a client sending `noReplace=true` against a player that's
+    /// already playing gets `200` with the unchanged player even when the
+    /// `identifier` it sent would fail to resolve. `test_state()`'s loader has
+    /// no source managers registered, so any `load_one` call here would fail —
+    /// this only passes if resolution is skipped outright.
+    #[tokio::test]
+    async fn no_replace_skips_resolution_entirely_when_already_playing() {
+        let mut config = crate::config::Config::default();
+        config.lavalink.server.password = "test".into();
+        let state = crate::state::AppState::new(
+            config,
+            crate::loader::Loader::new(Vec::new()),
+            crate::audio::stream::StreamOpener::default(),
+            std::time::Instant::now(),
+            tokio::sync::watch::channel(()).1,
+        );
+        let session = state.sessions.open(1, None);
+        let guild_id = 55;
+
+        session
+            .get_or_create_player(guild_id, || dummy_pair(guild_id))
+            .unwrap();
+        let (handle, _) = state.player(&session, guild_id).unwrap();
+        handle
+            .patch(PatchRequest {
+                track: Some(TrackChange::Play(Box::new(crate::testing::track("first")))),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let update: PlayerUpdate = serde_json::from_str(r#"{"identifier":"unresolvable"}"#).unwrap();
+        let result = patch_player(
+            State(state.clone()),
+            Ok(ValidatedPath((session.id.clone(), guild_id.to_string()))),
+            Ok(ValidatedQuery(PatchQuery { no_replace: true })),
+            Ok(ValidatedJson(update)),
+        )
+        .await
+        .expect("a dropped noReplace request must not surface a resolution error");
+
+        assert_eq!(result.0.track.unwrap().info.title, "first");
+    }
+
     #[tokio::test]
     async fn is_current_connection_rejects_a_connection_replaced_by_a_racing_delete() {
         let session = crate::session::SessionRegistry::new().open(1, None);
