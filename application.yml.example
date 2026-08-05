@@ -37,14 +37,15 @@ lavalink:
     soundcloudSearchEnabled: true
     youtubePlaylistLoadLimit: 6 # pages of 100, same unit as the original
 
-    # Nine of the ten filters are implemented. `timescale` is not — it needs a WSOLA
-    # time-stretcher (the original wraps SoundTouch through JNI) and is always
-    # rejected with 400 regardless of what is set here. /v4/info advertises only the
-    # ones that really run.
+    # All ten filters are implemented. Setting one to false makes a request naming
+    # it a 400, and drops it from what /v4/info advertises. `timescale` uses
+    # signalsmith-stretch rather than the original's SoundTouch-through-JNI, so it
+    # is not sample-identical — see MAINTENANCE.md.
     filters:
       volume: true
       equalizer: true
       karaoke: true
+      timescale: true
       tremolo: true
       vibrato: true
       distortion: true

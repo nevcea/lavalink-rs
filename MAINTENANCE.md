@@ -230,6 +230,75 @@ node emits it. A disconnected voice channel with a still-loaded track surfaces
 as a stuck-track event instead, on the stuck-threshold clock, not upstream's
 cleanup clock.
 
+## Post-auth resource limits and source reach — deliberately absent
+
+Every entry here has been raised as a bug at least once, and each is either
+upstream parity or already guarded elsewhere. Recorded so the next reviewer
+does not re-derive it.
+
+The trust boundary is the node password (`crate::auth::require_password`,
+applied to the whole router in `crates/server/src/rest/mod.rs`). Lavalink's
+threat model is a trusted operator running a node for a trusted bot; anything
+below is reachable only by someone who already holds that password, and
+upstream grants them the same reach. Adding a limit upstream does not have
+would be a wire divergence, which the governing rule in
+`crates/server/src/lib.rs` does not allow.
+
+**No request, memory or cache byte budget.** There is no `DefaultBodyLimit`
+layer; axum's implicit 2 MiB inside `Json` (and so `ValidatedJson`) is the only
+bound on a body. Sessions (`session::SessionRegistry::open`) and players per
+session (`Session::get_or_create_player`) are uncapped, as are `userData` and
+`pluginFilters` blobs, which are held per player for its lifetime. The loader
+cache is capped at `MAX_CACHE_ENTRIES` entries with a `CACHE_TTL` sweep, not at
+a byte count — an entry can be a whole playlist. Filling it needs 10 000
+distinct *successful* loads inside one 60s window through
+`MAX_CONCURRENT_LOADS` yt-dlp spawns, which is not a reachable shape.
+
+**The HTTP source will fetch anything.** `HttpSource::matches` is
+scheme-only, and neither client sets a redirect policy, so `reqwest`'s default
+follows up to ten hops with no per-hop host check. Loopback, RFC1918 and
+link-local targets are all reachable, at load time and again at playback time
+via a hand-built `encodedTrack`'s `uri`. Upstream has the same property. A
+blocklist would break LAN-hosted media, which is a legitimate deployment; the
+documented mitigation is the `httpConfig` proxy
+(`application.yml.example`), and the content-type denylist in
+`source/http.rs` is a load-result filter, not a security control.
+
+**The local source will read any path.** No canonicalisation, no root
+directory, no `..` check — already stated at the top of
+`crates/server/src/audio/source/local.rs` and in `application.yml.example`.
+Off by default, same as upstream. The one bypass that *is* closed:
+`Loader::decode` refuses an `encodedTrack` whose `sourceName` is not a
+registered manager, so a crafted token cannot reach the local reader on a node
+with `sources.local: false`.
+
+**`encodedTrack` decoding is already bounded.** Size mismatch, the
+minimum-eight-byte split, and the track version on both sides are all checked,
+and `java_io::DataInput::take` validates against the remaining input before
+slicing — so a `read_utf` length prefix that lies allocates nothing. There is
+no panic path in the decoder. What it deliberately does *not* validate is
+semantics: `length`, `position`, `identifier` and `uri` are whatever the token
+says, which is what makes the `sourceName` check above load-bearing.
+
+**`frameStats`' `deficit` is an approximation, and can go negative.**
+`EXPECTED_FRAMES_PER_TICK` is a fixed 3 000 against a tick whose
+`MissedTickBehavior` is `Skip`, so a late tick covers more than 60s of frames
+and reports a negative deficit; and the usability gate ("started at least 60s
+ago") is a cutoff rather than upstream's rolling `AudioLossCounter` window, so
+a player whose start does not align with the tick boundary reports a large
+false deficit for one window. `crates/server/src/stats.rs` documents the
+approximation; the tick-skew case is the same approximation seen from the
+other side, not a separate defect.
+
+**`pluginFilters` has the wrong wire shape, unobservably.** Upstream v4
+carries plugin filters as arbitrary *top-level* keys inside `filters`; this
+node nests them under a `pluginFilters` key and omits it when empty. Nothing
+can exercise the difference — this node ships no plugins (see below), so no
+plugin filter name exists for a client to send, and an unknown top-level key is
+dropped either way. Left as-is rather than restructuring `Filters` for a path
+with no reachable caller; `crates/protocol/src/filters.rs` says the same at the
+field.
+
 ## Formatting
 
 This codebase is hand-formatted, and `cargo fmt` is deliberately not run.

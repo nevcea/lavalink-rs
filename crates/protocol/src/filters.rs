@@ -55,6 +55,14 @@ pub struct Filters {
     pub low_pass: Omissible<Option<LowPass>>,
     /// Always empty for us — we ship no plugins. Kept so a client that sends it
     /// round-trips instead of erroring.
+    ///
+    /// Not upstream's shape: v4 carries plugin filters as arbitrary *top-level*
+    /// keys inside `filters`, and this nests them under a `pluginFilters` key
+    /// and omits it when empty. Unobservable, because a plugin filter name only
+    /// exists if a plugin defines one and this node has none — an unknown
+    /// top-level key is dropped either way. See `MAINTENANCE.md`'s "Post-auth
+    /// resource limits and source reach" for why it is not worth restructuring
+    /// `Filters` for a path with no reachable caller.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plugin_filters: BTreeMap<String, Value>,
 }
