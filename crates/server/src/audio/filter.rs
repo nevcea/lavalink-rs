@@ -180,7 +180,13 @@ impl FilterChain {
         let mut stages: Vec<Box<dyn AudioFilter>> = Vec::new();
 
         if let Omissible::Present(volume) = filters.volume {
-            stages.push(Box::new(VolumeFilter { volume }));
+            // 1.0 is unity, which `is_enabled` then reports as disabled. Worth
+            // spelling out why the clamp in `process` is not enough on its own:
+            // `f32::clamp` returns NaN unchanged, and `volume: 1e39` turns every
+            // sample that is exactly 0.0 into `0.0 * inf` = NaN.
+            stages.push(Box::new(VolumeFilter {
+                volume: finite(volume, 1.0),
+            }));
         }
         if let Omissible::Present(bands) = &filters.equalizer {
             stages.push(Box::new(Equalizer::new(bands, channels)));
@@ -198,13 +204,13 @@ impl FilterChain {
             stages.push(Box::new(VibratoFilter::new(vibrato, channels)));
         }
         if let Some(config) = present(&filters.distortion) {
-            stages.push(Box::new(DistortionFilter { config }));
+            stages.push(Box::new(DistortionFilter::new(config)));
         }
         if let Some(rotation) = present(&filters.rotation) {
             stages.push(Box::new(RotationFilter::new(rotation)));
         }
         if let Some(config) = present(&filters.channel_mix) {
-            stages.push(Box::new(ChannelMixFilter { config }));
+            stages.push(Box::new(ChannelMixFilter::new(config)));
         }
         if let Some(low_pass) = present(&filters.low_pass) {
             stages.push(Box::new(LowPassFilter::new(low_pass, channels)));
@@ -351,7 +357,11 @@ impl Equalizer {
                 .ok()
                 .and_then(|index| gains.get_mut(index))
             {
-                *slot = band.gain;
+                // Non-finite gains are the one thing that is dropped rather than
+                // passed through: a NaN gain is still != 0.0, so the band stays
+                // active and the NaN lands in that band's y0/y1/y2 history for
+                // the life of the chain.
+                *slot = finite(band.gain, 0.0);
             }
         }
 
@@ -490,12 +500,15 @@ impl KaraokeFilter {
         // converges toward — which also keeps a's sqrt argument non-negative:
         // 1 - b²/4c is (1-c)²/(1+c)² at cos == 1, never negative for |cos| <= 1.
         let band = (2.0 * std::f32::consts::PI * config.filter_band / SAMPLE_RATE).cos();
-        let b = -4.0 * c / (1.0 + c) * if band.is_finite() { band } else { 1.0 };
+        let b = -4.0 * c / (1.0 + c) * finite(band, 1.0);
         let a = (1.0 - b * b / (4.0 * c)).sqrt() * (1.0 - c);
 
         Self {
-            level: config.level,
-            mono_level: config.mono_level,
+            // Neither is state, but `process` below is the one place that does
+            // not clamp its output, so a non-finite level reaches the encoder
+            // unattenuated. 1.0 is the protocol default for both.
+            level: finite(config.level, 1.0),
+            mono_level: finite(config.mono_level, 1.0),
             a,
             b,
             c,
@@ -585,7 +598,7 @@ impl TimescaleFilter {
         // non-positive one is floored like speed_factor, since a zero or
         // negative multiplier is just as meaningless here.
         let pitch_factor = (config.pitch * config.rate) as f32;
-        let pitch_factor = if pitch_factor.is_finite() { pitch_factor.max(MIN_SPEED_FACTOR) } else { 1.0 };
+        let pitch_factor = finite(pitch_factor, 1.0).max(MIN_SPEED_FACTOR);
 
         let mut stretch =
             signalsmith_stretch::Stretch::preset_default(channels as u32, SAMPLE_RATE as u32);
@@ -657,30 +670,42 @@ impl AudioFilter for TimescaleFilter {
     }
 }
 
-/// One sample's worth of LFO phase advance, in radians, guarded against a
-/// client-supplied frequency that makes it non-finite.
+/// `value`, or `fallback` when a client-supplied number made it non-finite.
 ///
-/// Neither the protocol nor `Filters::validate` bounds `frequency`, and serde
-/// turns a JSON number past `f32`'s range into `f32::INFINITY` rather than an
-/// error — so `1e39` is an accepted value. A non-finite step makes the
-/// `rem_euclid` below return `NaN`, and unlike a bad sample that `NaN` is *phase
-/// state*: it never leaves the filter again, so every sample from that patch
-/// onward is `NaN` all the way into the Opus encoder, and a seek does not clear
-/// it — only a fresh `filters` patch rebuilding the chain does.
+/// Neither the protocol nor `Filters::validate` bounds any filter value, and
+/// serde turns a JSON number past `f32`'s range into `f32::INFINITY` rather than
+/// an error — so `1e39` is an accepted value, as is `-1e39`, and several of the
+/// expressions below turn one of those into `NaN`.
 ///
-/// Falling back to a stopped LFO rather than reproducing that sink, which is the
-/// same call `RotationFilter::new` makes for its own phase step: like tremolo's
-/// phase wrap, this is not something a client observes on the wire, only ever a
-/// defect.
+/// Two reasons every filter routes its inputs through this rather than leaving
+/// it to whatever each expression happens to do:
 ///
-/// `step` is passed in already computed, because tremolo and vibrato multiply
-/// their terms in a different order and that ordering is part of each one's f32
-/// rounding.
-fn finite_phase_step(step: f32) -> f32 {
-    if step.is_finite() {
-        step
+/// * `f32::clamp` returns `self` for `NaN` (both comparisons are false), so the
+///   clamp several `process` implementations end on is not the backstop it looks
+///   like — a `NaN` walks straight through it into the Opus encoder.
+/// * In the stateful filters the `NaN` is not one bad sample but *state*. An LFO
+///   phase, a biquad's `y1`/`y2` history: once `NaN` is in there it never leaves,
+///   so every sample from that patch onward is `NaN` and a seek does not clear
+///   it — only a fresh `filters` patch rebuilding the chain does.
+///
+/// Falling back to each filter's neutral value rather than reproducing that.
+/// Upstream is equally unguarded here (a JVM `Float` parse of `1e39` is
+/// `Infinity` too) and does not reject the request, so this stays a construction
+/// -time coercion rather than a 400: like tremolo's phase wrap, non-finite audio
+/// is not something a client observes on the wire, only ever a defect.
+///
+/// Applied at construction, not in `process` — these are per-`filters` patch,
+/// and the inner loops run 48 000 times a second per channel.
+///
+/// The LFO callers pass `step` in already computed, because tremolo and vibrato
+/// multiply their terms in a different order and that ordering is part of each
+/// one's f32 rounding. `RotationFilter::new` guards the same way inline, on
+/// `f64`.
+fn finite(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value
     } else {
-        0.0
+        fallback
     }
 }
 
@@ -689,7 +714,7 @@ fn finite_phase_step(step: f32) -> f32 {
 struct TremoloFilter {
     /// Radians of LFO phase per sample. Hoisted out of `process`'s inner loop,
     /// where it was recomputed per sample from a frequency that never changes, so
-    /// [`finite_phase_step`] has one place to guard.
+    /// [`finite`] has one place to guard.
     step: f32,
     /// **Half** the requested depth. `setDepth` stores `depth / 2`, and Lavalink
     /// passes the protocol value straight in, so the halving is part of the wire
@@ -702,10 +727,11 @@ struct TremoloFilter {
 impl TremoloFilter {
     fn new(config: Tremolo, channels: usize) -> Self {
         Self {
-            step: finite_phase_step(
-                2.0 * std::f32::consts::PI / SAMPLE_RATE * config.frequency,
-            ),
-            depth: config.depth / 2.0,
+            step: finite(2.0 * std::f32::consts::PI / SAMPLE_RATE * config.frequency, 0.0),
+            // Halved here rather than per sample. A non-finite depth would
+            // otherwise reach the multiply in `process`, and unlike the phase it
+            // is not state — but it is still every sample of every channel.
+            depth: finite(config.depth, 0.0) / 2.0,
             phases: vec![0.0; channels],
         }
     }
@@ -746,7 +772,7 @@ impl AudioFilter for TremoloFilter {
 /// pitch bend smooth rather than stepped — a nearest-sample read would zipper.
 #[derive(Debug)]
 struct VibratoFilter {
-    /// Radians of LFO phase per sample — see [`finite_phase_step`], which is what
+    /// Radians of LFO phase per sample — see [`finite`], which is what
     /// keeps an out-of-range `frequency` from turning the phase permanently `NaN`.
     step: f32,
     depth: f32,
@@ -834,10 +860,12 @@ impl VibratoChannel {
 impl VibratoFilter {
     fn new(config: Vibrato, channels: usize) -> Self {
         Self {
-            step: finite_phase_step(
-                2.0 * std::f32::consts::PI * config.frequency / SAMPLE_RATE,
-            ),
-            depth: config.depth,
+            step: finite(2.0 * std::f32::consts::PI * config.frequency / SAMPLE_RATE, 0.0),
+            // A non-finite depth makes `delay` non-finite, and `read_hermite`
+            // turns that into a NaN sample: `rem_euclid` gives NaN, `NaN as usize`
+            // saturates to 0, and the interpolation carries the NaN out. 0.0 is a
+            // stopped vibrato, which `is_enabled` then skips entirely.
+            depth: finite(config.depth, 0.0),
             channels: (0..channels).map(|_| VibratoChannel::new()).collect(),
         }
     }
@@ -876,6 +904,27 @@ impl AudioFilter for VibratoFilter {
 #[derive(Debug)]
 struct DistortionFilter {
     config: Distortion,
+}
+
+impl DistortionFilter {
+    /// Every field sanitised to its protocol default, offsets to `0.0` and
+    /// scales to `1.0` — together the identity this filter's `is_enabled` tests
+    /// for. A non-finite scale makes `(sample * scale).sin()` NaN, which the
+    /// clamp in `process` then passes through unchanged.
+    fn new(config: Distortion) -> Self {
+        Self {
+            config: Distortion {
+                sin_offset: finite(config.sin_offset, 0.0),
+                sin_scale: finite(config.sin_scale, 1.0),
+                cos_offset: finite(config.cos_offset, 0.0),
+                cos_scale: finite(config.cos_scale, 1.0),
+                tan_offset: finite(config.tan_offset, 0.0),
+                tan_scale: finite(config.tan_scale, 1.0),
+                offset: finite(config.offset, 0.0),
+                scale: finite(config.scale, 1.0),
+            },
+        }
+    }
 }
 
 impl AudioFilter for DistortionFilter {
@@ -964,6 +1013,22 @@ impl AudioFilter for RotationFilter {
 #[derive(Debug)]
 struct ChannelMixFilter {
     config: ChannelMix,
+}
+
+impl ChannelMixFilter {
+    /// Sanitised to the identity matrix, which is also what `is_enabled` tests
+    /// for — so an all-non-finite mix disables the stage rather than silencing
+    /// the track.
+    fn new(config: ChannelMix) -> Self {
+        Self {
+            config: ChannelMix {
+                left_to_left: finite(config.left_to_left, 1.0),
+                left_to_right: finite(config.left_to_right, 0.0),
+                right_to_left: finite(config.right_to_left, 0.0),
+                right_to_right: finite(config.right_to_right, 1.0),
+            },
+        }
+    }
 }
 
 impl AudioFilter for ChannelMixFilter {
@@ -1698,6 +1763,67 @@ mod tests {
 
             assert!(channels[0].iter().all(|sample| sample.is_finite()), "for {json}");
             assert_eq!(channels[0].len(), channels[1].len());
+        }
+    }
+
+    /// Every filter value a client can set, pushed past `f32`'s range in both
+    /// directions. serde accepts these — `1e39` deserialises to `f32::INFINITY`
+    /// rather than erroring — and `Filters::validate` only checks the disabled
+    /// -filter name list, so `finite` at construction is the only thing between
+    /// them and songbird's Opus encoder.
+    ///
+    /// Not covered by the clamps several `process` implementations end on:
+    /// `f32::clamp` returns `NaN` unchanged, and karaoke does not clamp at all.
+    #[test]
+    fn no_filter_value_can_make_the_output_non_finite() {
+        for json in [
+            r#"{"volume":1e39}"#,
+            r#"{"volume":-1e39}"#,
+            r#"{"equalizer":[{"band":0,"gain":1e39},{"band":5,"gain":-1e39}]}"#,
+            r#"{"karaoke":{"level":1e39,"monoLevel":-1e39}}"#,
+            r#"{"karaoke":{"filterBand":1e39,"filterWidth":1e39}}"#,
+            r#"{"tremolo":{"frequency":1e39,"depth":1e39}}"#,
+            r#"{"vibrato":{"frequency":1e39,"depth":1e39}}"#,
+            r#"{"distortion":{"sinOffset":1e39,"sinScale":1e39,"cosOffset":-1e39,"cosScale":1e39,"tanOffset":1e39,"tanScale":-1e39,"offset":1e39,"scale":1e39}}"#,
+            r#"{"rotation":{"rotationHz":1e308}}"#,
+            r#"{"channelMix":{"leftToLeft":1e39,"leftToRight":-1e39,"rightToLeft":1e39,"rightToRight":-1e39}}"#,
+            r#"{"lowPass":{"smoothing":1e39}}"#,
+        ] {
+            let mut chain = FilterChain::new(&filters(json), 2);
+            let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+            chain.process(&mut channels);
+
+            assert!(
+                channels.iter().all(|c| c.iter().all(|s| s.is_finite())),
+                "non-finite output for {json}"
+            );
+        }
+    }
+
+    /// The stateful half of the case above, and the reason coercing beats
+    /// letting the `NaN` through: in the equalizer a `NaN` gain is still
+    /// `!= 0.0`, so the band stays active and the `NaN` lands in that band's
+    /// `y0`/`y1`/`y2` history — where nothing removes it. Every later buffer
+    /// would be `NaN` too, and a seek would not clear it; only a fresh `filters`
+    /// patch rebuilding the chain would. Same shape for the LFO phases.
+    #[test]
+    fn a_non_finite_value_does_not_poison_a_filter_for_later_buffers() {
+        for json in [
+            r#"{"equalizer":[{"band":0,"gain":1e39}]}"#,
+            r#"{"tremolo":{"frequency":1e39}}"#,
+            r#"{"vibrato":{"frequency":1e39}}"#,
+            r#"{"karaoke":{"filterBand":1e39}}"#,
+            r#"{"rotation":{"rotationHz":1e308}}"#,
+        ] {
+            let mut chain = FilterChain::new(&filters(json), 2);
+            for round in 0..3 {
+                let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+                chain.process(&mut channels);
+                assert!(
+                    channels.iter().all(|c| c.iter().all(|s| s.is_finite())),
+                    "non-finite output on buffer {round} for {json}"
+                );
+            }
         }
     }
 
