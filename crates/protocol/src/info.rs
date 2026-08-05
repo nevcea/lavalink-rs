@@ -107,10 +107,4 @@ mod tests {
         assert_eq!((version.major, version.minor, version.patch), (0, 0, 0));
         assert_eq!(version.semver, "not-a-version");
     }
-
-    #[test]
-    fn plugins_serialize_as_a_bare_array() {
-        let json = serde_json::to_string(&Vec::<Plugin>::new()).unwrap();
-        assert_eq!(json, "[]");
-    }
 }

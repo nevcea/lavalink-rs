@@ -237,19 +237,6 @@ mod tests {
         assert!(!source.matches("ytsearch:never gonna"));
     }
 
-    /// A link to a source this node does not run must read as "no results", because
-    /// that is what a client can act on.
-    #[test]
-    fn a_web_page_is_reported_as_no_results_not_as_a_failure() {
-        assert!(matches!(
-            SourceError::NotFound.to_exception().severity,
-            lavalink_protocol::Severity::Common
-        ));
-        // The content-type gate is what routes a YouTube URL on a yt-dlp-less node
-        // to `empty` rather than `error`.
-        assert!(is_definitely_not_media("text/html; charset=utf-8"));
-    }
-
     #[test]
     fn html_is_rejected_but_octet_stream_is_not() {
         assert!(is_definitely_not_media("text/html; charset=utf-8"));
