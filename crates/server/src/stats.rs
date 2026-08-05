@@ -240,13 +240,23 @@ mod tests {
         assert_eq!(second.playing_players, 2);
     }
 
-    #[test]
-    fn player_counts_are_summed_across_sessions() {
+    #[tokio::test]
+    async fn player_counts_are_summed_across_sessions() {
         let registry = SessionRegistry::new();
         let sessions = vec![registry.open(1, None), registry.open(2, None)];
 
-        // A session with no players still counts as a session, not as a player.
-        assert_eq!(count(&rosters(&sessions)), (0, 0));
+        for guild_id in [10, 11] {
+            sessions[0].get_or_create_player(guild_id, || {
+                crate::testing::dummy_pair(guild_id, Arc::new(crate::sink::Sink::new()))
+            });
+        }
+        sessions[1].get_or_create_player(20, || {
+            crate::testing::dummy_pair(20, Arc::new(crate::sink::Sink::new()))
+        });
+
+        // Two players in the first session and one in the second must add up to
+        // three, not just the first session's own count.
+        assert_eq!(count(&rosters(&sessions)), (3, 0));
     }
 
     #[test]
@@ -299,12 +309,16 @@ mod tests {
 
     #[test]
     fn uptime_is_measured_from_the_start_instant() {
-        let collector = StatsCollector::new(Instant::now());
+        // A `started_at` already 50ms in the past, so a hardcoded-zero or
+        // measured-from-somewhere-else uptime would fail this, not just "uptime
+        // isn't negative".
+        let started_at = Instant::now() - Duration::from_millis(50);
+        let collector = StatsCollector::new(started_at);
         let stats = collector.sample(3, 1);
 
         assert_eq!(stats.players, 3);
         assert_eq!(stats.playing_players, 1);
-        assert!(stats.uptime >= 0);
+        assert!(stats.uptime >= 50, "uptime was {}, expected at least 50ms", stats.uptime);
         // `GET /v4/stats` drops the key entirely rather than sending null.
         assert!(stats.frame_stats.is_none());
     }
