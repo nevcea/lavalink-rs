@@ -32,7 +32,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::audio::ring::FrameCounters;
 use crate::audio::{Engine, EngineEvent, PlayRequest};
 use crate::player::state::{PlayerModel, VoiceConnection};
-use crate::sink::Sink;
+use crate::sink::{Sink, SendError};
 
 /// Bounded so a runaway producer applies backpressure to its caller rather than
 /// growing without limit. REST awaits a slot for up to [`SEND_TIMEOUT`]; past
@@ -642,8 +642,12 @@ impl PlayerActor {
 
     fn emit(&self, event: EmittedEvent) {
         // A full sink means the client stopped reading; the websocket task notices
-        // and closes the session. Nothing useful can be done from here.
-        let _ = self.sink.send(Message::Event(event));
+        // and closes the session (or, for a detached/resumable session, the next
+        // sweep tick does). Nothing useful can be done from here beyond making the
+        // loss observable, since it would otherwise be silent until then.
+        if let Err(SendError::Overflow) = self.sink.send(Message::Event(event)) {
+            tracing::warn!(guild_id = %self.guild_id_str, "dropped an event: essential queue overflowed");
+        }
     }
 
     fn guild_id_string(&self) -> String {
