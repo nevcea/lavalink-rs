@@ -16,13 +16,12 @@ cargo run -p lavalink-server --release -- application.yml &
 node_pid=$!
 trap 'kill "$node_pid" 2>/dev/null' EXIT
 
+# No deadline: a cold --release build can outrun any fixed timeout.
 echo "waiting for node at $LAVALINK_HOST ..."
-for _ in $(seq 1 60); do
+until (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; do
   kill -0 "$node_pid" 2>/dev/null || { echo "node exited before coming up" >&2; exit 1; }
-  (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null && break
   sleep 1
 done
-(exec 3<>"/dev/tcp/$host/$port") 2>/dev/null || { echo "node didn't come up within 60s" >&2; exit 1; }
 echo "node is up"
 
 cargo run -p lavalink-test-bot
