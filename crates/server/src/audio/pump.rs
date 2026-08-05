@@ -492,10 +492,52 @@ impl State {
         writer: &RingWriter,
     ) -> ControlFlow {
         let mut reset = false;
+        // Whether `interrupt` has been cleared since the last command was taken
+        // off the channel. See the `Empty` arm below for why one clear is not
+        // enough on its own.
+        let mut cleared = false;
         loop {
-            match commands.try_recv() {
-                Ok(PumpCommand::Stop) => return ControlFlow::Stopped,
-                Ok(PumpCommand::Seek { position_ms }) => {
+            let command = match commands.try_recv() {
+                Ok(command) => command,
+                Err(TryRecvError::Empty) => {
+                    if cleared {
+                        // Empty *after* a clear: nothing arrived in the window
+                        // that clear could have wiped, so the flag is genuinely
+                        // stale and staying false is correct.
+                        return ControlFlow::Continue { reset };
+                    }
+                    // Nothing left to act on — safe to let a future stall use
+                    // its full reconnect budget again, rather than carrying
+                    // this batch's "something is waiting" forward forever.
+                    //
+                    // But one clear is not enough. `signal_pump` sends before
+                    // it sets the flag, which closes the window where this
+                    // observes Empty and only *then* receives the command — it
+                    // does not close the mirror of it, where the engine's
+                    // send-and-set both land between the `try_recv` above and
+                    // this store, and the store then wipes a flag raised for a
+                    // command still sitting in the channel. The stalled HTTP
+                    // source would go back to burning its whole reconnect
+                    // budget (`stream.rs`'s `interrupt` check) with that
+                    // command waiting behind it — for `Stop`, tens of seconds
+                    // of a track that was already replaced. So clear, then go
+                    // round once more: only an Empty seen after the clear
+                    // proves nothing was lost to it.
+                    self.interrupt.store(false, Ordering::Relaxed);
+                    cleared = true;
+                    continue;
+                }
+                // The engine dropped the sender: nobody is listening any more.
+                Err(TryRecvError::Disconnected) => return ControlFlow::Stopped,
+            };
+
+            // A command was taken, so the next clear has a fresh window to
+            // prove empty rather than inheriting this one's.
+            cleared = false;
+
+            match command {
+                PumpCommand::Stop => return ControlFlow::Stopped,
+                PumpCommand::Seek { position_ms } => {
                     // Discarding here is what makes the seek audible immediately
                     // rather than after the buffer drains — but only when the seek
                     // actually landed. On failure the decoder just keeps going from
@@ -513,24 +555,15 @@ impl State {
                         writer.cancel_seek();
                     }
                 }
-                Ok(PumpCommand::SetFilters(filters)) => {
+                PumpCommand::SetFilters(filters) => {
                     self.filters = FilterChain::new(&filters, CHANNELS);
                 }
-                Ok(PumpCommand::SetVolume(volume)) => {
+                PumpCommand::SetVolume(volume) => {
                     self.volume = player_volume_multiplier(volume);
                 }
-                Ok(PumpCommand::SetEndTime(end_time_ms)) => {
+                PumpCommand::SetEndTime(end_time_ms) => {
                     self.end_time_ms = end_time_ms;
                 }
-                Err(TryRecvError::Empty) => {
-                    // Nothing left to act on — safe to let a future stall use
-                    // its full reconnect budget again, rather than carrying
-                    // this batch's "something is waiting" forward forever.
-                    self.interrupt.store(false, Ordering::Relaxed);
-                    return ControlFlow::Continue { reset };
-                }
-                // The engine dropped the sender: nobody is listening any more.
-                Err(TryRecvError::Disconnected) => return ControlFlow::Stopped,
             }
         }
     }
@@ -1151,6 +1184,15 @@ mod tests {
         );
     }
 
+    /// The bug: `drain_commands` cleared `interrupt` the moment it saw an empty
+    /// channel, with nothing re-checking afterwards. `signal_pump` sends before
+    /// it sets the flag, which closes the window where the pump observes Empty
+    /// and only then receives the command — but not the mirror of it, where the
+    /// engine's send-and-set both land between that `try_recv` and the pump's
+    /// own store, so the store wipes a flag raised for a command still queued.
+    /// The stalled HTTP source then burns its whole reconnect budget with that
+    /// command waiting (`stream.rs`'s `interrupt` check).
+    ///
     /// The bug: the resampler was built once, from what the *container*
     /// declared (`source_params`), and never checked against what the decoder
     /// actually produced. HE-AAC's SBR outputs at twice the declared rate, and
@@ -1214,6 +1256,47 @@ mod tests {
         assert!(
             state.resampler.matches_source(48_000, 2),
             "the resampler must have been rebuilt for what the decoder really produced"
+        );
+    }
+
+    /// The fix itself is an ordering argument and has no test that can fail on
+    /// its absence: the window is two instructions wide with no seam to inject
+    /// a send into, and a racing soak (tried, 2 000 rounds) never lands in it
+    /// because spawning the producer costs orders of magnitude more than the
+    /// drain does. `signal_pump`'s own half of the same ordering
+    /// (`engine.rs`) is untested for the same reason. What is pinned here is
+    /// the part that *is* deterministic and that the rewritten loop could
+    /// plausibly break: the clear still happens, and every queued command is
+    /// still applied across the extra round trip the recheck adds.
+    #[test]
+    fn a_fully_drained_channel_still_clears_the_flag_and_applies_every_command() {
+        let wav = TempWav::new("pump-interrupt-clear", 48_000, 2, 0.1);
+        let config = config(wav.track());
+        let interrupt = Arc::clone(&config.interrupt);
+
+        let position = Arc::new(AtomicI64::new(0));
+        let (writer, _reader) = super::super::ring::channel(
+            4096,
+            Arc::clone(&position),
+            Arc::new(super::super::ring::FrameCounters::default()),
+        );
+        let mut state = open(&config, &writer).unwrap();
+
+        // Kept alive so the drain sees Empty rather than Disconnected.
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        commands_tx.send(PumpCommand::SetVolume(50)).unwrap();
+        commands_tx.send(PumpCommand::SetEndTime(Some(1_000))).unwrap();
+        interrupt.store(true, Ordering::Relaxed);
+
+        let flow = state.drain_commands(&commands_rx, &writer);
+
+        assert!(matches!(flow, ControlFlow::Continue { reset: false }));
+        assert_eq!(state.volume, player_volume_multiplier(50));
+        assert_eq!(state.end_time_ms, Some(1_000));
+        assert!(
+            !interrupt.load(Ordering::Relaxed),
+            "a channel drained to empty must leave the flag clear, or every later \
+             stall inherits a give-up-early signal it never earned"
         );
     }
 
