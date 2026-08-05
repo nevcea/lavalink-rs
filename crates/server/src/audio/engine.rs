@@ -320,6 +320,19 @@ impl Engine for PipelineEngine {
                     }
                     *last = Instant::now();
                     drop(last);
+                    // Gated the same way the terminal outcome below is, and for
+                    // the same reason: a superseded pump keeps decoding until it
+                    // observes Stop, and the actor treats Progress as "the
+                    // current track is alive" — it restamps last_progress and
+                    // clears stuck_reported (actor.rs's apply_engine_event). An
+                    // ungated one therefore resets the *replacement* track's
+                    // stuck clock, suppressing or delaying a TrackStuckEvent the
+                    // new track had genuinely earned. Checked after the throttle,
+                    // so this takes the lock once per PROGRESS_INTERVAL rather
+                    // than once per decoded packet.
+                    if !is_current(&active, generation) {
+                        return;
+                    }
                     if let Some(events) = &events {
                         let _ = events.try_send(EngineEvent::Progress);
                     }
