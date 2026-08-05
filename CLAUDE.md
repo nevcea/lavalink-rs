@@ -5,19 +5,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A from-scratch Rust port of Lavalink v4 (the JVM audio node most Discord music
-bots talk to). Governing rule (`crates/server/src/lib.rs`): **anything a
-client can observe over the wire — response bodies, status codes, event
-sequences — matches the original exactly, even where the original looks
-accidental.** Improvements are confined to what a client can't see:
-concurrency, resource ownership, crash-prone paths. Read `MAINTENANCE.md`
-before "fixing" anything that looks like a bug or omission — most are
-deliberate; if it's not explained there, it's probably real.
+bots talk to).
+
+## First files to read
+
+- `crates/server/src/lib.rs` — the governing rule (below) plus a table of
+  what was fixed and where.
+- `MAINTENANCE.md` — every deliberately-missing feature, and why.
+- The `## Architecture` section below, for how the audio pipeline and player
+  actor fit together before touching either.
+
+## Non-negotiable rules
+
+- **Wire compatibility.** Anything a client can observe over the wire —
+  response bodies, status codes, event sequences — matches the original
+  exactly, even where the original looks accidental. Timing/latency is not
+  observable this way and is fair game (that's the whole point of the
+  concurrency rework); only order and content are fixed. Improvements are
+  confined to what a client can't see: concurrency, resource ownership,
+  crash-prone paths.
+- **Read `MAINTENANCE.md` before "fixing" anything that looks like a bug or
+  omission** — most are deliberate; if it's not explained there, it's
+  probably real.
+- **Never run `cargo fmt` across the tree** (see `## Commands` below).
+- **Run `test-bot` before merging an audio-path change**, not just
+  `cargo test --workspace`. Unit tests and benches cover DSP math and
+  pipeline cost in isolation; they can't catch a real seek landing wrong or
+  audio breaking up under a live voice connection — only a real Discord
+  voice channel does (see `### Testing` under `## Architecture`).
 
 ## Git workflow
 
 One branch, `dev` — also GitHub's default; commit directly, no `main` to
-protect. Before touching the audio path, run `cargo test --workspace` and,
-when relevant, a `test-bot` pass (see its README).
+protect.
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/):
 `<type>[scope]: <description>` (types: `feat|fix|docs|style|refactor|perf|
@@ -61,10 +81,10 @@ cargo run -p lavalink-server --release -- application.yml   # path arg optional
 `cp application.yml.example application.yml` first — the node refuses to
 start with an empty password.
 
-**Never run `cargo fmt` across the tree.** This codebase is hand-formatted
-and destroys a table kept intentionally diffable against the original Java
-source — see `MAINTENANCE.md`'s "Formatting" for why. Match whatever file
-you touch by hand.
+Never run `cargo fmt` across the tree (see `## Non-negotiable rules` above) —
+this codebase is hand-formatted and destroys a table kept intentionally
+diffable against the original Java source; see `MAINTENANCE.md`'s
+"Formatting" for why. Match whatever file you touch by hand.
 
 ## Architecture
 
