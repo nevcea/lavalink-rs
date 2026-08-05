@@ -4,25 +4,6 @@ Why this node's advertised feature set stops where it does. Each of these is a
 deliberate omission, checked at compile time or surfaced to clients honestly
 (`/v4/info`, a 400, or a 501) rather than approximated or stubbed silently.
 
-## `resamplingQuality`
-
-lavaplayer offers three quality settings backed by a windowed-sinc
-implementation. `LOW` (lavaplayer's own default) stays on this node's original
-Catmull-Rom interpolation: continuous in the first derivative, so no
-discontinuities, but with more high-frequency imaging than a proper
-band-limited resampler — and free, being arithmetic rather than a filter bank.
-`MEDIUM`/`HIGH` route through `rubato::SincFixedIn`, a pure-Rust windowed-sinc
-resampler, at real CPU cost per player — the same trade lavaplayer itself
-makes at those tiers (`cargo bench -p lavalink-server --bench resample` has
-the numbers).
-
-`rubato` requires fixed-size planar input per call, while the pump hands over
-whatever symphonia decoded (variable size, interleaved); `SincEngine` (in
-`crates/server/src/audio/resample.rs`) bridges that the same way the
-Catmull-Rom path already bridges its own boundary problem — an accumulator
-carried across calls, cleared (along with rubato's own delay-line state via
-its `reset()`) on every seek so no stale samples survive one.
-
 ## Route planning / IP rotation — not implemented
 
 Route planning belongs to the IP-rotation feature, which is out of scope for
@@ -145,20 +126,6 @@ the other unmapped keys in this document.
 
 No plugin loading mechanism exists. `Info.plugins` is always reported as an
 empty array, matching what actually runs.
-
-## Version reporting
-
-`/version` and `Info.version` report a fixed `4.0.0`, not `CARGO_PKG_VERSION`.
-Clients gate on `version.major < 4` and refuse to connect below it, so reporting
-this crate's own `0.x` build version there is a hard compatibility break, not
-cosmetics. `4.0.0` is reported exactly rather than as a pre-release-shaped string
-(`4.0.0-rs.0.1.0`): semver ranks any pre-release *below* its release, so a client
-checking `>= 4.0.0` would reject a `4.0.0-rs...` string. `4.0.0` is the floor of
-the v4 wire contract this node implements and claims nothing added by later
-4.0.x point releases. The crate's own version keeps reporting through
-`Info.jvm`/`Info.lavaplayer` ("none (lavalink-rs \<ver\>)"), which is where build
-identity actually belongs. See `crates/server/src/state.rs`'s `PROTOCOL_VERSION`
-and `SEMVER` constants.
 
 ## Tremolo's LFO phase wraps — a deliberate divergence
 
