@@ -1042,8 +1042,10 @@ mod tests {
                     stream.write_all(&BODY[..STALL_AT]).unwrap();
                     // Deliberately not sending the rest and not closing: the
                     // connection just goes quiet, which is what a stalled CDN
-                    // edge looks like on the wire.
-                    std::thread::sleep(Duration::from_secs(2));
+                    // edge looks like on the wire. 2.5x the 200ms read_timeout
+                    // below is margin enough for scheduler jitter without
+                    // paying for a full 2s of real sleep per test run.
+                    std::thread::sleep(Duration::from_millis(500));
                 } else {
                     let remaining = &BODY[STALL_AT..];
                     write!(
@@ -1110,8 +1112,11 @@ mod tests {
             // ceiling below but well under the (deliberately larger) idle-gap
             // timeout, so only the ceiling can be what recovers this — an implicit
             // close from the thread ending and dropping `stream` would otherwise
-            // let the test pass for the wrong reason.
-            std::thread::sleep(Duration::from_secs(5));
+            // let the test pass for the wrong reason. 1s keeps that margin (5x the
+            // ceiling, a tenth of the idle-gap) without leaving this thread
+            // sleeping in the background for a full 5s after the test itself
+            // has already finished with it.
+            std::thread::sleep(Duration::from_secs(1));
         });
 
         let mut source = HttpMediaSource::open_with_timeouts(
