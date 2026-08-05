@@ -33,9 +33,12 @@ pub mod soundcloud;
 pub mod youtube;
 pub mod ytdlp;
 
+use std::time::Duration;
+
 use lavalink_protocol::encoded_track::SourceTail;
 use lavalink_protocol::player::TrackInfo;
 use lavalink_protocol::{Exception, Severity};
+use reqwest::StatusCode;
 
 pub use bandcamp::BandcampSource;
 pub use deezer::DeezerSource;
@@ -150,6 +153,47 @@ pub fn configured_proxy(
         proxy = proxy.basic_auth(user, password);
     }
     Ok(Some(proxy))
+}
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Builds a blocking client with this node's user agent, request timeout, and
+/// (if configured) proxy — the same construction [`http::HttpSource`],
+/// [`deezer::DeezerSource`] and [`getyarn::GetyarnSource`] each need.
+pub fn build_client(
+    proxy: Option<reqwest::Proxy>,
+) -> Result<reqwest::blocking::Client, SourceError> {
+    let mut builder = reqwest::blocking::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .user_agent(concat!("lavalink-rs/", env!("CARGO_PKG_VERSION")));
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(proxy);
+    }
+    builder
+        .build()
+        .map_err(|error| SourceError::Internal(error.to_string()))
+}
+
+/// Turns a non-success HTTP status into a [`SourceError`], the way every source
+/// that fetches over HTTP needs to: a 404/410 is [`SourceError::NotFound`] (which
+/// becomes `loadType: "empty"`, not an error), anything else carries the status
+/// and its reason phrase through as [`SourceError::Remote`].
+pub fn classify_status(status: StatusCode) -> SourceError {
+    match status {
+        StatusCode::NOT_FOUND | StatusCode::GONE => SourceError::NotFound,
+        _ => SourceError::Remote {
+            status: status.as_u16(),
+            reason: status.canonical_reason().unwrap_or("request failed").to_owned(),
+        },
+    }
+}
+
+/// Strips a leading `https://`/`http://` — the scheme check every URL-matching
+/// source manager starts with. `None` means the identifier isn't a URL at all.
+pub fn strip_scheme(identifier: &str) -> Option<&str> {
+    identifier
+        .strip_prefix("https://")
+        .or_else(|| identifier.strip_prefix("http://"))
 }
 
 /// One source of tracks.

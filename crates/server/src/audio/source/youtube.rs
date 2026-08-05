@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use super::ytdlp::{SourceKind, YtDlp, SEARCH_RESULTS};
-use super::{SourceError, SourceLoad, SourceManager};
+use super::{strip_scheme, SourceError, SourceLoad, SourceManager};
 
 pub struct YouTubeSource {
     backend: Arc<YtDlp>,
@@ -103,9 +103,7 @@ fn playlist_url(playlist_id: &str, video_id: Option<&str>) -> String {
 /// `None` means the URL is not a YouTube one at all, which makes the identifier
 /// `empty` rather than an error — so a Vimeo link does not become a YouTube failure.
 fn youtube_host(identifier: &str) -> Option<&str> {
-    let rest = identifier
-        .strip_prefix("https://")
-        .or_else(|| identifier.strip_prefix("http://"))?;
+    let rest = strip_scheme(identifier)?;
     let rest = rest.strip_prefix("www.").unwrap_or(rest);
     Some(rest.strip_prefix("m.").unwrap_or(rest))
 }

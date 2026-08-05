@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use super::ytdlp::{SourceKind, YtDlp, SEARCH_RESULTS};
-use super::{SourceError, SourceLoad, SourceManager};
+use super::{strip_scheme, SourceError, SourceLoad, SourceManager};
 
 pub struct SoundCloudSource {
     backend: Arc<YtDlp>,
@@ -74,10 +74,7 @@ impl SourceManager for SoundCloudSource {
 /// `on.soundcloud.com` is the share shortener, which yt-dlp follows; it is claimed
 /// here so a shared link does not come back `empty`.
 fn is_soundcloud_url(identifier: &str) -> bool {
-    let Some(rest) = identifier
-        .strip_prefix("https://")
-        .or_else(|| identifier.strip_prefix("http://"))
-    else {
+    let Some(rest) = strip_scheme(identifier) else {
         return false;
     };
     let rest = rest.strip_prefix("www.").unwrap_or(rest);

@@ -16,16 +16,15 @@
 //! same governing rule `crates/server/src/lib.rs` states for the rest of this
 //! node.
 
-use std::time::Duration;
-
 use lavalink_protocol::encoded_track::SourceTail;
 use lavalink_protocol::player::TrackInfo;
 use reqwest::blocking::Client;
-use reqwest::StatusCode;
 
-use super::{SourceError, SourceLoad, SourceManager, SourceTrack};
+use super::{
+    build_client, classify_status, strip_scheme, SourceError, SourceLoad, SourceManager,
+    SourceTrack,
+};
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const PREFIX: &str = "getyarn.io/yarn-clip/";
 
 pub struct GetyarnSource {
@@ -34,16 +33,7 @@ pub struct GetyarnSource {
 
 impl GetyarnSource {
     pub fn new(proxy: Option<reqwest::Proxy>) -> Result<Self, SourceError> {
-        let mut builder = Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .user_agent(concat!("lavalink-rs/", env!("CARGO_PKG_VERSION")));
-        if let Some(proxy) = proxy {
-            builder = builder.proxy(proxy);
-        }
-        let client = builder
-            .build()
-            .map_err(|error| SourceError::Internal(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self { client: build_client(proxy)? })
     }
 }
 
@@ -67,16 +57,7 @@ impl SourceManager for GetyarnSource {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(match status {
-                StatusCode::NOT_FOUND | StatusCode::GONE => SourceError::NotFound,
-                _ => SourceError::Remote {
-                    status: status.as_u16(),
-                    reason: status
-                        .canonical_reason()
-                        .unwrap_or("request failed")
-                        .to_owned(),
-                },
-            });
+            return Err(classify_status(status));
         }
 
         let html = response
@@ -115,9 +96,7 @@ impl SourceManager for GetyarnSource {
 /// or `None` if it isn't one. Matches upstream's
 /// `https?://(?:www\.)?getyarn\.io/yarn-clip/(.*)`.
 fn clip_url(identifier: &str) -> Option<String> {
-    let rest = identifier
-        .strip_prefix("https://")
-        .or_else(|| identifier.strip_prefix("http://"))?;
+    let rest = strip_scheme(identifier)?;
     let rest = rest.strip_prefix("www.").unwrap_or(rest);
     rest.strip_prefix(PREFIX)?;
     Some(format!("https://{rest}"))

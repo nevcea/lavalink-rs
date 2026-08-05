@@ -18,18 +18,17 @@
 //! reason: fetching every entry individually would turn a playlist load into
 //! dozens of requests.
 
-use std::time::Duration;
-
 use lavalink_protocol::encoded_track::SourceTail;
 use lavalink_protocol::player::TrackInfo;
 use reqwest::blocking::Client;
-use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{SourceError, SourceLoad, SourcePlaylist, SourceManager, SourceTrack};
+use super::{
+    build_client, classify_status, strip_scheme, SourceError, SourceLoad, SourceManager,
+    SourcePlaylist, SourceTrack,
+};
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const API_BASE: &str = "https://api.deezer.com";
 
 /// Deezer's code for "that id does not exist" — the one case worth telling apart
@@ -43,16 +42,7 @@ pub struct DeezerSource {
 
 impl DeezerSource {
     pub fn new(proxy: Option<reqwest::Proxy>) -> Result<Self, SourceError> {
-        let mut builder = Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .user_agent(concat!("lavalink-rs/", env!("CARGO_PKG_VERSION")));
-        if let Some(proxy) = proxy {
-            builder = builder.proxy(proxy);
-        }
-        let client = builder
-            .build()
-            .map_err(|error| SourceError::Internal(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self { client: build_client(proxy)? })
     }
 
     fn fetch<T: serde::de::DeserializeOwned>(
@@ -69,16 +59,7 @@ impl DeezerSource {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(match status {
-                StatusCode::NOT_FOUND | StatusCode::GONE => SourceError::NotFound,
-                _ => SourceError::Remote {
-                    status: status.as_u16(),
-                    reason: status
-                        .canonical_reason()
-                        .unwrap_or("request failed")
-                        .to_owned(),
-                },
-            });
+            return Err(classify_status(status));
         }
 
         let text = response
@@ -182,9 +163,7 @@ enum Resource {
 /// the same way `on.soundcloud.com` would be if this source did not special-case
 /// it.
 fn resource_of(identifier: &str) -> Option<(Resource, String)> {
-    let rest = identifier
-        .strip_prefix("https://")
-        .or_else(|| identifier.strip_prefix("http://"))?;
+    let rest = strip_scheme(identifier)?;
     let rest = rest.strip_prefix("www.").unwrap_or(rest);
     let rest = rest.strip_prefix("deezer.com/")?;
     let path = rest.split(['?', '#']).next().unwrap_or(rest);

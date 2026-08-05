@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use super::ytdlp::{SourceKind, YtDlp};
-use super::{SourceError, SourceLoad, SourceManager};
+use super::{strip_scheme, SourceError, SourceLoad, SourceManager};
 
 pub struct BandcampSource {
     backend: Arc<YtDlp>,
@@ -54,10 +54,7 @@ impl SourceManager for BandcampSource {
 /// is deliberately left unclaimed — claiming it would turn the front page or the
 /// discovery feed into a failed load rather than `empty`.
 fn is_bandcamp_url(identifier: &str) -> bool {
-    let Some(rest) = identifier
-        .strip_prefix("https://")
-        .or_else(|| identifier.strip_prefix("http://"))
-    else {
+    let Some(rest) = strip_scheme(identifier) else {
         return false;
     };
 

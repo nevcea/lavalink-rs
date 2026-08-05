@@ -15,7 +15,6 @@
 //! clients do not offer the control.
 
 use std::io::Read;
-use std::time::Duration;
 
 use lavalink_protocol::encoded_track::SourceTail;
 use lavalink_protocol::player::TrackInfo;
@@ -25,13 +24,12 @@ use reqwest::StatusCode;
 
 use super::probe::probe;
 use super::{
-    extension_of, last_path_segment, SourceError, SourceLoad, SourceManager, SourceTrack,
+    build_client, classify_status, extension_of, last_path_segment, SourceError, SourceLoad,
+    SourceManager, SourceTrack,
 };
 
 /// How much of the stream to pull for probing.
 const PROBE_PREFIX_BYTES: u64 = 512 * 1024;
-
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct HttpSource {
     client: Client,
@@ -39,16 +37,7 @@ pub struct HttpSource {
 
 impl HttpSource {
     pub fn new(proxy: Option<reqwest::Proxy>) -> Result<Self, SourceError> {
-        let mut builder = Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .user_agent(concat!("lavalink-rs/", env!("CARGO_PKG_VERSION")));
-        if let Some(proxy) = proxy {
-            builder = builder.proxy(proxy);
-        }
-        let client = builder
-            .build()
-            .map_err(|error| SourceError::Internal(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self { client: build_client(proxy)? })
     }
 }
 
@@ -71,16 +60,7 @@ impl SourceManager for HttpSource {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(match status {
-                StatusCode::NOT_FOUND | StatusCode::GONE => SourceError::NotFound,
-                _ => SourceError::Remote {
-                    status: status.as_u16(),
-                    reason: status
-                        .canonical_reason()
-                        .unwrap_or("request failed")
-                        .to_owned(),
-                },
-            });
+            return Err(classify_status(status));
         }
 
         let headers = response.headers();
