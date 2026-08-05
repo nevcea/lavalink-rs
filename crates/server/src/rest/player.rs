@@ -404,21 +404,7 @@ mod tests {
     fn dummy_pair(
         guild_id: u64,
     ) -> (crate::player::PlayerHandle, std::sync::Arc<crate::voice::VoiceConnection>) {
-        let voice_updates: crate::player::VoiceUpdateSlot = std::sync::Arc::new(std::sync::OnceLock::new());
-        let voice = std::sync::Arc::new(crate::voice::VoiceConnection::new(
-            guild_id,
-            1,
-            std::sync::Arc::clone(&voice_updates),
-        ));
-        let (actor, handle) = crate::player::PlayerActor::new(
-            guild_id,
-            Box::new(crate::audio::testing::RecordingEngine::new()),
-            std::sync::Arc::new(crate::sink::Sink::new()),
-            std::time::Duration::from_secs(10),
-            voice_updates,
-        );
-        tokio::spawn(actor.run());
-        (handle, voice)
+        crate::testing::dummy_pair(guild_id, std::sync::Arc::new(crate::sink::Sink::new()))
     }
 
     /// `patch_player`'s post-connect re-check exists for exactly this: a `DELETE`

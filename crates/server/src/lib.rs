@@ -71,7 +71,15 @@ pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, 
 /// construct and none of them care about.
 #[cfg(test)]
 pub mod testing {
+    use std::sync::{Arc, OnceLock};
+    use std::time::Duration;
+
     use lavalink_protocol::player::{Track, TrackInfo};
+
+    use crate::audio::testing::RecordingEngine;
+    use crate::player::{PlayerActor, PlayerHandle, VoiceUpdateSlot};
+    use crate::sink::Sink;
+    use crate::voice::VoiceConnection;
 
     /// A fully-populated track, for tests that need one but do not care what is in
     /// it. `title` is the one field callers routinely tell apart, so it is the only
@@ -94,5 +102,23 @@ pub mod testing {
                 isrc: None,
             },
         )
+    }
+
+    /// A player actor + voice connection pair, wired the way `AppState::player`
+    /// wires production ones. `sink` is a parameter rather than always built
+    /// fresh, so a test can inspect the messages the spawned actor emits through
+    /// it (matching the session's own sink, in `AppState::player`'s wiring).
+    pub fn dummy_pair(guild_id: u64, sink: Arc<Sink>) -> (PlayerHandle, Arc<VoiceConnection>) {
+        let voice_updates: VoiceUpdateSlot = Arc::new(OnceLock::new());
+        let voice = Arc::new(VoiceConnection::new(guild_id, 1, Arc::clone(&voice_updates)));
+        let (actor, handle) = PlayerActor::new(
+            guild_id,
+            Box::new(RecordingEngine::new()),
+            sink,
+            Duration::from_secs(10),
+            voice_updates,
+        );
+        tokio::spawn(actor.run());
+        (handle, voice)
     }
 }

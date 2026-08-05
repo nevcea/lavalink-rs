@@ -459,17 +459,7 @@ mod tests {
     use crate::voice::VoiceConnection;
 
     fn dummy_pair(guild_id: u64) -> (PlayerHandle, Arc<VoiceConnection>) {
-        let voice_updates: crate::player::VoiceUpdateSlot = Arc::new(std::sync::OnceLock::new());
-        let voice = Arc::new(VoiceConnection::new(guild_id, 1, Arc::clone(&voice_updates)));
-        let (actor, handle) = PlayerActor::new(
-            guild_id,
-            Box::new(RecordingEngine::new()),
-            Arc::new(crate::sink::Sink::new()),
-            Duration::from_secs(10),
-            voice_updates,
-        );
-        tokio::spawn(actor.run());
-        (handle, voice)
+        crate::testing::dummy_pair(guild_id, Arc::new(crate::sink::Sink::new()))
     }
 
     /// The race `AppState::player` used to be exposed to: two first-time callers
