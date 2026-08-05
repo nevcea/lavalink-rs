@@ -99,6 +99,21 @@ struct Active {
     paused: bool,
 }
 
+/// Sends a command to the pump and marks it interrupted, in that order.
+///
+/// The order is load-bearing, not cosmetic: `drain_commands`'s `Empty` branch
+/// clears `interrupt` once it finds nothing to act on, and a channel `send` is
+/// visible to any `try_recv` that follows it. Setting the flag first would leave
+/// a window where `drain_commands` observes `Empty`, clears the flag, and only
+/// then receives this command — reinstating whatever stall the flag exists to
+/// cut short (a full reconnect wait for `Stop`, up to `COMMAND_POLL` for others).
+/// Centralized here so both call sites share one place that gets the order right,
+/// rather than each re-implementing it.
+fn signal_pump(commands: &Sender<PumpCommand>, interrupt: &AtomicBool, command: PumpCommand) {
+    let _ = commands.send(command);
+    interrupt.store(true, Ordering::Relaxed);
+}
+
 /// Whether `generation` is still the one `active` currently holds. `Active`'s
 /// pump-thread `commands` sender is dropped to signal a stop, but the pump can be
 /// mid-`next_packet()` at that moment and reach a terminal outcome (a natural EOF,
@@ -145,16 +160,7 @@ impl PipelineEngine {
 
     fn send_to_pump(&self, command: PumpCommand) {
         if let Some(active) = lock(&self.active).as_ref() {
-            // Sent before the flag is set, not after: `drain_commands`'s `Empty`
-            // branch clears `interrupt` once it finds nothing to act on, and a
-            // channel `send` is visible to any `try_recv` that follows it. Setting
-            // the flag first left a window where `drain_commands` could observe
-            // `Empty` (this send hadn't landed yet), clear the flag, and then the
-            // command would arrive with nothing left to tell a stalled source a
-            // command was waiting — reinstating the full reconnect stall the flag
-            // exists to cut short.
-            let _ = active.commands.send(command);
-            active.interrupt.store(true, Ordering::Relaxed);
+            signal_pump(&active.commands, &active.interrupt, command);
             // In steady playback the ring is usually full (decode outruns real
             // time), so the pump is usually parked in `wait_for_space` rather than
             // between packets — without this, a command sent there sits unseen for
@@ -179,18 +185,13 @@ impl PipelineEngine {
             return;
         };
 
-        // Sent before the flag is set, for the reason `send_to_pump` spells out
-        // above: setting it first leaves a window where `drain_commands` observes
-        // `Empty`, clears the flag, and only then receives this — leaving a pump
-        // on a stalled source to burn its whole reconnect budget (up to
-        // `MAX_RECONNECT_ATTEMPTS` × (`connect_timeout` + `read_timeout`), tens of
-        // seconds) before it notices it was told to stop at all. `Stop` is the
-        // command that most needs to cut that short, and was the last one still
-        // on the old order.
+        // `Stop` is the command that most needs `signal_pump`'s ordering: without
+        // it, a pump on a stalled source could burn its whole reconnect budget (up
+        // to `MAX_RECONNECT_ATTEMPTS` × (`connect_timeout` + `read_timeout`), tens
+        // of seconds) before it notices it was told to stop at all.
         //
         // Dropping the sender is what unblocks a pump parked on a full ring.
-        let _ = previous.commands.send(PumpCommand::Stop);
-        previous.interrupt.store(true, Ordering::Relaxed);
+        signal_pump(&previous.commands, &previous.interrupt, PumpCommand::Stop);
         drop(previous.commands);
 
         // Before the replacement ring exists, so the reader this one leaves behind
