@@ -275,6 +275,19 @@ impl SessionRegistry {
         session
     }
 
+    /// Whether `id` is currently resumable, without claiming it — for the
+    /// `Session-Resumed` handshake response header
+    /// (`HandshakeInterceptorImpl.kt`'s `canResume` check), which is read-only
+    /// and happens before the socket the real claim needs even exists. Shares
+    /// [`Self::claim_for_resume`]'s deadline condition exactly, so the header
+    /// never promises a resume that the claim moments later would refuse.
+    pub fn can_resume(&self, id: &str, now: Instant) -> bool {
+        matches!(
+            self.lock().get(id).map(|entry| entry.state),
+            Some(SessionState::Resumable { deadline }) if deadline > now
+        )
+    }
+
     /// Takes ownership of a resumable session, in one atomic step.
     ///
     /// Returns `None` when the id is unknown, the session is currently open, or
@@ -585,6 +598,30 @@ mod tests {
         assert!(Arc::ptr_eq(&claimed, &session));
         assert_eq!(registry.state(&session.id), Some(SessionState::Open));
         assert!(!session.sink.is_paused());
+    }
+
+    /// `can_resume` backs the `Session-Resumed` handshake header — it must
+    /// answer the same way `claim_for_resume` would decide, without actually
+    /// claiming, so the header never promises a resume the claim moments
+    /// later refuses.
+    #[test]
+    fn can_resume_reports_without_claiming() {
+        let registry = SessionRegistry::new();
+        let session = resumable_session(&registry);
+
+        assert!(registry.can_resume(&session.id, Instant::now()));
+        // Unlike claim_for_resume, checking again still reports true — nothing
+        // was consumed.
+        assert!(registry.can_resume(&session.id, Instant::now()));
+        assert!(matches!(
+            registry.state(&session.id),
+            Some(SessionState::Resumable { .. })
+        ));
+
+        assert!(!registry.can_resume("unknown-id", Instant::now()));
+
+        let open = registry.open(2, None);
+        assert!(!registry.can_resume(&open.id, Instant::now()));
     }
 
     /// Only one connection can take a resumable session.

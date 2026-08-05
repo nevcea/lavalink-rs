@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue};
 use axum::response::Response;
 use futures_util::{SinkExt as _, StreamExt as _};
 use lavalink_protocol::message::Message;
@@ -66,16 +66,37 @@ pub async fn handler(
         );
     }
 
-    Ok(upgrade.on_upgrade(move |socket| {
+    // Read-only: the actual claim happens inside `run`, once the socket this
+    // header describes actually exists (`HandshakeInterceptorImpl.kt` sets
+    // this before the handshake completes too, from the same `canResume`
+    // check `SocketServer` later uses for the real resume).
+    let can_resume = requested_session
+        .as_deref()
+        .is_some_and(|id| state.sessions.can_resume(id, Instant::now()));
+
+    let mut response = upgrade.on_upgrade(move |socket| {
         run(state, socket, user_id, requested_session, client_name)
-    }))
+    });
+    response.headers_mut().insert(
+        "Session-Resumed",
+        HeaderValue::from_static(if can_resume { "true" } else { "false" }),
+    );
+    Ok(response)
 }
 
 fn parse_user_id(headers: &HeaderMap) -> Result<u64, ApiError> {
     let raw = header(headers, "user-id")
         .ok_or_else(|| ApiError::bad_request("The User-Id header is required"))?;
-    raw.parse::<u64>()
-        .map_err(|_| ApiError::bad_request(format!("The User-Id header is not a snowflake: {raw}")))
+    let id = raw
+        .parse::<u64>()
+        .map_err(|_| ApiError::bad_request(format!("The User-Id header is not a snowflake: {raw}")))?;
+
+    // `HandshakeInterceptorImpl.kt`: `userId.isNullOrEmpty() || userId.toLongOrNull()
+    // == 0L` is rejected the same way a missing/non-numeric header is.
+    if id == 0 {
+        return Err(ApiError::bad_request("The User-Id header is not a snowflake: 0"));
+    }
+    Ok(id)
 }
 
 fn header(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -441,7 +462,7 @@ mod tests {
         assert_eq!(guilds_seen, vec!["1".to_owned(), "2".to_owned()]);
     }
 
-    use axum::http::{HeaderName, HeaderValue};
+    use axum::http::HeaderName;
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -473,6 +494,16 @@ mod tests {
         let error = parse_user_id(&headers).unwrap_err();
         assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
         assert!(error.message.contains("not-a-snowflake"));
+    }
+
+    /// `HandshakeInterceptorImpl.kt` rejects `0` the same way it rejects a
+    /// missing header — a numeric-looking value that is still not a real
+    /// snowflake.
+    #[test]
+    fn a_zero_user_id_is_a_bad_request() {
+        let headers = headers(&[("user-id", "0")]);
+        let error = parse_user_id(&headers).unwrap_err();
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[test]
