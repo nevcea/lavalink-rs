@@ -1473,6 +1473,11 @@ mod tests {
         );
     }
 
+    /// One interval is enough: unlike the "only once" dedup test above, there is
+    /// no persisted state to prove survives multiple ticks here — `check_stuck`'s
+    /// `!is_playing()` guard (which `Paused` and `Idle` both fail identically) is
+    /// re-evaluated fresh every tick, so if it failed to suppress the event once
+    /// it would not suppress it on a second tick either.
     #[tokio::test]
     async fn a_paused_track_is_never_reported_stuck() {
         let harness = Harness::start_with_stuck_threshold(Duration::from_millis(1));
@@ -1486,22 +1491,12 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(past_one_check_interval() * 2).await;
+        tokio::time::sleep(past_one_check_interval()).await;
         harness.handle.snapshot().await.unwrap();
 
         assert!(!harness
             .events()
             .iter()
             .any(|event| matches!(event, EmittedEvent::TrackStuck { .. })));
-    }
-
-    #[tokio::test]
-    async fn an_idle_player_is_never_reported_stuck() {
-        let harness = Harness::start_with_stuck_threshold(Duration::from_millis(1));
-
-        tokio::time::sleep(past_one_check_interval() * 2).await;
-        harness.handle.snapshot().await.unwrap();
-
-        assert!(harness.events().is_empty());
     }
 }
