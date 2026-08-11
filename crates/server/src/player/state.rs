@@ -57,6 +57,10 @@ impl VoiceConnection {
 #[derive(Debug)]
 pub struct PlayerModel {
     pub guild_id: u64,
+    /// `guild_id` formatted once, not on every `snapshot()` — the wire field is a
+    /// string but the model's own identity is the `u64`, and `snapshot()` runs on
+    /// every `playerUpdate` tick.
+    guild_id_str: String,
     pub playback: Playback,
     pub track: Option<Track>,
     /// What `PATCH`'s `paused` field last requested, tracked independently of
@@ -86,6 +90,7 @@ impl PlayerModel {
     pub fn new(guild_id: u64) -> Self {
         Self {
             guild_id,
+            guild_id_str: guild_id.to_string(),
             playback: Playback::Idle,
             track: None,
             paused: false,
@@ -167,7 +172,7 @@ impl PlayerModel {
     /// same split the original gets from koe (`util.kt:91-113`), minus the query.
     pub fn snapshot(&self, position_ms: i64, now_epoch_ms: i64) -> Player {
         Player {
-            guild_id: self.guild_id.to_string(),
+            guild_id: self.guild_id_str.clone(),
             track: self.track.clone().map(|mut track| {
                 // The reported track carries the live position, not the one it was
                 // decoded with.
