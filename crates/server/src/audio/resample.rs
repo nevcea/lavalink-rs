@@ -11,10 +11,11 @@
 //! derivative, so no discontinuities, but with more high-frequency imaging than a
 //! proper band-limited resampler — and, being arithmetic rather than a filter
 //! bank, free. `Medium`/`High` route through [`SincEngine`], a thin wrapper over
-//! `rubato::SincFixedIn`, matching lavaplayer's actual approach at those tiers.
+//! `rubato::Async` in sinc mode, matching lavaplayer's actual approach at those tiers.
 
+use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{
-    Resampler as RubatoResampler, SincFixedIn, SincInterpolationParameters,
+    Async, FixedAsync, Resampler as RubatoResampler, SincInterpolationParameters,
     SincInterpolationType, WindowFunction,
 };
 
@@ -249,14 +250,14 @@ impl Resampler {
 }
 
 /// Windowed-sinc resampling for [`ResamplingQuality::Medium`]/`High`, wrapping
-/// `rubato::SincFixedIn`. Never constructed for `Low` — that stays on the
-/// Catmull-Rom path above.
+/// `rubato::Async` (sinc, fixed input size). Never constructed for `Low` — that
+/// stays on the Catmull-Rom path above.
 ///
-/// `Debug` is hand-rolled (not derived) because `SincFixedIn` itself has no
-/// `Debug` impl — its precomputed sinc filter table isn't something a `{:?}`
-/// on the owning [`Resampler`] needs to see anyway.
+/// `Debug` is hand-rolled (not derived) because `Async` itself has no `Debug`
+/// impl — its precomputed sinc filter table isn't something a `{:?}` on the
+/// owning [`Resampler`] needs to see anyway.
 struct SincEngine {
-    resampler: SincFixedIn<f32>,
+    resampler: Async<f32>,
     /// Stereo frames already converted by [`Resampler::fill_stereo_frames`],
     /// waiting for enough to submit one call to `resampler`
     /// ([`rubato::Resampler::input_frames_next`] frames, fixed for the engine's
@@ -290,8 +291,11 @@ impl SincEngine {
         let ratio = f64::from(SAMPLE_RATE) / f64::from(source_rate);
         // max_resample_ratio_relative: 1.0 — the ratio is fixed for the whole
         // track, never ramped, so input_frames_next() stays constant too.
-        let resampler = SincFixedIn::<f32>::new(ratio, 1.0, params, 1024, CHANNELS)
-            .expect("static parameters and a positive ratio are always valid");
+        // FixedAsync::Input matches the old SincFixedIn's shape: input size fixed,
+        // output size varies.
+        let resampler =
+            Async::<f32>::new_sinc(ratio, 1.0, &params, 1024, CHANNELS, FixedAsync::Input)
+                .expect("static parameters and a positive ratio are always valid");
         let chunk = resampler.input_frames_next();
 
         Self {
@@ -332,9 +336,15 @@ impl SincEngine {
                 lane.clear();
                 lane.resize(out_frames, 0.0);
             }
+
+            let input_adapter = SequentialSliceOfVecs::new(&self.planar_in, CHANNELS, chunk)
+                .expect("planar_in holds exactly chunk frames per channel");
+            let mut output_adapter =
+                SequentialSliceOfVecs::new_mut(&mut self.planar_out, CHANNELS, out_frames)
+                    .expect("planar_out holds exactly out_frames frames per channel");
             let (read, produced) = self
                 .resampler
-                .process_into_buffer(&self.planar_in, &mut self.planar_out, None)
+                .process_into_buffer(&input_adapter, &mut output_adapter, None)
                 .expect("input matches exactly what input_frames_next() asked for");
             debug_assert_eq!(read, chunk);
 
@@ -357,7 +367,9 @@ fn sinc_params(
     let window = WindowFunction::BlackmanHarris2;
     SincInterpolationParameters {
         sinc_len,
-        f_cutoff: rubato::calculate_cutoff(sinc_len, window),
+        // None lets rubato derive the cutoff itself via the same calculate_cutoff
+        // this used to call explicitly — the recommended way to set this field.
+        f_cutoff: None,
         oversampling_factor,
         interpolation,
         window,
