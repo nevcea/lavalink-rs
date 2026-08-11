@@ -17,10 +17,7 @@ pub async fn version(State(state): State<AppState>) -> String {
 /// once in `AppState::new` instead of re-serializing (and deep-cloning
 /// `Info`'s `Vec`/`String` fields) on every request.
 pub async fn info(State(state): State<AppState>) -> impl IntoResponse {
-    (
-        [(CONTENT_TYPE, "application/json")],
-        (*state.info_json).clone(),
-    )
+    ([(CONTENT_TYPE, "application/json")], state.info_json.clone())
 }
 
 /// `frameStats` is always absent from this endpoint (`docs/api/rest.md:989`);

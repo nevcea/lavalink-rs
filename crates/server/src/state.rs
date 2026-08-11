@@ -37,8 +37,10 @@ pub struct AppState {
     pub info: Arc<Info>,
     /// `info` serialized once at startup — `Info` never changes after this, so
     /// `/v4/info` serves these bytes directly instead of re-serializing (and
-    /// deep-cloning `Info`'s `Vec`/`String` fields) on every request.
-    pub info_json: Arc<Vec<u8>>,
+    /// deep-cloning `Info`'s `Vec`/`String` fields) on every request. `Bytes`
+    /// rather than `Arc<Vec<u8>>` so the handler's `.clone()` is a refcount
+    /// bump, not a copy of the whole buffer.
+    pub info_json: axum::body::Bytes,
     /// Opens byte streams at playback time. Shared by every player.
     pub opener: Arc<StreamOpener>,
     /// Filter names a `PATCH player` is rejected for naming. Fixed at startup, and
@@ -84,7 +86,7 @@ impl AppState {
             plugins: Vec::new(),
         };
 
-        let info_json = Arc::new(
+        let info_json = axum::body::Bytes::from(
             serde_json::to_vec(&info).expect("Info's fields are all plain JSON-safe types"),
         );
 
