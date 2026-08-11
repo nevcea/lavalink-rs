@@ -1,10 +1,11 @@
 //! Filter DTOs.
 //!
-//! All ten original filters are modelled even though only nine are implemented
-//! (`timescale` is refused — see `MAINTENANCE.md`). The wire shape has to parse
-//! in full so that a request naming a filter we do not run can be rejected with
-//! the original's 400 + name list (`PlayerRestHandler.kt:90-95`) rather than a
-//! parse error.
+//! All ten original filters are modelled here, independently of which ones a
+//! server actually runs: the wire shape has to parse in full so that a request
+//! naming a filter the node does not run can be rejected with the original's
+//! 400 + name list (`PlayerRestHandler.kt:90-95`) rather than a parse error.
+//! What is really implemented is the server's own list, not this crate's — see
+//! `lavalink-server`'s `audio::filter::IMPLEMENTED_FILTERS`.
 
 use std::collections::BTreeMap;
 
