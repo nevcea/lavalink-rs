@@ -40,11 +40,15 @@ const DEFAULT_RESUME_TIMEOUT_SECS: i64 = 60;
 /// to `Instant::checked_add` instead. 100 years, in seconds.
 const MAX_SANE_RESUME_TIMEOUT_SECS: i64 = 100 * 365 * 24 * 60 * 60;
 
-/// How long [`Session::shutdown`] waits on a single player's destroy before giving
-/// up on it and moving on. `PlayerActor`'s own contract is that its loop never
-/// awaits I/O, so a healthy destroy finishes near-instantly — this exists only to
-/// cap the cost of an actor that never will.
-const PLAYER_DESTROY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a caller waits on a single player's destroy before giving up on it and
+/// moving on. `PlayerActor`'s own contract is that its loop never awaits I/O, so a
+/// healthy destroy finishes near-instantly — this exists only to cap the cost of an
+/// actor that never will.
+///
+/// Shared with `rest::player::delete_player`, which waits on the same call for the
+/// same courtesy and needs the same cap: an unbounded wait there hangs an HTTP
+/// request instead of a shutdown, and a client retrying `DELETE` stacks them up.
+pub(crate) const PLAYER_DESTROY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {

@@ -20,6 +20,7 @@ use serde::Deserialize;
 use crate::error::{ApiError, ValidatedJson, ValidatedPath, ValidatedQuery};
 use crate::player::{PatchRequest, TrackChange};
 use crate::rest::{parse_guild_id, session};
+use crate::session::PLAYER_DESTROY_TIMEOUT;
 use crate::state::AppState;
 
 pub async fn list_players(
@@ -240,7 +241,11 @@ pub async fn delete_player(
     // PATCH found the same unresponsive handle and answered 503 for good, while
     // the client had already been told 204 here.
     if let Some(handle) = session.remove_player(guild_id) {
-        let _ = handle.destroy().await;
+        // Bounded for the same reason Session::shutdown bounds its own destroys:
+        // the result is already ignored (removal above is the teardown that
+        // counts), so this wait is a courtesy, and an unbounded courtesy is a
+        // hung request every time a client retries the DELETE.
+        let _ = tokio::time::timeout(PLAYER_DESTROY_TIMEOUT, handle.destroy()).await;
     }
 
     // Deleting a player that is not there succeeds; the original's destroyPlayer
@@ -315,13 +320,17 @@ fn validate_voice(voice: &VoiceState) -> Result<(), ApiError> {
 /// Resolves an identifier to exactly one track, with the original's messages for
 /// each way that can fail (`PlayerRestHandler.kt:196-203`).
 async fn load_one(state: &AppState, identifier: &str) -> Result<Track, ApiError> {
-    match state.loader.load(identifier).await {
-        LoadResult::Track(track) => Ok(*track),
+    // Matched by reference and cloned per arm: the result is shared with the cache
+    // and with anyone else waiting on the same load, and the two arms that need
+    // owned data need one track or one exception — never the whole playlist a
+    // move-out would have copied.
+    match &*state.loader.load(identifier).await {
+        LoadResult::Track(track) => Ok((**track).clone()),
         LoadResult::Empty => Err(ApiError::bad_request("No matches found for identifier")),
         LoadResult::Playlist(_) | LoadResult::Search(_) => Err(ApiError::bad_request(
             "Cannot play a playlist or search result",
         )),
-        LoadResult::Error(exception) => Err(ApiError::from_exception(exception)),
+        LoadResult::Error(exception) => Err(ApiError::from_exception(exception.clone())),
     }
 }
 
