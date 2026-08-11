@@ -122,11 +122,11 @@ struct State {
     /// of them means the stream is broken.
     consecutive_errors: u32,
     /// Scratch buffers for the decode loop, reused every packet so a healthy stream
-    /// settles into decoding without allocating. `interleaved` and `pcm` are taken
-    /// out of `self` for the duration of a packet (see `decode_loop`) because they
-    /// are passed by `&mut` to methods that themselves take `&mut self`; `planar`
-    /// does not need that dance since `filter_interleaved` only ever borrows it from
-    /// inside its own `&mut self`.
+    /// settles into decoding without allocating. `interleaved` and `filtered` are
+    /// taken out of `self` for the duration of a packet (see `decode_loop`) because
+    /// they are passed by `&mut` to methods that themselves take `&mut self`; `pcm`
+    /// and `planar` do not need that dance, since every call that touches them
+    /// borrows only disjoint fields.
     interleaved: Vec<f32>,
     pcm: Vec<f32>,
     planar: Vec<Vec<f32>>,
@@ -414,21 +414,25 @@ impl State {
                 continue;
             }
 
-            // Taken out of self because apply_volume takes &self — a field
-            // can't also be passed to it by &mut while still attached. Moved back
-            // in below, regardless of which path out of the loop is taken.
-            let mut pcm = std::mem::take(&mut self.pcm);
-            self.resampler.process_into(&self.interleaved, &mut pcm);
-            if pcm.is_empty() {
-                self.pcm = pcm;
+            self.resampler
+                .process_into(&self.interleaved, &mut self.pcm);
+            if self.pcm.is_empty() {
                 continue;
             }
 
-            self.apply_volume(&mut pcm);
-
+            // Taken out of self because write_interruptibly below takes &mut self
+            // and cannot also borrow one of its fields. Moved back in regardless
+            // of which path out of the loop is taken.
             let mut filtered = std::mem::take(&mut self.filtered);
-            filter_interleaved(&mut self.filters, &pcm, &mut self.planar, &mut filtered);
-            self.pcm = pcm;
+            filter_interleaved(&mut self.filters, &self.pcm, &mut self.planar, &mut filtered);
+
+            // After the chain, not before it: upstream applies the player's volume
+            // in a VolumePostProcessor, which runs on the frames FinalPcmAudioFilter
+            // hands to the post-processors — downstream of every lavadsp filter
+            // Lavalink configures. The two orders differ audibly wherever a stage is
+            // non-linear (distortion, karaoke, the volume filter's own tan curve,
+            // timescale), so this has to be the last thing that touches a sample.
+            self.apply_volume(&mut filtered);
 
             self.produced.store(true, Ordering::Relaxed);
             let outcome = self.write_interruptibly(writer, &filtered, commands);
@@ -552,7 +556,7 @@ impl State {
                         // ever reached here — a failure must give position
                         // reporting back to the real, unmoved position instead of
                         // holding at a target that is never going to land.
-                        writer.cancel_seek();
+                        writer.cancel_seek(position_ms);
                     }
                 }
                 PumpCommand::SetFilters(filters) => {
@@ -596,18 +600,35 @@ impl State {
             tracing::debug!(%error, position_ms, "seek failed");
         }
 
-        self.decoder.reset();
-        self.resampler.reset();
-        self.filters.reset();
+        // Only on the path that actually moved. A failed seek left the decoder
+        // mid-stream and playing on, so resetting here would throw away decoder
+        // state, the resampler's prologue and (via TimescaleFilter::reset) tens of
+        // ms of overlap-add state — an audible discontinuity for a seek that did
+        // nothing. Same reasoning as the position rebase this function's docs
+        // already withhold on failure.
+        if succeeded {
+            self.decoder.reset();
+            self.resampler.reset();
+            self.filters.reset();
+        }
         succeeded
     }
 
+    /// Applies the player's own `volume` field, which is a gain and not a filter
+    /// stage (see `filter::player_volume_multiplier`).
+    ///
+    /// Clamped, because the multiplier reaches 16.4x at `volume: 1000` and nothing
+    /// downstream would bring it back: with no filters enabled `filter_interleaved`
+    /// is a straight copy, so an out-of-range sample would travel intact to the
+    /// mixer's Opus encoder. The original saturates here for free by working on
+    /// `short`s; on `f32` it has to be said. Every `AudioFilter::process` in
+    /// `filter.rs` ends the same way.
     fn apply_volume(&self, samples: &mut [f32]) {
         if (self.volume - 1.0).abs() < f32::EPSILON {
             return;
         }
         for sample in samples {
-            *sample *= self.volume;
+            *sample = (*sample * self.volume).clamp(-1.0, 1.0);
         }
     }
 
@@ -855,6 +876,41 @@ mod tests {
         let outcome = pump.join().unwrap();
         let final_position = position.load(Ordering::Relaxed);
         (outcome, delivered, final_position)
+    }
+
+    /// Decodes a whole track into the samples that reached the ring.
+    ///
+    /// A big enough ring that the pump never blocks, so this stays single-threaded
+    /// (decode, then read) rather than needing `play`'s reader thread — which makes
+    /// the output exactly reproducible across runs, as the tests that compare two
+    /// runs sample-for-sample need it to be.
+    fn decode_to_samples(config: PumpConfig) -> Vec<f32> {
+        let position = Arc::new(AtomicI64::new(0));
+        let (writer, mut reader) = super::super::ring::channel(
+            4_000,
+            Arc::clone(&position),
+            Arc::new(super::super::ring::FrameCounters::default()),
+        );
+
+        let mut state = open(&config, &writer).unwrap();
+        let (_commands_tx, commands_rx) = std::sync::mpsc::channel();
+        let outcome = state.decode_loop(&writer, &commands_rx, &position, &|| {});
+        assert!(matches!(outcome, PumpOutcome::Finished), "{outcome:?}");
+
+        let mut samples = Vec::new();
+        let mut buffer = vec![0u8; super::super::ring::FRAME_SAMPLES * 4];
+        loop {
+            let read = std::io::Read::read(&mut reader, &mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            samples.extend(
+                buffer[..read]
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())),
+            );
+        }
+        samples
     }
 
     fn config(info: TrackInfo) -> PumpConfig {
@@ -1184,6 +1240,41 @@ mod tests {
         );
     }
 
+    /// The same failure seen one layer down: `seek` computed `succeeded` and then
+    /// reset the decoder, resampler and filter chain regardless. On the failure
+    /// path nothing moved — the decoder is still mid-stream and carries on — so
+    /// the reset threw away decoder state, the resampler's carried tail and (via
+    /// `TimescaleFilter::reset`) tens of ms of overlap-add state, putting an
+    /// audible discontinuity in the output for a seek that did nothing. The live
+    /// stream a client keeps retrying seeks against is exactly this case.
+    #[test]
+    fn a_failed_seek_leaves_the_carried_decode_state_alone() {
+        // 44.1kHz, so the resampler is not in passthrough and really does carry
+        // something between buffers.
+        let wav = TempWav::new("pump-seek-fail-state", 44_100, 2, 1.0);
+        let config = config(wav.track());
+
+        let position = Arc::new(AtomicI64::new(0));
+        let (writer, _reader) = super::super::ring::channel(
+            4096,
+            Arc::clone(&position),
+            Arc::new(super::super::ring::FrameCounters::default()),
+        );
+
+        let mut state = open(&config, &writer).unwrap();
+        state.format = Box::new(FailingSeekFormat(state.format));
+
+        // Give the resampler a buffer's worth of carried state to lose.
+        state.resampler.process(&vec![0.25; 2_048]);
+        assert!(state.resampler.carries_state(), "the fixture must carry something");
+
+        assert!(!state.seek(5_000), "the fixture's format refuses every seek");
+        assert!(
+            state.resampler.carries_state(),
+            "a seek that did not land must not discard carried decode state"
+        );
+    }
+
     /// The bug: `drain_commands` cleared `interrupt` the moment it saw an empty
     /// channel, with nothing re-checking afterwards. `signal_pump` sends before
     /// it sets the flag, which closes the window where the pump observes Empty
@@ -1257,6 +1348,78 @@ mod tests {
             state.resampler.matches_source(48_000, 2),
             "the resampler must have been rebuilt for what the decoder really produced"
         );
+    }
+
+    /// The player's volume is a gain, not a filter stage, so nothing downstream
+    /// bounds it: with no filters configured `filter_interleaved` copies straight
+    /// through, and the ring hands the mixer whatever it was given. At
+    /// `volume: 1000` the multiplier is 16.4x, so a half-scale source lands at
+    /// ~8.2 — out of range for the Opus encoder on the other side of the ring.
+    ///
+    /// Asserts on the range rather than on exact samples: the curve itself is
+    /// pinned by `filter::tests::player_volume_follows_the_lavaplayer_curve`, and
+    /// what this one is here to catch is the missing clamp.
+    #[test]
+    fn a_loud_player_volume_saturates_instead_of_leaving_the_ring() {
+        let wav = TempWav::new("pump-loud-volume", 48_000, 2, 0.1);
+        let mut config = config(wav.track());
+        config.volume = 1_000;
+
+        let loudest = decode_to_samples(config)
+            .into_iter()
+            .fold(0.0f32, |loudest, sample| loudest.max(sample.abs()));
+
+        assert!(
+            loudest <= 1.0,
+            "a sample of {loudest} left the ring — the gain is not clamped"
+        );
+        // And the gain really was applied: a half-scale sine amplified 16x is
+        // clipped for most of its period, not merely quiet.
+        assert!(loudest > 0.9, "expected a saturating signal, got {loudest}");
+    }
+
+    /// Upstream applies the player's volume in a `VolumePostProcessor`, which runs
+    /// on what `FinalPcmAudioFilter` hands the post-processors — after every
+    /// lavadsp filter Lavalink configured. Applying it before the chain instead
+    /// feeds gained audio into stages that are not linear, and `distortion` is the
+    /// clearest of those: `sin*cos*tan` of a scaled sample is nothing like a scaled
+    /// `sin*cos*tan`.
+    ///
+    /// Pinned as the property that ordering *is*: with volume last, turning it down
+    /// scales the filtered output and changes nothing else. A quiet volume (0.42x)
+    /// keeps every sample well inside the clamp, so this compares real values
+    /// rather than saturation.
+    #[test]
+    fn the_player_volume_is_applied_after_the_filter_chain_not_before() {
+        let wav = TempWav::new("pump-volume-order", 48_000, 2, 0.1);
+        let distortion = r#"{"distortion":{
+            "sinOffset":0.0,"sinScale":2.0,"cosOffset":0.0,"cosScale":1.0,
+            "tanOffset":0.0,"tanScale":1.0,"offset":0.0,"scale":1.0
+        }}"#;
+
+        let mut unity = config(wav.track());
+        unity.filters = serde_json::from_str(distortion).unwrap();
+        let filtered = decode_to_samples(unity);
+
+        let mut quiet = config(wav.track());
+        quiet.filters = serde_json::from_str(distortion).unwrap();
+        quiet.volume = 50;
+        let filtered_then_quietened = decode_to_samples(quiet);
+
+        let gain = player_volume_multiplier(50);
+        assert_eq!(filtered.len(), filtered_then_quietened.len());
+        assert!(filtered.iter().any(|sample| sample.abs() > 0.01), "silent fixture");
+
+        for (index, (loud, quiet)) in
+            filtered.iter().zip(&filtered_then_quietened).enumerate()
+        {
+            let want = loud * gain;
+            assert!(
+                (quiet - want).abs() < 1e-5,
+                "sample {index}: got {quiet}, want {want} — the volume ran before \
+                 the filter chain instead of after it"
+            );
+        }
     }
 
     /// The fix itself is an ordering argument and has no test that can fail on

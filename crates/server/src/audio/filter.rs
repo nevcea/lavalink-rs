@@ -283,7 +283,7 @@ impl AudioFilter for VolumeFilter {
         let multiplier = if self.volume <= 1.5 {
             (self.volume * 0.79).tan() * 10000.0
         } else {
-            24612.0 * (self.volume * 100.0) / 150.0
+            24621.0 * (self.volume * 100.0) / 150.0
         };
 
         for channel in channels {
@@ -1112,6 +1112,23 @@ mod tests {
         let mut channels = vec![vec![0.5, -0.25]];
         chain.process(&mut channels);
         assert_eq!(channels[0], vec![0.5, -0.25]);
+    }
+
+    /// Above 1.5 both this filter and `player_volume_multiplier` are the linear
+    /// half of the same curve, so they must agree — and they only do on the
+    /// constant that also meets the tangent half at 1.5
+    /// (`tan(1.5 * 0.79) * 10000` = 24621.4). Pinned against the other half
+    /// rather than against a literal, because a literal is exactly what a
+    /// transposed digit survives: `24612` here passed every test in this module.
+    #[test]
+    fn the_linear_half_of_the_volume_curve_matches_the_players_own() {
+        // Small enough that the clamp cannot hide the difference at 3.28x gain.
+        let mut channels = vec![vec![0.1]];
+        FilterChain::new(&filters(r#"{"volume":2.0}"#), 1).process(&mut channels);
+
+        let want = 0.1 * player_volume_multiplier(200);
+        let got = channels[0][0];
+        assert!((got - want).abs() < 1e-6, "got {got}, want {want}");
     }
 
     #[test]

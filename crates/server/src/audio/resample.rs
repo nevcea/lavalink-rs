@@ -103,6 +103,15 @@ impl Resampler {
         }
     }
 
+    /// Whether anything from a previous buffer is still carried — what
+    /// [`Self::reset`] throws away. Exists so `pump`'s tests can tell a seek that
+    /// reset this from one that left it alone, which is otherwise only observable
+    /// as a discontinuity in the audio itself.
+    #[cfg(test)]
+    pub fn carries_state(&self) -> bool {
+        self.cursor != 0.0 || self.prologue_len > 0
+    }
+
     /// Converts one buffer of interleaved source samples, allocating a fresh `Vec`
     /// for the result. A thin wrapper over [`Self::process_into`] that exists only so
     /// the tests below can read a return value; nothing on the playback path allocates
