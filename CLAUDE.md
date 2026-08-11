@@ -33,6 +33,8 @@ bots talk to).
   pipeline cost in isolation; they can't catch a real seek landing wrong or
   audio breaking up under a live voice connection — only a real Discord
   voice channel does (see `### Testing` under `## Architecture`).
+  `scripts/dev.sh` starts the node then `test-bot` against it in one step
+  (needs `DISCORD_TOKEN`/`TEST_GUILD_ID`, see `crates/test-bot/README.md`).
 
 ## Git workflow
 
