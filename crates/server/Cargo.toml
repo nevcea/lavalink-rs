@@ -21,7 +21,7 @@ async-trait = "0.1"
 
 serde_yaml = "0.9"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rand = "0.9"
+rand = "0.10"
 subtle = "2"
 sysinfo = "0.39"
 
