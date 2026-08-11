@@ -192,6 +192,7 @@ async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<()>) {
         let _ = tokio::signal::ctrl_c().await;
     };
 
+    #[cfg(unix)]
     let terminate = async {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(mut signal) => {
@@ -203,6 +204,9 @@ async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<()>) {
             }
         }
     };
+    // No SIGTERM equivalent on Windows; ctrl_c() above is the only signal there.
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
 
     tokio::select! {
         _ = ctrl_c => {},
