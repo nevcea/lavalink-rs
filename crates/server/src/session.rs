@@ -164,6 +164,23 @@ impl Session {
             .collect()
     }
 
+    /// This session's player count, and of those the ones actually playing.
+    ///
+    /// Reads both under the guild lock instead of going through [`Self::players`]:
+    /// a handle is three mpsc senders and two `Arc`s, and `GET /v4/stats` is
+    /// client-driven at whatever rate it likes — cloning one per player per
+    /// request to compute two integers is work with no reader. The stats *tick*
+    /// still takes a real roster, because it needs the handles themselves to
+    /// drain frame counters.
+    pub fn counts(&self) -> (usize, usize) {
+        let guilds = self.lock_guilds();
+        let playing = guilds
+            .values()
+            .filter(|guild| crate::stats::is_playing(&guild.handle))
+            .count();
+        (guilds.len(), playing)
+    }
+
     /// Returns the guild's (player, voice) pair, building and inserting it with
     /// `build` if there is none yet.
     ///

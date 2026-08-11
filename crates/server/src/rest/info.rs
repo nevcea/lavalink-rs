@@ -24,6 +24,6 @@ pub async fn info(State(state): State<AppState>) -> impl IntoResponse {
 /// [`StatsData`] enforces that by construction.
 pub async fn stats(State(state): State<AppState>) -> Json<StatsData> {
     let sessions = state.sessions.all();
-    let (players, playing) = crate::stats::count(&crate::stats::rosters(&sessions));
+    let (players, playing) = crate::stats::count_sessions(&sessions);
     Json(state.stats.sample(players, playing))
 }

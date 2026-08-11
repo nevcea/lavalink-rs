@@ -187,21 +187,38 @@ pub fn rosters(sessions: &[Arc<Session>]) -> Vec<Vec<PlayerHandle>> {
     sessions.iter().map(|session| session.players()).collect()
 }
 
-/// Total players, and of those the ones actually playing.
+/// The original's `player.isPlaying`, which `playingPlayers` filters on with no
+/// minute-window gate (unlike `frameStats`' usability check).
 ///
-/// `playingPlayers` is the original's `context.playingPlayers.size`, which filters on
-/// `player.isPlaying` with no minute-window gate (unlike `frameStats`' usability
-/// check). Both counts live here, and both callers ([`crate::ticker`]'s stats tick and
-/// `GET /v4/stats`) go through it, so the two cannot disagree about what the node is
-/// running.
+/// One definition, because two callers count playing players from different
+/// starting points — [`count`] from a roster the stats tick already had to build,
+/// and [`crate::session::Session::counts`] from the guild map directly — and the
+/// two must never disagree about what the node is running.
+pub fn is_playing(player: &PlayerHandle) -> bool {
+    player.playing_since_ms() != 0
+}
+
+/// Total players, and of those the ones actually playing, from rosters the caller
+/// already holds.
+///
+/// For the stats tick, which needs the handles anyway. `GET /v4/stats` wants the
+/// same two numbers without the handles and goes through
+/// [`crate::session::Session::counts`] instead — see its docs for why cloning a
+/// roster per request is worth avoiding.
 pub fn count(rosters: &[Vec<PlayerHandle>]) -> (i32, i32) {
     let players = rosters.iter().map(Vec::len).sum::<usize>() as i32;
-    let playing = rosters
-        .iter()
-        .flatten()
-        .filter(|player| player.playing_since_ms() != 0)
-        .count() as i32;
+    let playing = rosters.iter().flatten().filter(|player| is_playing(player)).count() as i32;
     (players, playing)
+}
+
+/// The same two numbers straight from the sessions, without building a roster.
+pub fn count_sessions(sessions: &[Arc<Session>]) -> (i32, i32) {
+    sessions
+        .iter()
+        .map(|session| session.counts())
+        .fold((0, 0), |(players, playing), (session_players, session_playing)| {
+            (players + session_players as i32, playing + session_playing as i32)
+        })
 }
 
 #[cfg(test)]
