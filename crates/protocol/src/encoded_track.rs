@@ -89,11 +89,6 @@ impl SourceTail {
     fn is_probing(source_name: &str) -> bool {
         matches!(source_name, "http" | "local")
     }
-
-    /// Sources known to write an empty tail.
-    fn is_empty_tail(source_name: &str) -> bool {
-        matches!(source_name, "youtube")
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,9 +189,12 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<DecodedTrack> {
 
     let tail = if SourceTail::is_probing(&source_name) {
         SourceTail::Probe(input.read_utf()?)
-    } else if SourceTail::is_empty_tail(&source_name) {
-        SourceTail::Empty
     } else {
+        // Everything else by what is actually there rather than by source name:
+        // a source known to write nothing reaches this with nothing left and
+        // becomes Empty anyway, so naming it separately only mattered when the
+        // name and the bytes disagreed — and there it dropped the bytes, which
+        // re-encodes shorter than it decoded.
         let rest = input.remaining();
         if rest.is_empty() {
             SourceTail::Empty
@@ -471,5 +469,75 @@ mod tests {
     #[test]
     fn rejects_non_base64() {
         assert!(matches!(decode("not base64!!"), Err(CodecError::Base64(_))));
+    }
+
+    /// The tail used to be decided by source name for `youtube`, which threw the
+    /// bytes away whenever there were any — so the track re-encoded shorter than
+    /// it decoded, breaking the byte-for-byte preservation this module promises.
+    /// Deciding by what is actually there costs nothing for the ordinary case
+    /// (nothing left, so still `Empty`) and keeps the unusual one.
+    #[test]
+    fn a_source_that_normally_writes_no_tail_still_keeps_one_it_did_write() {
+        let info = sample("youtube");
+
+        let empty = decode(&encode(&info, &SourceTail::Empty).unwrap()).unwrap();
+        assert_eq!(empty.tail, SourceTail::Empty);
+
+        let tail = SourceTail::Raw(vec![1, 2, 3]);
+        let encoded = encode(&info, &tail).unwrap();
+        let decoded = decode(&encoded).unwrap();
+
+        assert_eq!(decoded.tail, tail, "the tail bytes must survive the decode");
+        assert_eq!(
+            encode_with_version(&decoded.info, &decoded.tail, decoded.version).unwrap(),
+            encoded,
+            "and the track must re-encode to exactly what it was decoded from"
+        );
+    }
+
+    /// A length prefix that lies is the shape a hand-built token takes: the
+    /// decoder must refuse it against the bytes it really has rather than
+    /// reserving what it was told. Claimed by `MAINTENANCE.md`, pinned here.
+    #[test]
+    fn a_lying_length_prefix_is_refused_instead_of_reserved() {
+        let mut bytes = BASE64.decode(RICK).unwrap();
+        // The first field is `title`, whose u16 length prefix follows the 4-byte
+        // header and the 1-byte version.
+        bytes[5] = 0xFF;
+        bytes[6] = 0xFF;
+
+        assert!(matches!(
+            decode(&BASE64.encode(&bytes)),
+            Err(CodecError::Io(_))
+        ));
+    }
+
+    /// The payload carries `position` in its last eight bytes, so anything
+    /// shorter than that cannot be a track — and must be told apart from a
+    /// payload that is merely shorter than its own declared size.
+    #[test]
+    fn a_payload_too_short_to_hold_a_position_is_refused_as_such() {
+        // A four-byte header declaring a four-byte payload, and four bytes of it.
+        let mut bytes = 4u32.to_be_bytes().to_vec();
+        bytes.extend_from_slice(&[0; 4]);
+
+        assert!(matches!(
+            decode(&BASE64.encode(&bytes)),
+            Err(CodecError::MissingPosition)
+        ));
+    }
+
+    /// The declared size, not the buffer length, bounds the payload — trailing
+    /// bytes are ignored the way `MessageInput` ignores them. Asserted as
+    /// equality with the untrailed decode so this cannot pass by failing.
+    #[test]
+    fn trailing_bytes_past_the_declared_size_are_ignored() {
+        let mut bytes = BASE64.decode(RICK).unwrap();
+        bytes.extend_from_slice(b"junk past the end");
+
+        assert_eq!(
+            decode(&BASE64.encode(&bytes)).unwrap(),
+            decode(RICK).unwrap()
+        );
     }
 }
