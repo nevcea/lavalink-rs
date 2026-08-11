@@ -62,7 +62,7 @@ songbird = { version = "0.6", default-features = false, features = [
 # the only default feature, pulls in realfft/num-complex for a resampler
 # variant this node doesn't use — only the sinc/fast asynchronous resamplers
 # are needed here.
-rubato = { version = "0.16", default-features = false }
+rubato = { version = "4.0", default-features = false }
 # `timescale`'s time/pitch stretcher (audio/filter.rs's TimescaleFilter) — a Rust
 # wrapper (cc + bindgen, needs a C++ compiler and libclang) around Signalsmith's
 # phase-vocoder stretcher. Not a WSOLA/SoundTouch port; see filter.rs's module docs
