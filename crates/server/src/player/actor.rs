@@ -439,12 +439,15 @@ impl PlayerActor {
             self.engine.set_paused(paused);
         }
 
-        // Cloned because userData is consumed again further down, when the request
-        // also sets a track — the two paths are mutually exclusive at run time but
-        // both are reachable from here.
-        if let Some(user_data) = request.user_data.clone().take_if(track_untouched) {
-            if let Some(track) = self.model.track.as_mut() {
-                track.user_data = user_data;
+        // Borrowed and cloned only where it is actually stored: userData is
+        // consumed again further down, when the request also sets a track, so this
+        // path cannot move out of it — but cloning ahead of the condition copied
+        // the whole blob on every patch that sets a track and threw it away.
+        if track_untouched {
+            if let Omissible::Present(user_data) = &request.user_data {
+                if let Some(track) = self.model.track.as_mut() {
+                    track.user_data = user_data.clone();
+                }
             }
         }
 

@@ -143,8 +143,12 @@ fn wants_trace(query: Option<&str>) -> bool {
 /// [`ApiError`]'s own `IntoResponse` leaves the body empty for this to fill, so this
 /// is where an error response actually gets its JSON — not a second rendering of one.
 pub async fn fill_error_path(request: Request, next: Next) -> Response {
-    let path = request.uri().path().to_owned();
-    let trace_requested = wants_trace(request.uri().query());
+    // The Uri, not the path: this runs on every request and only the error branch
+    // below ever reads it, so allocating the path here spent a String per request
+    // to serve the responses that don't have one. `http::Uri` is Bytes-backed, so
+    // keeping the whole thing is a refcount bump.
+    let uri = request.uri().clone();
+    let trace_requested = wants_trace(uri.query());
     let mut response = next.run(request).await;
 
     // Taken out rather than cloned: this is the outermost layer, so nothing after it
@@ -154,7 +158,7 @@ pub async fn fill_error_path(request: Request, next: Next) -> Response {
         return response;
     };
     let trace = trace_requested.then(|| error.message.clone());
-    (error.status, Json(error.body(&path, trace))).into_response()
+    (error.status, Json(error.body(uri.path(), trace))).into_response()
 }
 
 /// `axum::Json`, but a malformed or wrongly-typed body becomes an [`ApiError`]
