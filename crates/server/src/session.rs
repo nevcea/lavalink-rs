@@ -34,6 +34,12 @@ use crate::voice::VoiceConnection;
 /// The original's default, and what a session gets before any `PATCH /v4/sessions`.
 const DEFAULT_RESUME_TIMEOUT_SECS: i64 = 60;
 
+/// Above this, a client-supplied `timeout` in `PATCH /v4/sessions` is treated as
+/// already expired rather than turned into a real deadline — see
+/// `SessionRegistry::on_disconnect`'s comment for why this can't just be handed
+/// to `Instant::checked_add` instead. 100 years, in seconds.
+const MAX_SANE_RESUME_TIMEOUT_SECS: i64 = 100 * 365 * 24 * 60 * 60;
+
 /// How long [`Session::shutdown`] waits on a single player's destroy before giving
 /// up on it and moving on. `PlayerActor`'s own contract is that its loop never
 /// awaits I/O, so a healthy destroy finishes near-instantly — this exists only to
@@ -346,15 +352,23 @@ impl SessionRegistry {
             // expired (0) rather than panicking Duration::from_secs on a value it
             // can't represent. timeout_seconds is also an unvalidated
             // client-supplied i64 (rest/session.rs's update writes it straight
-            // through), so a huge one can overflow Instant + Duration;
-            // checked_add catches that side too, falling back to now (already
-            // expired) rather than panicking under this lock — Open has no
-            // timeout of its own, so a panic here would strand the entry Open
-            // forever instead of just failing this one disconnect.
-            let timeout = Duration::from_secs(entry.session.resume_timeout_secs().max(0) as u64);
-            entry.state = SessionState::Resumable {
-                deadline: now.checked_add(timeout).unwrap_or(now),
+            // through), so a huge one is clamped the same way instead of being
+            // handed to Duration/Instant arithmetic: Instant::checked_add's
+            // overflow behavior isn't portable enough to rely on here — on
+            // Windows, `Instant::now().checked_add(Duration::from_secs(i64::MAX
+            // as u64))` succeeds instead of overflowing, which would have left
+            // this entry "resumable" for billions of years instead of already
+            // expired. MAX_SANE_RESUME_TIMEOUT_SECS is far beyond anything a
+            // legitimate deployment configures (Lavalink's own default is 60s)
+            // and comfortably inside every platform's real Instant range, so
+            // checked_add is still a safe defensive fallback within it.
+            let requested = entry.session.resume_timeout_secs();
+            let deadline = if (0..=MAX_SANE_RESUME_TIMEOUT_SECS).contains(&requested) {
+                now.checked_add(Duration::from_secs(requested as u64)).unwrap_or(now)
+            } else {
+                now
             };
+            entry.state = SessionState::Resumable { deadline };
             entry.session.sink.pause();
             return None;
         }
