@@ -178,6 +178,21 @@ impl Shared {
         self.position_ms.store(base + elapsed_ms, Ordering::Relaxed);
     }
 
+    /// Retires the announcement for `position_ms`, leaving a newer one alone.
+    ///
+    /// Both callers ([`RingWriter::reset`] and [`RingWriter::cancel_seek`]) are
+    /// finishing one specific seek, and both run on the pump thread long after
+    /// the engine announced it — so the value they are retiring is only theirs
+    /// if it is still the one they were given.
+    fn clear_pending_seek(&self, position_ms: i64) {
+        let _ = self.pending_seek_ms.compare_exchange(
+            position_ms,
+            -1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
     /// Advances `consumed_frames` by however many whole frames `samples` (plus
     /// any sample left over from the previous call) makes up, carrying a new
     /// leftover forward rather than truncating it away — `samples` is not
@@ -326,6 +341,15 @@ impl RingWriter {
     /// clearing it here (after the rebase, before `refresh_position` runs) hands
     /// position reporting back to the normal frame-tracked path without the
     /// value it reports ever changing.
+    ///
+    /// Clears only the announcement this call is landing, hence the
+    /// compare-exchange: the engine announces on its own thread, so a second seek
+    /// can be accepted between the pump seeking the decoder and arriving here.
+    /// An unconditional clear would drop that newer target and report `base +
+    /// elapsed` until the pump worked through the second seek's own I/O — the
+    /// regress-then-jump this field exists to prevent. A failed exchange means
+    /// the pending value belongs to a later seek (or is already `-1`, as on
+    /// `open`'s initial reset), and either way is not ours to clear.
     pub fn reset(&self, position_ms: i64) {
         let mut buffer = lock(&self.shared.buffer);
         buffer.clear();
@@ -335,7 +359,7 @@ impl RingWriter {
         self.shared
             .base_position_ms
             .store(position_ms, Ordering::Relaxed);
-        self.shared.pending_seek_ms.store(-1, Ordering::Relaxed);
+        self.shared.clear_pending_seek(position_ms);
         self.shared.refresh_position();
         self.shared.space.notify_all();
     }
@@ -356,8 +380,13 @@ impl RingWriter {
     /// back to on failure (`pump.rs`'s `State::seek`). Position reporting
     /// must return to that real, unmoved position instead of holding at a
     /// target that is never going to arrive.
-    pub fn cancel_seek(&self) {
-        self.shared.pending_seek_ms.store(-1, Ordering::Relaxed);
+    ///
+    /// Takes the target it is cancelling for the same reason [`Self::reset`]
+    /// does: a seek accepted while this one was failing is still going to land,
+    /// and cancelling *it* would report a position the client was never told to
+    /// expect.
+    pub fn cancel_seek(&self, position_ms: i64) {
+        self.shared.clear_pending_seek(position_ms);
     }
 
     pub fn is_closed(&self) -> bool {
@@ -872,13 +901,71 @@ mod tests {
         read_samples(&mut reader, FRAME_SAMPLES);
         assert_eq!(position.load(Ordering::Relaxed), 90_000);
 
-        writer.cancel_seek();
+        writer.cancel_seek(90_000);
         read_samples(&mut reader, FRAME_SAMPLES);
         assert!(
             position.load(Ordering::Relaxed) > real_position,
             "reporting must resume tracking the real, unmoved position"
         );
         assert!(position.load(Ordering::Relaxed) < 90_000);
+    }
+
+    /// Scrubbing a seek bar sends seeks faster than the pump lands them. The
+    /// engine announces the second one while the pump is still finishing the
+    /// first, so the first's `reset` used to clear the second's announcement and
+    /// report `base + elapsed` for however long the second seek's own I/O took —
+    /// an HTTP `Range` re-request, so hundreds of ms of the very regress-then-jump
+    /// `pending_seek_ms` exists to prevent.
+    #[test]
+    fn landing_a_seek_does_not_retire_a_newer_one_announced_behind_it() {
+        let (writer, mut reader, position) = ring(1000);
+        writer.write(&vec![1.0; SAMPLE_RATE as usize * CHANNELS]);
+        read_samples(&mut reader, FRAME_SAMPLES);
+
+        writer.begin_seek(30_000);
+        // The engine accepts the second seek before the pump has finished the
+        // first — both announcements happen on its thread, not the pump's.
+        writer.begin_seek(90_000);
+
+        // The pump now lands the *first* seek.
+        writer.reset(30_000);
+
+        assert_eq!(
+            position.load(Ordering::Relaxed),
+            90_000,
+            "the newer seek's announcement must survive the older one landing"
+        );
+        read_samples(&mut reader, FRAME_SAMPLES);
+        assert_eq!(
+            position.load(Ordering::Relaxed),
+            90_000,
+            "and must keep holding until the seek the client was told about lands"
+        );
+
+        writer.reset(90_000);
+        assert_eq!(position.load(Ordering::Relaxed), 90_000);
+        read_samples(&mut reader, FRAME_SAMPLES);
+        assert!(position.load(Ordering::Relaxed) > 90_000);
+    }
+
+    /// The same hazard on the failure path: an unseekable target cancels its own
+    /// announcement, not the one queued behind it.
+    #[test]
+    fn cancelling_a_failed_seek_does_not_retire_a_newer_one() {
+        let (writer, mut reader, position) = ring(1000);
+        writer.write(&vec![1.0; SAMPLE_RATE as usize * CHANNELS]);
+        read_samples(&mut reader, FRAME_SAMPLES);
+
+        writer.begin_seek(30_000);
+        writer.begin_seek(90_000);
+        writer.cancel_seek(30_000);
+
+        read_samples(&mut reader, FRAME_SAMPLES);
+        assert_eq!(
+            position.load(Ordering::Relaxed),
+            90_000,
+            "a failed seek must not cancel the one announced after it"
+        );
     }
 
     #[test]
