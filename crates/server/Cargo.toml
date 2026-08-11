@@ -9,7 +9,10 @@ license.workspace = true
 [dependencies]
 lavalink-protocol = { path = "../protocol" }
 
-serde.workspace = true
+# `rc` so `Json<Arc<LoadResult>>` serializes: the loader shares one result
+# between its cache, the single-flight followers and the caller, and unwrapping
+# the Arc at the REST edge would deep-copy the whole playlist back.
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

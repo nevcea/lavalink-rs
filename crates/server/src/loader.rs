@@ -45,13 +45,19 @@ pub struct Loader {
     /// without borrowing the loader.
     managers: Vec<Arc<dyn SourceManager>>,
     cache: Mutex<HashMap<String, CacheEntry>>,
-    in_flight: Mutex<HashMap<String, broadcast::Sender<LoadResult>>>,
+    in_flight: Mutex<HashMap<String, broadcast::Sender<Arc<LoadResult>>>>,
     permits: Arc<Semaphore>,
 }
 
+/// Behind an `Arc` because a result is handed out up to three times — into the
+/// cache, to every follower waiting on the single flight, and to the caller — and
+/// a `LoadResult` is not a cheap thing to copy: one playlist is a whole
+/// `Vec<Track>`, each track carrying its base64 blob, its `TrackInfo` strings and
+/// two `serde_json::Map`s. Nothing mutates a result after it is built, so sharing
+/// one is the same value to every reader.
 #[derive(Debug, Clone)]
 struct CacheEntry {
-    result: LoadResult,
+    result: Arc<LoadResult>,
     expires_at: Instant,
 }
 
@@ -68,7 +74,7 @@ struct CacheEntry {
 struct LeaderGuard<'a> {
     loader: &'a Loader,
     identifier: &'a str,
-    sender: broadcast::Sender<LoadResult>,
+    sender: broadcast::Sender<Arc<LoadResult>>,
 }
 
 impl LeaderGuard<'_> {
@@ -109,7 +115,7 @@ impl Loader {
 
     /// Resolves an identifier. Never fails: loading problems are carried in the
     /// [`LoadResult`], because `loadtracks` answers 200 even for failures.
-    pub async fn load(&self, identifier: &str) -> LoadResult {
+    pub async fn load(&self, identifier: &str) -> Arc<LoadResult> {
         if let Some(cached) = self.cached(identifier) {
             return cached;
         }
@@ -162,9 +168,9 @@ impl Loader {
                 sender: sender.clone(),
             };
 
-            let result = self.load_uncached(identifier).await;
+            let result = Arc::new(self.load_uncached(identifier).await);
 
-            if !matches!(result, LoadResult::Error(_)) {
+            if !matches!(*result, LoadResult::Error(_)) {
                 let mut cache = lock(&self.cache);
                 if cache.len() >= MAX_CACHE_ENTRIES {
                     let now = Instant::now();
@@ -174,7 +180,7 @@ impl Loader {
                     cache.insert(
                         identifier.to_owned(),
                         CacheEntry {
-                            result: result.clone(),
+                            result: Arc::clone(&result),
                             expires_at: Instant::now() + CACHE_TTL,
                         },
                     );
@@ -186,7 +192,7 @@ impl Loader {
             // remove_if_still_ours instead of remove-by-key so this can never
             // delete a different leader's entry — see LeaderGuard's docs.
             leader_guard.remove_if_still_ours();
-            let _ = sender.send(result.clone());
+            let _ = sender.send(Arc::clone(&result));
 
             return result;
         }
@@ -324,14 +330,14 @@ impl Loader {
         lock(&self.cache).retain(|_, entry| entry.expires_at > now);
     }
 
-    fn cached(&self, identifier: &str) -> Option<LoadResult> {
+    fn cached(&self, identifier: &str) -> Option<Arc<LoadResult>> {
         let mut cache = lock(&self.cache);
         let entry = cache.get(identifier)?;
         if entry.expires_at <= Instant::now() {
             cache.remove(identifier);
             return None;
         }
-        Some(entry.result.clone())
+        Some(Arc::clone(&entry.result))
     }
 
     /// Decodes an `encodedTrack` for `decodetrack(s)` and for `PATCH` requests that
@@ -481,14 +487,14 @@ mod tests {
     #[tokio::test]
     async fn an_unclaimed_identifier_is_empty_not_an_error() {
         let (loader, loads) = loader(ok_track);
-        assert_eq!(loader.load("ytsearch:never gonna").await, LoadResult::Empty);
+        assert_eq!(*loader.load("ytsearch:never gonna").await, LoadResult::Empty);
         assert_eq!(loads.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
     async fn a_loaded_track_carries_a_decodable_encoding() {
         let (loader, _) = loader(ok_track);
-        let LoadResult::Track(track) = loader.load("https://example.invalid/a.mp3").await else {
+        let LoadResult::Track(track) = &*loader.load("https://example.invalid/a.mp3").await else {
             panic!("expected a track");
         };
 
@@ -503,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn a_search_becomes_a_search_result_with_every_track_encoded() {
         let (loader, _) = loader(search);
-        let LoadResult::Search(tracks) = loader.load("https://example.invalid/q").await else {
+        let LoadResult::Search(tracks) = &*loader.load("https://example.invalid/q").await else {
             panic!("expected a search result");
         };
 
@@ -516,7 +522,7 @@ mod tests {
     #[tokio::test]
     async fn a_playlist_becomes_a_playlist_result_with_every_track_encoded() {
         let (loader, _) = loader(playlist);
-        let LoadResult::Playlist(playlist) = loader.load("https://example.invalid/list").await
+        let LoadResult::Playlist(playlist) = &*loader.load("https://example.invalid/list").await
         else {
             panic!("expected a playlist result");
         };
@@ -536,7 +542,7 @@ mod tests {
     #[tokio::test]
     async fn an_out_of_range_selection_becomes_none() {
         let (loader, _) = loader(playlist_overselected);
-        let LoadResult::Playlist(playlist) = loader.load("https://example.invalid/list").await
+        let LoadResult::Playlist(playlist) = &*loader.load("https://example.invalid/list").await
         else {
             panic!("expected a playlist result");
         };
@@ -547,7 +553,7 @@ mod tests {
     async fn a_missing_resource_is_empty() {
         let (loader, _) = loader(missing);
         assert_eq!(
-            loader.load("https://example.invalid/gone.mp3").await,
+            *loader.load("https://example.invalid/gone.mp3").await,
             LoadResult::Empty
         );
     }
@@ -556,7 +562,7 @@ mod tests {
     async fn a_remote_failure_is_an_error_result() {
         let (loader, _) = loader(failing);
         let result = loader.load("https://example.invalid/boom.mp3").await;
-        let LoadResult::Error(exception) = result else {
+        let LoadResult::Error(exception) = &*result else {
             panic!("expected an error result");
         };
         assert_eq!(exception.severity, Severity::Common);
@@ -631,7 +637,7 @@ mod tests {
             lock(&loader.cache).insert(
                 format!("https://example.invalid/{entry}"),
                 CacheEntry {
-                    result: LoadResult::Empty,
+                    result: Arc::new(LoadResult::Empty),
                     expires_at: Instant::now() + CACHE_TTL,
                 },
             );
@@ -689,8 +695,8 @@ mod tests {
         let (loader, _) = loader(ok_track);
         let identifier = "https://example.invalid/a.mp3";
 
-        let (sender_a, _) = broadcast::channel::<LoadResult>(1);
-        let (sender_b, _) = broadcast::channel::<LoadResult>(1);
+        let (sender_a, _) = broadcast::channel::<Arc<LoadResult>>(1);
+        let (sender_b, _) = broadcast::channel::<Arc<LoadResult>>(1);
 
         lock(&loader.in_flight).insert(identifier.to_owned(), sender_a.clone());
         let stale_guard = LeaderGuard {
@@ -775,7 +781,7 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(1), loader.load(identifier))
             .await
             .expect("a fresh load for the identifier must not hang behind the cancelled leader");
-        assert!(matches!(result, LoadResult::Track(_)));
+        assert!(matches!(*result, LoadResult::Track(_)));
     }
 
     /// A manager like [`Blocking`], but counting invocations too — so a follower
@@ -865,8 +871,8 @@ mod tests {
         }
 
         let (a, b) = tokio::join!(followers.remove(0), followers.remove(0));
-        assert!(matches!(a.unwrap(), LoadResult::Track(_)));
-        assert!(matches!(b.unwrap(), LoadResult::Track(_)));
+        assert!(matches!(*a.unwrap(), LoadResult::Track(_)));
+        assert!(matches!(*b.unwrap(), LoadResult::Track(_)));
 
         // One load for the aborted leader (its OS thread was already running and
         // can't be cancelled) plus exactly one for the new leader the followers
@@ -891,7 +897,7 @@ mod tests {
         let cached = tokio::time::timeout(Duration::from_secs(1), loader.load(identifier))
             .await
             .expect("a cached load must not hang");
-        assert!(matches!(cached, LoadResult::Track(_)));
+        assert!(matches!(*cached, LoadResult::Track(_)));
         assert_eq!(loads.load(Ordering::SeqCst), 2, "the third call must be served from cache");
     }
 

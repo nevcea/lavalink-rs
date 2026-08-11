@@ -1,5 +1,7 @@
 //! `loadtracks` and `decodetrack(s)`.
 
+use std::sync::Arc;
+
 use axum::extract::State;
 use axum::Json;
 use lavalink_protocol::player::{EncodedTracks, Track, Tracks};
@@ -20,8 +22,11 @@ pub struct LoadQuery {
 pub async fn load_tracks(
     State(state): State<AppState>,
     ValidatedQuery(query): ValidatedQuery<LoadQuery>,
-) -> Json<LoadResult> {
+) -> Json<Arc<LoadResult>> {
     tracing::info!(identifier = %query.identifier, "loading");
+    // Serialized straight out of the `Arc` (serde's `rc` feature) rather than
+    // unwrapped into an owned `LoadResult`: unwrapping is exactly the deep copy
+    // the loader stopped making.
     Json(state.loader.load(&query.identifier).await)
 }
 
