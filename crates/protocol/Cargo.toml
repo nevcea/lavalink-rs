@@ -10,4 +10,8 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-base64 = "0.23"
+# 0.22, not 0.23: axum, hyper-util, reqwest and tokio-websockets all already pull
+# 0.22 into this workspace, and the API used here (`engine::general_purpose::
+# STANDARD` plus the `Engine` trait) is identical in both. Asking for 0.23 built a
+# second copy of the same crate for no difference in behaviour.
+base64 = "0.22"
