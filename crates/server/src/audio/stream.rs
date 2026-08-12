@@ -6,7 +6,7 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -271,6 +271,12 @@ pub struct HttpMediaSource {
 /// closing, which is exactly the failure mode a stalled CDN edge produces.
 struct ReaderChannel {
     chunks: Receiver<io::Result<Vec<u8>>>,
+    /// Spent read buffers returned to the reader thread for reuse. Bounded to two
+    /// entries, matching the reader's two-buffer working set (one in flight in
+    /// `chunks`, one drained here) — the reader consumes from this on every read,
+    /// so a `try_send` here that finds the channel full is a bug, not a normal
+    /// case, and dropping the buffer would silently degrade to per-read allocation.
+    returns: SyncSender<Vec<u8>>,
     /// Bytes already received but not yet handed to the caller of `read`.
     leftover: Vec<u8>,
     leftover_pos: usize,
@@ -298,13 +304,34 @@ const MIN_WINDOW_BYTES: usize = 256;
 
 impl ReaderChannel {
     fn spawn(mut response: Response) -> Self {
-        let (tx, rx) = sync_channel(2);
+        let (chunks_tx, chunks_rx) = sync_channel::<io::Result<Vec<u8>>>(2);
+        // Two entries — one buffer sits in `chunks_rx` awaiting the receiver while
+        // the other is being read into. Pre-filled so the reader never has to
+        // allocate: a warmed-up track cycles the same two Vecs forever.
+        let (returns_tx, returns_rx) = sync_channel::<Vec<u8>>(2);
+        returns_tx
+            .send(vec![0u8; READ_CHUNK_BYTES])
+            .expect("the returns channel has capacity for two, and is empty here");
+        returns_tx
+            .send(vec![0u8; READ_CHUNK_BYTES])
+            .expect("the returns channel has capacity for two, and holds one here");
         std::thread::spawn(move || {
-            let mut buf = vec![0u8; READ_CHUNK_BYTES];
             loop {
-                let outcome = response.read(&mut buf).map(|n| buf[..n].to_vec());
+                // Blocks the reader whenever both buffers are queued in `chunks_tx`
+                // and the receiver has not sent one back yet — natural backpressure
+                // that matches what `sync_channel(2)` gave us before this change.
+                // The Err arm means the receiver has been dropped; nothing to do.
+                let Ok(mut buf) = returns_rx.recv() else { return };
+                buf.resize(READ_CHUNK_BYTES, 0);
+                let outcome = match response.read(&mut buf) {
+                    Ok(n) => {
+                        buf.truncate(n);
+                        Ok(buf)
+                    }
+                    Err(error) => Err(error),
+                };
                 let at_end = matches!(&outcome, Ok(data) if data.is_empty()) || outcome.is_err();
-                if tx.send(outcome).is_err() || at_end {
+                if chunks_tx.send(outcome).is_err() || at_end {
                     // Either nobody is listening any more (a reconnect replaced
                     // this reader before it noticed) or the response is done.
                     return;
@@ -312,7 +339,8 @@ impl ReaderChannel {
             }
         });
         Self {
-            chunks: rx,
+            chunks: chunks_rx,
+            returns: returns_tx,
             leftover: Vec::new(),
             leftover_pos: 0,
             window_bytes: 0,
@@ -334,7 +362,18 @@ impl ReaderChannel {
                     // playback exception where the track simply finished.
                     let end_of_stream = data.is_empty();
                     self.window_bytes += data.len();
-                    self.leftover = data;
+                    // Hand the just-drained buffer back to the reader for reuse.
+                    // Only if it can hold a full chunk without reallocating — the
+                    // first swap sees Vec::new() from the constructor, which is
+                    // pointless to return. `try_send` never blocks: with the
+                    // two-buffer working set the channel has room by construction
+                    // (the reader just consumed the entry we're refilling), but a
+                    // full channel simply means we drop the buf and the reader
+                    // allocates a fresh one — correctness intact.
+                    let spent = std::mem::replace(&mut self.leftover, data);
+                    if spent.capacity() >= READ_CHUNK_BYTES {
+                        let _ = self.returns.try_send(spent);
+                    }
                     self.leftover_pos = 0;
 
                     // Evaluated on the same clock as the idle-gap timeout above,
