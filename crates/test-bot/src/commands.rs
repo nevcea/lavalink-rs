@@ -43,7 +43,12 @@ pub fn commands() -> Vec<CreateCommand> {
             )
             .add_option(CreateCommandOption::new(Number, "gain", "-0.25 to 1.0").required(true)),
         CreateCommand::new("lowpass").description("set the low-pass filter").add_option(
-            CreateCommandOption::new(Number, "smoothing", "smoothing factor").required(true),
+            CreateCommandOption::new(
+                Number,
+                "smoothing",
+                "higher = stronger muffling; <=1.0 no-op, try 20",
+            )
+            .required(true),
         ),
         CreateCommand::new("karaoke")
             .description("set karaoke (vocal removal) level")
