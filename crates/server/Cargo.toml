@@ -19,11 +19,11 @@ tracing.workspace = true
 
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net"] }
-futures-util = "0.3"
+futures-util.workspace = true
 async-trait = "0.1"
 
 serde_yaml = "0.9"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 rand = "0.10"
 subtle = "2"
 sysinfo = "0.39"

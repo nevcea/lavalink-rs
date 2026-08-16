@@ -11,20 +11,19 @@
 //! than argued with.
 
 pub mod encoded_track;
-pub mod error;
 pub mod filters;
+pub mod http;
 pub mod info;
 pub mod java_io;
 pub mod load_result;
 pub mod message;
 pub mod omissible;
 pub mod player;
-pub mod session;
 pub mod stats;
 
 pub use encoded_track::{DecodedTrack, SourceTail};
-pub use error::Error;
 pub use filters::Filters;
+pub use http::{Error, Session, SessionUpdate};
 pub use info::{Git, Info, Plugin, Version};
 pub use load_result::{Exception, LoadResult, Playlist, PlaylistInfo, ResultStatus, Severity};
 pub use message::{EmittedEvent, Message, TrackEndReason};
@@ -33,5 +32,4 @@ pub use player::{
     EncodedTracks, JsonObject, Player, PlayerState, PlayerUpdate, PlayerUpdateTrack, Players, Track,
     TrackInfo, Tracks, VoiceState,
 };
-pub use session::{Session, SessionUpdate};
 pub use stats::{Cpu, FrameStats, Memory, StatsData, StatsEvent};

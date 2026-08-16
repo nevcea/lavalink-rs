@@ -121,7 +121,7 @@ pub fn decode(encoded: &str) -> Result<DecodedTrack> {
     decode_bytes(&BASE64.decode(encoded)?)
 }
 
-pub fn decode_bytes(bytes: &[u8]) -> Result<DecodedTrack> {
+pub(crate) fn decode_bytes(bytes: &[u8]) -> Result<DecodedTrack> {
     let mut input = DataInput::new(bytes);
 
     let header = input.read_i32()? as u32;
@@ -232,7 +232,7 @@ pub fn encode_with_version(info: &TrackInfo, tail: &SourceTail, version: u8) -> 
     Ok(BASE64.encode(encode_to_bytes(info, tail, version)?))
 }
 
-pub fn encode_to_bytes(info: &TrackInfo, tail: &SourceTail, version: u8) -> Result<Vec<u8>> {
+pub(crate) fn encode_to_bytes(info: &TrackInfo, tail: &SourceTail, version: u8) -> Result<Vec<u8>> {
     if version == 0 || version > TRACK_INFO_VERSION {
         return Err(CodecError::UnsupportedVersion(version));
     }

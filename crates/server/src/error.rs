@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use lavalink_protocol::error::Error as ErrorBody;
+use lavalink_protocol::http::Error as ErrorBody;
 use serde::de::DeserializeOwned;
 
 use crate::player::now_epoch_ms;

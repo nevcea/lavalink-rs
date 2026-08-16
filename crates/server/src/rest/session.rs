@@ -2,7 +2,7 @@
 
 use axum::extract::State;
 use axum::Json;
-use lavalink_protocol::session::{Session, SessionUpdate};
+use lavalink_protocol::http::{Session, SessionUpdate};
 use lavalink_protocol::Omissible;
 
 use crate::error::{ApiError, ValidatedJson, ValidatedPath};
