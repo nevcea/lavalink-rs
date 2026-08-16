@@ -20,7 +20,9 @@ mod node_ws;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use lavalink_protocol::filters::{Band, Filters, LowPass};
+use lavalink_protocol::filters::{
+    Band, ChannelMix, Distortion, Filters, Karaoke, LowPass, Rotation, Timescale, Tremolo, Vibrato,
+};
 use lavalink_protocol::player::{Player, PlayerUpdate, PlayerUpdateTrack, VoiceState};
 use lavalink_protocol::{LoadResult, Omissible, Track};
 use serenity::all::{
@@ -223,6 +225,82 @@ impl Handler {
                     opt_f64(&options, "smoothing").ok_or_else(|| bad("lowpass <smoothing>"))? as f32;
                 self.apply_filters(guild, |filters| {
                     filters.low_pass = Omissible::Present(Some(LowPass { smoothing }));
+                })
+                .await
+            }
+            "karaoke" => {
+                let level = opt_f64(&options, "level").ok_or_else(|| bad("karaoke <level>"))? as f32;
+                self.apply_filters(guild, |filters| {
+                    filters.karaoke = Omissible::Present(Some(Karaoke {
+                        level,
+                        mono_level: 1.0,
+                        filter_band: 220.0,
+                        filter_width: 100.0,
+                    }));
+                })
+                .await
+            }
+            "timescale" => {
+                let speed = opt_f64(&options, "speed").unwrap_or(1.0);
+                let pitch = opt_f64(&options, "pitch").unwrap_or(1.0);
+                let rate = opt_f64(&options, "rate").unwrap_or(1.0);
+                self.apply_filters(guild, |filters| {
+                    filters.timescale = Omissible::Present(Some(Timescale { speed, pitch, rate }));
+                })
+                .await
+            }
+            "tremolo" => {
+                let usage = || bad("tremolo <frequency> <depth>");
+                let frequency = opt_f64(&options, "frequency").ok_or_else(usage)? as f32;
+                let depth = opt_f64(&options, "depth").ok_or_else(usage)? as f32;
+                self.apply_filters(guild, |filters| {
+                    filters.tremolo = Omissible::Present(Some(Tremolo { frequency, depth }));
+                })
+                .await
+            }
+            "vibrato" => {
+                let usage = || bad("vibrato <frequency> <depth>");
+                let frequency = opt_f64(&options, "frequency").ok_or_else(usage)? as f32;
+                let depth = opt_f64(&options, "depth").ok_or_else(usage)? as f32;
+                self.apply_filters(guild, |filters| {
+                    filters.vibrato = Omissible::Present(Some(Vibrato { frequency, depth }));
+                })
+                .await
+            }
+            "rotation" => {
+                let rotation_hz = opt_f64(&options, "hz").ok_or_else(|| bad("rotation <hz>"))?;
+                self.apply_filters(guild, |filters| {
+                    filters.rotation = Omissible::Present(Some(Rotation { rotation_hz }));
+                })
+                .await
+            }
+            "distortion" => {
+                let scale = opt_f64(&options, "scale").ok_or_else(|| bad("distortion <scale>"))? as f32;
+                self.apply_filters(guild, |filters| {
+                    filters.distortion = Omissible::Present(Some(Distortion {
+                        sin_offset: 0.0,
+                        sin_scale: scale,
+                        cos_offset: 0.0,
+                        cos_scale: scale,
+                        tan_offset: 0.0,
+                        tan_scale: scale,
+                        offset: 0.0,
+                        scale,
+                    }));
+                })
+                .await
+            }
+            "channelmix" => {
+                let crossfeed = opt_f64(&options, "crossfeed")
+                    .ok_or_else(|| bad("channelmix <crossfeed>"))? as f32;
+                let crossfeed = crossfeed.clamp(0.0, 1.0);
+                self.apply_filters(guild, |filters| {
+                    filters.channel_mix = Omissible::Present(Some(ChannelMix {
+                        left_to_left: 1.0 - crossfeed,
+                        left_to_right: crossfeed,
+                        right_to_left: crossfeed,
+                        right_to_right: 1.0 - crossfeed,
+                    }));
                 })
                 .await
             }
