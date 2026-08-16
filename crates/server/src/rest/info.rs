@@ -9,8 +9,15 @@ use lavalink_protocol::stats::StatsData;
 use crate::state::AppState;
 
 /// Plain text, not JSON — the original returns the bare version string.
-pub async fn version(State(state): State<AppState>) -> String {
-    state.info.version.semver.clone()
+/// `state.version_text` is pre-built in `AppState::new`, so this only bumps a
+/// refcount instead of cloning the `String` on every request. The content-type
+/// matches what axum's `String` `IntoResponse` sets by default, since that's
+/// what this replaces.
+pub async fn version(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "text/plain; charset=utf-8")],
+        state.version_text.clone(),
+    )
 }
 
 /// `Info` never changes after startup, so this serves the bytes serialized

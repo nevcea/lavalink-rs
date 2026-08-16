@@ -44,8 +44,8 @@ pub struct Loader {
     /// `Arc` rather than `Box` so a manager can be moved onto a blocking thread
     /// without borrowing the loader.
     managers: Vec<Arc<dyn SourceManager>>,
-    cache: Mutex<HashMap<String, CacheEntry>>,
-    in_flight: Mutex<HashMap<String, broadcast::Sender<Arc<LoadResult>>>>,
+    cache: Mutex<HashMap<Arc<str>, CacheEntry>>,
+    in_flight: Mutex<HashMap<Arc<str>, broadcast::Sender<Arc<LoadResult>>>>,
     permits: Arc<Semaphore>,
 }
 
@@ -128,14 +128,17 @@ impl Loader {
         loop {
             let mut receiver = None;
             let mut own_sender = None;
+            let mut own_key = None;
             {
                 let mut in_flight = lock(&self.in_flight);
                 match in_flight.get(identifier) {
                     Some(sender) => receiver = Some(sender.subscribe()),
                     None => {
                         let (sender, _) = broadcast::channel(1);
-                        in_flight.insert(identifier.to_owned(), sender.clone());
+                        let key: Arc<str> = Arc::from(identifier);
+                        in_flight.insert(Arc::clone(&key), sender.clone());
                         own_sender = Some(sender);
+                        own_key = Some(key);
                     }
                 }
             }
@@ -153,6 +156,7 @@ impl Loader {
             // No receiver means the match above took the None arm and this task
             // became the leader, inserting own_sender itself.
             let sender = own_sender.expect("the leader branch always sets own_sender");
+            let key = own_key.expect("the leader branch always sets own_key");
 
             // Guarantees the entry above is cleared even if this leader's own
             // future is dropped before load_uncached returns (e.g. an HTTP/2
@@ -178,7 +182,7 @@ impl Loader {
                 }
                 if cache.len() < MAX_CACHE_ENTRIES {
                     cache.insert(
-                        identifier.to_owned(),
+                        key,
                         CacheEntry {
                             result: Arc::clone(&result),
                             expires_at: Instant::now() + CACHE_TTL,
@@ -635,7 +639,7 @@ mod tests {
         let (loader, _) = loader(ok_track);
         for entry in 0..MAX_CACHE_ENTRIES + 10 {
             lock(&loader.cache).insert(
-                format!("https://example.invalid/{entry}"),
+                Arc::from(format!("https://example.invalid/{entry}")),
                 CacheEntry {
                     result: Arc::new(LoadResult::Empty),
                     expires_at: Instant::now() + CACHE_TTL,
@@ -698,7 +702,7 @@ mod tests {
         let (sender_a, _) = broadcast::channel::<Arc<LoadResult>>(1);
         let (sender_b, _) = broadcast::channel::<Arc<LoadResult>>(1);
 
-        lock(&loader.in_flight).insert(identifier.to_owned(), sender_a.clone());
+        lock(&loader.in_flight).insert(Arc::from(identifier), sender_a.clone());
         let stale_guard = LeaderGuard {
             loader: &loader,
             identifier,
@@ -707,7 +711,7 @@ mod tests {
 
         // A new leader takes over the same key before the stale guard drops —
         // exactly the situation remove_if_still_ours exists to detect.
-        lock(&loader.in_flight).insert(identifier.to_owned(), sender_b.clone());
+        lock(&loader.in_flight).insert(Arc::from(identifier), sender_b.clone());
 
         drop(stale_guard);
 

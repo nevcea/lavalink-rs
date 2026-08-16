@@ -41,6 +41,10 @@ pub struct AppState {
     /// rather than `Arc<Vec<u8>>` so the handler's `.clone()` is a refcount
     /// bump, not a copy of the whole buffer.
     pub info_json: axum::body::Bytes,
+    /// `info.version.semver` as bytes — `/version` serves these directly instead
+    /// of cloning the `String` on every request, the same reasoning as
+    /// `info_json` above.
+    pub version_text: axum::body::Bytes,
     /// Opens byte streams at playback time. Shared by every player.
     pub opener: Arc<StreamOpener>,
     /// Filter names a `PATCH player` is rejected for naming. Fixed at startup, and
@@ -89,6 +93,7 @@ impl AppState {
         let info_json = axum::body::Bytes::from(
             serde_json::to_vec(&info).expect("Info's fields are all plain JSON-safe types"),
         );
+        let version_text = axum::body::Bytes::from(info.version.semver.clone());
 
         Self {
             disabled_filters: config.disabled_filters().into(),
@@ -98,6 +103,7 @@ impl AppState {
             stats: Arc::new(StatsCollector::new(started_at)),
             info: Arc::new(info),
             info_json,
+            version_text,
             opener: Arc::new(opener),
             shutdown,
         }
