@@ -1,0 +1,5 @@
+target
+application.yml
+.git
+.claude
+.env
