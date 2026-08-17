@@ -335,12 +335,14 @@ field.
 ## Formatting
 
 This codebase is hand-formatted, and `cargo fmt` is deliberately not run.
-`cargo fmt --all -- --check` currently produces 84 diff hunks across nearly
-every file, and there is not one `#[rustfmt::skip]` in the tree — none of that
-churn was ever accepted. The clearest casualty would be
+`cargo fmt --all -- --check` currently produces 202 diff hunks across nearly
+every file (and grows as the tree does — re-run the check before trusting
+this number), and there is not one `#[rustfmt::skip]` in the tree — none of
+that churn was ever accepted. The clearest casualty would be
 `crates/server/src/audio/filter.rs`'s `COEFFICIENTS_48000`: fifteen aligned
 one-line literals, kept at lavaplayer's own printed precision *specifically to
 stay diffable against `Equalizer.java`*, which `rustfmt` would reflow into
-roughly 75 lines and make un-diffable. One line of documentation here beats 84
-hunks of churn. If this codebase is ever reformatted, `#[rustfmt::skip]` should
-go on that table first, on its own, before anything else moves.
+roughly 75 lines and make un-diffable. One line of documentation here beats
+hundreds of hunks of churn. If this codebase is ever reformatted,
+`#[rustfmt::skip]` should go on that table first, on its own, before anything
+else moves.

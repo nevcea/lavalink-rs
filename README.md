@@ -12,8 +12,9 @@ architecture, `MAINTENANCE.md` for what's deliberately not implemented.
 - `crates/server` (`lavalink-server`) — the node binary. REST + WS matching
   Lavalink v4 (loading, playing, filters, player updates, resuming).
   Sources: `http`/`local`/`getyarn.io` built in, `youtube`/`soundcloud`/
-  `bandcamp`/`deezer` via `yt-dlp` if it's on `PATH`. Filters: 9 of 10 —
-  `timescale` is the deliberate omission, see `MAINTENANCE.md`.
+  `bandcamp`/`deezer` via `yt-dlp` if it's on `PATH`. All 10 filters
+  implemented, `timescale` included — see `MAINTENANCE.md` for the one place
+  it deliberately diverges from the original's algorithm.
 - `crates/test-bot` (`lavalink-test-bot`) — Discord bot for end-to-end
   testing, see its README.
 
@@ -25,8 +26,9 @@ cp application.yml.example application.yml
 cargo run -p lavalink-server --release
 ```
 
-Needs a C compiler + CMake (vendored `libopus`); `yt-dlp` on `PATH` is
-optional. Listens on port `2333`, REST under `/v4/`, WS at `/v4/websocket`,
+Needs a C compiler + CMake (vendored `libopus`) and a C++ compiler + `libclang`
+(`signalsmith-stretch`'s build, for the `timescale` filter); `yt-dlp` on
+`PATH` is optional. Listens on port `2333`, REST under `/v4/`, WS at `/v4/websocket`,
 auth via the `Authorization` header — same contract as upstream, so any v4
 client library works unmodified.
 
