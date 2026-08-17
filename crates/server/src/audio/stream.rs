@@ -487,11 +487,16 @@ impl HttpMediaSource {
     }
 
     /// (Re-)issues the request starting at `offset`.
+    ///
+    /// Always sent as a `Range` request, even at `offset == 0` (`bytes=0-`): some
+    /// CDNs (googlevideo's `gir=yes` URLs among them) 403 a rangeless GET but serve
+    /// the same bytes fine once a `Range` header is present at all.
     fn connect(&mut self, offset: u64) -> Result<(), SourceError> {
-        let mut request = self.client.get(&self.url).timeout(self.request_duration);
-        if offset > 0 {
-            request = request.header(RANGE, format!("bytes={offset}-"));
-        }
+        let request = self
+            .client
+            .get(&self.url)
+            .timeout(self.request_duration)
+            .header(RANGE, format!("bytes={offset}-"));
 
         let response = request
             .send()
