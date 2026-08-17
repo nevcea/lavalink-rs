@@ -18,19 +18,64 @@ architecture, `MAINTENANCE.md` for what's deliberately not implemented.
 - `crates/test-bot` (`lavalink-test-bot`) — Discord bot for end-to-end
   testing, see its README.
 
+## Requirements
+
+- Rust — see `rust-version` in `Cargo.toml` for the minimum
+- A C compiler + CMake (vendored `libopus` via `songbird`)
+- A C++ compiler + `libclang` (`signalsmith-stretch`'s `cc`+`bindgen` build,
+  for the `timescale` filter)
+- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) on `PATH`, optional — enables
+  the youtube/soundcloud/bandcamp/deezer sources; detected once at startup,
+  auto-disabled and dropped from `/v4/info` if missing rather than failing
+  the boot
+
 ## Running
 
 ```sh
 cp application.yml.example application.yml
-# edit application.yml, then:
+# the node refuses to start with an empty lavalink.server.password (the
+# example ships "youshallnotpass" — change it for anything but local use).
+# Toggle sources under lavalink.server.sources to enable the ones you need
+# (all default off except http).
 cargo run -p lavalink-server --release
 ```
 
-Needs a C compiler + CMake (vendored `libopus`) and a C++ compiler + `libclang`
-(`signalsmith-stretch`'s build, for the `timescale` filter); `yt-dlp` on
-`PATH` is optional. Listens on port `2333`, REST under `/v4/`, WS at `/v4/websocket`,
-auth via the `Authorization` header — same contract as upstream, so any v4
-client library works unmodified.
+The node listens on port `2333` by default (`server.port` in the yml). Check
+it came up:
+
+```sh
+curl -H "Authorization: youshallnotpass" http://localhost:2333/v4/info
+```
+
+(`youshallnotpass` is the example config's default password — use whatever
+you set). REST lives under `/v4/`, the WS session endpoint is
+`/v4/websocket`, auth is the `Authorization` header on both — the same
+contract as upstream Lavalink, so any existing v4 client library
+(Lavalink.py, Wavelink, Shoukaku, ...) works against this node unmodified,
+no code changes on the bot side.
+
+### Docker
+
+```sh
+docker build -t lavalink-rs .
+docker run -p 2333:2333 -v "$(pwd)/application.yml:/app/application.yml" lavalink-rs
+```
+
+No config is baked into the image — mount your own `application.yml` as
+above (`yt-dlp` is preinstalled in the image, so the four sources that need
+it work out of the box once enabled in the config).
+
+### Testing
+
+```sh
+cargo test --workspace       # unit tests, no external services needed
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+`cargo test` covers DSP math, the wire protocol, and pipeline logic, but not
+real audio over a live voice connection — that needs `crates/test-bot`
+driving a real Discord voice channel; see its README before touching the
+audio pipeline.
 
 ## License
 
