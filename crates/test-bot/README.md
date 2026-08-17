@@ -50,7 +50,7 @@ once. To run each half by hand instead:
 | `/stop` `/pause` `/resume` `/seek <seconds>` `/volume <0-1000>` | player control |
 | `/np` | this guild's player |
 | `/players` | every player on the node |
-| `/eq <band 0-14> <gain>` `/lowpass <smoothing>` `/clearfilters` `/filters` | the DSP chain |
+| `/eq <band 0-14> <gain>` `/lowpass <smoothing>` `/karaoke <level>` `/timescale [speed] [pitch] [rate]` `/tremolo <frequency> <depth>` `/vibrato <frequency> <depth>` `/rotation <hz>` `/distortion <scale>` `/channelmix <crossfeed>` `/clearfilters` `/filters` | the DSP chain |
 | `/ping` | gateway (Discord) latency, from serenity's shard heartbeat |
 | `/info` `/stats` | node identity and counters |
 
