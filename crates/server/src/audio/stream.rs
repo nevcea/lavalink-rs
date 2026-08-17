@@ -454,8 +454,14 @@ impl HttpMediaSource {
         // and applies read_timeout on the receiving end — stalls surface as read
         // errors, same as a dropped connection. connect applies request_duration
         // per request instead, as a ceiling on how long any one request may run.
+        // Every connect() below replaces `self.reader` outright rather than reusing
+        // the old response, so a pooled idle connection is never actually reused —
+        // it can only go stale and race a server that's already closed it (seen as
+        // a flaky "error sending request" on reconnect/seek). Disabling the pool
+        // trades nothing for removing that race.
         let mut builder = Client::builder()
             .connect_timeout(connect_timeout)
+            .pool_max_idle_per_host(0)
             .user_agent(user_agent.unwrap_or(concat!("lavalink-rs/", env!("CARGO_PKG_VERSION"))));
         if let Some(proxy) = proxy {
             builder = builder.proxy(proxy);
