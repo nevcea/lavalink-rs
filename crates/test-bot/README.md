@@ -21,8 +21,8 @@ with disjoint features: `gateway` here, `driver` in the server.
 
 `scripts/dev.sh` (repo root) starts the node in the background, waits for it
 to come up, then runs the bot in the foreground — Ctrl+C stops both. Needs
-`DISCORD_TOKEN` set (or in `.env`) and steps 2-3 below done once. To run each
-half by hand instead:
+`DISCORD_TOKEN` and `TEST_GUILD_ID` set (or in `.env`) and step 2 below done
+once. To run each half by hand instead:
 
 1. `cp application.yml.example application.yml` (once), then
    `cargo run -p lavalink-server -- application.yml`. Enable whichever
