@@ -1,11 +1,11 @@
 //! Slash command registration and typed option lookup.
 //!
-//! `Handler::dispatch` (in `main.rs`) is what runs a command; this module is only
+//! Handler::dispatch (in main.rs) is what runs a command; this module is only
 //! what declares one to Discord and reads its arguments back out.
 
 use serenity::all::{CommandOptionType, CreateCommand, CreateCommandOption, ResolvedOption, ResolvedValue};
 
-/// Every slash command this bot registers, guild-scoped in `ready`.
+/// Every slash command this bot registers, guild-scoped in ready.
 pub fn commands() -> Vec<CreateCommand> {
     use CommandOptionType::{Integer, Number, String as Str};
 

@@ -1,9 +1,8 @@
-//! The node's websocket, from the client side.
+//! The node's WebSocket, from the client side.
 //!
-//! Two jobs. It is where the session id comes from — no player can be addressed
-//! before `ready` arrives — and it is where the event sequence the node claims to
-//! produce becomes visible. Every message is logged rather than filtered, because
-//! the thing being tested is precisely what the node chooses to send.
+//! It provides the session ID needed to address players and exposes the node's event
+//! sequence. Every message is logged because the test is concerned with everything
+//! the node sends.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,8 +44,7 @@ async fn connect_once(
     let headers = request.headers_mut();
     headers.insert("Authorization", password.parse()?);
     headers.insert("User-Id", user_id.to_string().parse()?);
-    // The node logs a warning when this is missing, and asking for it while not
-    // sending it would be rude.
+    // Request resumption only when the matching resume timeout is also configured.
     headers.insert(
         "Client-Name",
         concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")).parse()?,
@@ -108,7 +106,7 @@ async fn handle(message: Message, session: &Arc<RwLock<Option<String>>>) {
 }
 
 /// Events are logged at info with their distinguishing field spelled out, because
-/// the sequence — and the `reason` on a `TrackEnd` in particular — is what the
+/// the sequence — and the reason on a TrackEnd in particular — is what the
 /// manual verification in the README compares against.
 fn log_event(event: EmittedEvent) {
     match event {
@@ -160,7 +158,7 @@ fn log_event(event: EmittedEvent) {
         } => {
             // 4006 and 4014 are the two a client is expected to recover from by
             // re-sending its voice state, so they are called out rather than left
-            // for the reader to recognise.
+            // in the general event log.
             tracing::warn!(
                 guild = %guild_id,
                 code,

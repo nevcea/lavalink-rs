@@ -3,15 +3,15 @@
 //! Everything reaching the ring must be 48kHz stereo. Sources are usually 44.1kHz,
 //! often mono, occasionally 5.1, so this sits between the decoder and the filters.
 //!
-//! # `resamplingQuality`
+//! resamplingQuality
 //!
 //! lavaplayer offers three quality settings backed by a windowed-sinc
-//! implementation. `ResamplingQuality::Low` (lavaplayer's own default) stays on
+//! implementation. ResamplingQuality::Low (lavaplayer's own default) stays on
 //! the hand-written Catmull-Rom interpolation below: continuous in the first
 //! derivative, so no discontinuities, but with more high-frequency imaging than a
 //! proper band-limited resampler — and, being arithmetic rather than a filter
-//! bank, free. `Medium`/`High` route through [`SincEngine`], a thin wrapper over
-//! `rubato::Async` in sinc mode, matching lavaplayer's actual approach at those tiers.
+//! bank, free. Medium/High route through SincEngine, a thin wrapper over
+//! rubato::Async in sinc mode, matching lavaplayer's actual approach at those tiers.
 
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{
@@ -34,29 +34,29 @@ pub struct Resampler {
     /// The last frames of the previous buffer, so an upsampling call can interpolate
     /// across a block boundary instead of guessing at the edge. Interpolation reads
     /// one frame behind the cursor and two ahead, so three is all that is ever
-    /// needed, and a fixed array says so — this used to be a `Vec` that the whole
+    /// needed, and a fixed array says so — this used to be a Vec that the whole
     /// decoded packet was appended onto and then drained back down to three frames,
     /// which cost a full-buffer copy per packet to carry three frames across.
     prologue: [[f32; CHANNELS]; PROLOGUE_FRAMES],
-    /// How much of `prologue` is live. Below `PROLOGUE_FRAMES` only at the start of a
-    /// stream and after a [`Resampler::reset`].
+    /// How much of prologue is live. Below PROLOGUE_FRAMES only at the start of a
+    /// stream and after a Resampler::reset.
     prologue_len: usize,
-    /// The working buffer: [`Resampler::fill_stereo_frames`] writes the live
+    /// The working buffer: Resampler::fill_stereo_frames writes the live
     /// prologue followed by this call's converted frames, and the interpolation
     /// loop reads straight out of it. Reused across calls, so a warmed-up pump
     /// allocates nothing here.
     frames: Vec<[f32; CHANNELS]>,
-    /// Set only when actual rate conversion is needed and `Medium`/`High` was
-    /// configured; `Low`, and any source that is already 48kHz, never construct
+    /// Set only when actual rate conversion is needed and Medium/High was
+    /// configured; Low, and any source that is already 48kHz, never construct
     /// one. When present, it replaces the Catmull-Rom loop below entirely rather
-    /// than the two coexisting — `prologue`/`cursor` stay unused in that case,
+    /// than the two coexisting — prologue/cursor stay unused in that case,
     /// since rubato carries its own delay-line state across calls instead of
-    /// needing the artificial neighbour padding Catmull-Rom does.
+    /// needing the artificial neighbor padding Catmull-Rom does.
     sinc: Option<SincEngine>,
 }
 
 /// Frames carried from one buffer to the next: one for the interpolator's left-hand
-/// neighbour, two for the right-hand pair it stops short of.
+/// neighbor, two for the right-hand pair it stops short of.
 const PROLOGUE_FRAMES: usize = 3;
 
 impl Resampler {
@@ -82,13 +82,13 @@ impl Resampler {
         self.source_rate == SAMPLE_RATE && self.source_channels == CHANNELS
     }
 
-    /// Whether this resampler is configured for exactly `rate`/`channels`.
+    /// Whether this resampler is configured for exactly rate/channels.
     ///
     /// The pump checks every decoded packet against what the decoder actually
-    /// produced, because [`Resampler::new`] is built from what the *container*
-    /// declared and the two can disagree — see `pump.rs`'s `decode_loop`.
-    /// Normalised the same way `new` normalises its arguments, so a caller that
-    /// passes the same values `new` was given always gets `true`.
+    /// produced, because Resampler::new is built from what the container
+    /// declared and the two can disagree — see pump.rs's decode_loop.
+    /// Normalised the same way new normalises its arguments, so a caller that
+    /// passes the same values new was given always gets true.
     pub fn matches_source(&self, rate: u32, channels: usize) -> bool {
         self.source_rate == rate.max(1) && self.source_channels == channels.max(1)
     }
@@ -104,7 +104,7 @@ impl Resampler {
     }
 
     /// Whether anything from a previous buffer is still carried — what
-    /// [`Self::reset`] throws away. Exists so `pump`'s tests can tell a seek that
+    /// Self::reset throws away. Exists so pump's tests can tell a seek that
     /// reset this from one that left it alone, which is otherwise only observable
     /// as a discontinuity in the audio itself.
     #[cfg(test)]
@@ -112,8 +112,8 @@ impl Resampler {
         self.cursor != 0.0 || self.prologue_len > 0
     }
 
-    /// Converts one buffer of interleaved source samples, allocating a fresh `Vec`
-    /// for the result. A thin wrapper over [`Self::process_into`] that exists only so
+    /// Converts one buffer of interleaved source samples, allocating a fresh Vec
+    /// for the result. A thin wrapper over Self::process_into that exists only so
     /// the tests below can read a return value; nothing on the playback path allocates
     /// per buffer, so this must not grow a production caller.
     #[cfg(test)]
@@ -123,7 +123,7 @@ impl Resampler {
         out
     }
 
-    /// Converts one buffer of interleaved source samples into `out`, which is
+    /// Converts one buffer of interleaved source samples into out, which is
     /// cleared first and otherwise reused across calls — the pump's hot-path entry
     /// point, so a decoded packet costs no allocation here once warmed up.
     pub fn process_into(&mut self, input: &[f32], out: &mut Vec<f32>) {
@@ -198,7 +198,7 @@ impl Resampler {
             let t = (cursor - base) as f32;
 
             if index == 0 {
-                // The one frame with no left-hand neighbour, so p0 repeats p1.
+                // The one frame with no left-hand neighbor, so p0 repeats p1.
                 // This is what the clamp used to produce, hoisted out of the inner
                 // loop: it is true for at most the first output frame of a buffer,
                 // and was being re-decided for every tap of every frame.
@@ -240,8 +240,8 @@ impl Resampler {
         self.cursor = cursor - dropped as f64;
     }
 
-    /// Writes the first `prologue` frames of [`Self::prologue`] followed by `input`
-    /// converted to stereo frames, into `self.frames`.
+    /// Writes the first prologue frames of Self::prologue followed by input
+    /// converted to stereo frames, into self.frames.
     fn fill_stereo_frames(&mut self, input: &[f32], prologue: usize) {
         let channels = self.source_channels;
         self.frames.clear();
@@ -258,21 +258,21 @@ impl Resampler {
     }
 }
 
-/// Windowed-sinc resampling for [`ResamplingQuality::Medium`]/`High`, wrapping
-/// `rubato::Async` (sinc, fixed input size). Never constructed for `Low` — that
+/// Windowed-sinc resampling for ResamplingQuality::Medium/High, wrapping
+/// rubato::Async (sinc, fixed input size). Never constructed for Low — that
 /// stays on the Catmull-Rom path above.
 ///
-/// `Debug` is hand-rolled (not derived) because `Async` itself has no `Debug`
-/// impl — its precomputed sinc filter table isn't something a `{:?}` on the
-/// owning [`Resampler`] needs to see anyway.
+/// Debug is hand-rolled (not derived) because Async itself has no Debug
+/// impl — its precomputed sinc filter table isn't something a {:?} on the
+/// owning Resampler needs to see anyway.
 struct SincEngine {
     resampler: Async<f32>,
-    /// Stereo frames already converted by [`Resampler::fill_stereo_frames`],
-    /// waiting for enough to submit one call to `resampler`
-    /// ([`rubato::Resampler::input_frames_next`] frames, fixed for the engine's
+    /// Stereo frames already converted by Resampler::fill_stereo_frames,
+    /// waiting for enough to submit one call to resampler
+    /// (rubato::Resampler::input_frames_next frames, fixed for the engine's
     /// lifetime since the resample ratio is never changed after construction).
     pending: Vec<[f32; CHANNELS]>,
-    /// Planar scratch reused across calls — `rubato` takes and returns
+    /// Planar scratch reused across calls — rubato takes and returns
     /// non-interleaved buffers, unlike everything else in this pipeline.
     planar_in: Vec<Vec<f32>>,
     planar_out: Vec<Vec<f32>>,
@@ -320,10 +320,10 @@ impl SincEngine {
         self.pending.clear();
     }
 
-    /// Feeds newly-converted `frames` in, writing any fully-resampled output onto
-    /// `out` (interleaved). Frames short of a full chunk are held in `pending`
+    /// Feeds newly-converted frames in, writing any fully-resampled output onto
+    /// out (interleaved). Frames short of a full chunk are held in pending
     /// for the next call, the same carry-across-buffers shape the Catmull-Rom
-    /// path uses `prologue` for.
+    /// path uses prologue for.
     fn process_into(&mut self, frames: &[[f32; CHANNELS]], out: &mut Vec<f32>) {
         self.pending.extend_from_slice(frames);
 
@@ -385,7 +385,7 @@ fn sinc_params(
     }
 }
 
-/// Catmull-Rom spline through `p1` and `p2`, using `p0` and `p3` for the slopes.
+/// Catmull-Rom spline through p1 and p2, using p0 and p3 for the slopes.
 fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
     let t2 = t * t;
     let t3 = t2 * t;
@@ -438,15 +438,15 @@ mod tests {
             .collect()
     }
 
-    /// `reset` is what a seek calls, and a seek lands somewhere unrelated to where
+    /// reset is what a seek calls, and a seek lands somewhere unrelated to where
     /// the last buffer left off. Any frame or cursor offset surviving it would
     /// interpolate the new position against the old one — a click at the start of
     /// every seek.
     ///
-    /// Stronger than `a_reset_clears_carried_state` below, which checks only that
+    /// Stronger than a_reset_clears_carried_state below, which checks only that
     /// the first output frame follows the new input: this asserts the reset
     /// resampler is indistinguishable from a fresh one over a whole buffer, which is
-    /// what the carried `cursor` and the retained tail together have to guarantee.
+    /// what the carried cursor and the retained tail together have to guarantee.
     #[test]
     fn reset_leaves_nothing_of_the_previous_position_behind() {
         let input = ramp(2_000);
@@ -484,8 +484,8 @@ mod tests {
 
     /// A stray trailing sample (an odd-length buffer, which should not happen for
     /// interleaved stereo but is not this function's job to assume) is dropped
-    /// rather than copied half-formed, matching what `fill_stereo_frames`'s
-    /// `chunks_exact` used to do on the slow path.
+    /// rather than copied half-formed, matching what fill_stereo_frames's
+    /// chunks_exact used to do on the slow path.
     #[test]
     fn passthrough_drops_an_incomplete_trailing_frame() {
         let mut resampler = Resampler::new(SAMPLE_RATE, CHANNELS, ResamplingQuality::Low);
@@ -543,18 +543,18 @@ mod tests {
     ///
     /// The pump hands over whatever symphonia happened to decode, so chunk sizes are
     /// not ours to choose — hence the sweep over sizes down to a single frame, well
-    /// past anything a real decoder produces. Get the `cursor - dropped` rebase
+    /// past anything a real decoder produces. Get the cursor - dropped rebase
     /// wrong and frames are duplicated or skipped at every boundary; at a realistic
     /// packet size that is a click ten times a second.
     ///
     /// Two tolerances, both load-bearing:
     ///
-    /// * **Length, ±1 frame.** The tail is held back two frames for the next call's
+    /// • Length, ±1 frame. The tail is held back two frames for the next call's
     ///   right-hand interpolation neighbours, and where that lands depends on where
     ///   the last boundary fell. The stream never gets those frames back either way.
-    /// * **Samples, 1e-4.** One-shot, the cursor climbs to the length of the whole
+    /// • Samples, 1e-4. One-shot, the cursor climbs to the length of the whole
     ///   input before its single rebase; chunked, it is rebased near zero every
-    ///   call, so `cursor += step` accumulates rounding differently. That is a
+    ///   call, so cursor += step accumulates rounding differently. That is a
     ///   ~1e-11 effect. A frame slip is a ~1e-1 effect, which is what this catches.
     #[test]
     fn chunking_does_not_change_the_result() {
@@ -610,8 +610,8 @@ mod tests {
         assert!(resampler.process(&[]).is_empty());
     }
 
-    /// `Low`, and any source already at 48kHz, must never construct a
-    /// `SincEngine` — it's meant to be the zero-cost tier, not merely
+    /// Low, and any source already at 48kHz, must never construct a
+    /// SincEngine — it's meant to be the zero-cost tier, not merely
     /// unused-until-called.
     #[test]
     fn low_and_passthrough_never_construct_a_sinc_engine() {
@@ -620,8 +620,8 @@ mod tests {
         assert!(Resampler::new(SAMPLE_RATE, 1, ResamplingQuality::High).sinc.is_none());
     }
 
-    /// The inverse: real rate conversion at `Medium`/`High` must actually route
-    /// through `SincEngine`, not silently fall back to Catmull-Rom.
+    /// The inverse: real rate conversion at Medium/High must actually route
+    /// through SincEngine, not silently fall back to Catmull-Rom.
     #[test]
     fn medium_and_high_construct_a_sinc_engine_when_converting() {
         assert!(Resampler::new(44_100, CHANNELS, ResamplingQuality::Medium).sinc.is_some());
@@ -690,11 +690,11 @@ mod tests {
         }
     }
 
-    /// Unlike the Catmull-Rom path (which needs a `±1 frame` / `1e-4` tolerance,
-    /// see `chunking_does_not_change_the_result`), `SincEngine` accumulates raw
+    /// Unlike the Catmull-Rom path (which needs a ±1 frame / 1e-4 tolerance,
+    /// see chunking_does_not_change_the_result), SincEngine accumulates raw
     /// stereo frames across calls with no per-call boundary effects at all —
-    /// `rubato` only ever sees fixed, buffer-call-independent chunks — so
-    /// chunking must reproduce the *exact* same output, not merely a close one,
+    /// rubato only ever sees fixed, buffer-call-independent chunks — so
+    /// chunking must reproduce the exact same output, not merely a close one,
     /// up to whatever the final incomplete chunk holds back.
     #[test]
     fn sinc_chunking_does_not_change_the_result() {
@@ -760,7 +760,7 @@ mod tests {
     /// The clamp-inside-the-tap-read form the interpolation loop used to have.
     ///
     /// Kept verbatim as a reference because hoisting that clamp out is a claim about
-    /// *exact* output — the same four samples combined the same way, only reached
+    /// exact output — the same four samples combined the same way, only reached
     /// differently — and the tests above are all property checks (peak, length,
     /// finiteness) that a small arithmetic drift would slip straight past.
     fn clamped_reference(source_rate: u32, source_channels: usize, input: &[f32]) -> Vec<f32> {

@@ -1,8 +1,8 @@
-//! `application.yml` — the original's keys, kept so an existing deployment's config
+//! application.yml — the original's keys, kept so an existing deployment's config
 //! file drops in unchanged.
 //!
 //! Keys belonging to features we do not ship (plugins, ratelimit, metrics, sentry,
-//! logback) are simply not modelled; unknown keys are ignored rather than rejected,
+//! logback) are not modeled; unknown keys are ignored rather than rejected,
 //! because rejecting them would make a working Lavalink config fail to start here
 //! for no gain.
 
@@ -52,7 +52,7 @@ impl Config {
     ///
     /// Two sources feed this: filters switched off in the config, and filters we
     /// never implemented. The original only knows the first kind, but the wire
-    /// behaviour — 400 listing the names — is identical, so clients see nothing new.
+    /// behavior — 400 listing the names — is identical, so clients see nothing new.
     pub fn disabled_filters(&self) -> Vec<String> {
         lavalink_protocol::filters::FILTER_ORDER
             .iter()
@@ -103,10 +103,10 @@ pub struct Lavalink {
     pub server: ServerConfig,
 }
 
-/// lavaplayer's `AudioConfiguration.ResamplingQuality`. `Low` is lavaplayer's own
+/// lavaplayer's AudioConfiguration.ResamplingQuality. Low is lavaplayer's own
 /// default and is backed by the existing Catmull-Rom resampler (unchanged, zero
-/// extra cost); `Medium`/`High` route through `rubato`'s windowed-sinc resampler —
-/// see `audio/resample.rs`.
+/// extra cost); Medium/High route through rubato's windowed-sinc resampler —
+/// see audio/resample.rs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum ResamplingQuality {
@@ -121,24 +121,24 @@ pub enum ResamplingQuality {
 pub struct ServerConfig {
     pub password: String,
     pub sources: Sources,
-    /// Absent names default to enabled, matching `InfoRestHandler.kt:36-38`.
+    /// Absent names default to enabled, matching InfoRestHandler.kt:36-38.
     pub filters: BTreeMap<String, bool>,
     /// Milliseconds of decoded audio buffered per player.
     pub frame_buffer_duration_ms: u32,
     pub resampling_quality: ResamplingQuality,
-    /// How long a player may produce no audio before `TrackStuckEvent`.
+    /// How long a player may produce no audio before TrackStuckEvent.
     pub track_stuck_threshold_ms: u64,
-    /// Seconds between `playerUpdate` messages.
+    /// Seconds between playerUpdate messages.
     pub player_update_interval: u64,
     pub http_config: HttpConfig,
-    /// Gates whether `YouTubeSource` claims `ytsearch:` at all. `false` makes an
+    /// Gates whether YouTubeSource claims ytsearch: at all. false makes an
     /// otherwise-enabled YouTube source still resolve direct URLs, just not
     /// bare search terms — the same distinction the original's key draws.
     pub youtube_search_enabled: bool,
-    /// Same idea as `youtube_search_enabled`, for `scsearch:`.
+    /// Same idea as youtube_search_enabled, for scsearch:.
     pub soundcloud_search_enabled: bool,
     /// The original's unit is "pages of 100"; ours is a flat track count, so this
-    /// is multiplied by 100 in `main.rs` before it reaches `YtDlp`.
+    /// is multiplied by 100 in main.rs before it reaches YtDlp.
     pub youtube_playlist_load_limit: u32,
     pub timeouts: Timeouts,
 }
@@ -162,9 +162,9 @@ impl Default for ServerConfig {
     }
 }
 
-/// `lavalink.server.timeouts`. Only the two keys that map onto something this
-/// node actually has are modelled — see `MAINTENANCE.md` for
-/// `connectionRequestTimeoutMs`, which does not.
+/// lavalink.server.timeouts. Only the two keys that map onto something this
+/// node actually has are modeled — see MAINTENANCE.md for
+/// connectionRequestTimeoutMs, which does not.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Timeouts {
@@ -184,7 +184,7 @@ impl Default for Timeouts {
 /// A forward proxy every outbound HTTP request this node makes — every source's
 /// own client, and yt-dlp's own fetches — should route through.
 ///
-/// `application.yml.example` warns that running the `http` source without one
+/// application.yml.example warns that running the http source without one
 /// configured can expose this node's IP address to whatever it fetches; this is
 /// what backs that warning.
 #[derive(Debug, Clone, Deserialize)]
@@ -208,7 +208,7 @@ impl Default for HttpConfig {
 }
 
 impl HttpConfig {
-    /// `None` when no proxy host is configured, which is the default — a proxy is
+    /// None when no proxy host is configured, which is the default — a proxy is
     /// opt-in, not assumed.
     fn host_port(&self) -> Option<String> {
         if self.proxy_host.is_empty() {
@@ -217,8 +217,8 @@ impl HttpConfig {
         Some(format!("{}:{}", self.proxy_host, self.proxy_port))
     }
 
-    /// For `reqwest::Proxy::all`, which takes credentials through its own
-    /// `basic_auth` builder call rather than embedded in the URL.
+    /// For reqwest::Proxy::all, which takes credentials through its own
+    /// basic_auth builder call rather than embedded in the URL.
     pub fn reqwest_proxy_url(&self) -> Option<String> {
         self.host_port().map(|host_port| format!("http://{host_port}"))
     }
@@ -227,7 +227,7 @@ impl HttpConfig {
         (!self.proxy_user.is_empty()).then_some((self.proxy_user.as_str(), self.proxy_password.as_str()))
     }
 
-    /// The single `[user:password@]host:port` form yt-dlp's own `--proxy` flag
+    /// The single [user:password@]host:port form yt-dlp's own --proxy flag
     /// expects credentials embedded in.
     pub fn ytdlp_proxy_arg(&self) -> Option<String> {
         let host_port = self.host_port()?;
@@ -251,10 +251,10 @@ pub struct Sources {
     /// Also served by yt-dlp, and subject to the same startup detection.
     pub bandcamp: bool,
     /// Needs no key of its own, but playback substitutes a YouTube match — see
-    /// `audio::source::deezer` — so it is subject to the same yt-dlp detection as
+    /// audio::source::deezer — so it is subject to the same yt-dlp detection as
     /// the sources above despite not using yt-dlp to load.
     pub deezer: bool,
-    /// Does not use yt-dlp — see `audio::source::getyarn`.
+    /// Does not use yt-dlp — see audio::source::getyarn.
     pub getyarn: bool,
 }
 

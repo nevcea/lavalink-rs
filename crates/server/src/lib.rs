@@ -1,36 +1,30 @@
 //! A small Lavalink v4 compatible audio node.
 //!
-//! # What this is
+//! What this is
 //!
-//! A port of Lavalink v4's server behaviour, with the wire kept identical and the
+//! A port of Lavalink v4's server behavior, with the wire kept identical and the
 //! internals rebuilt. The governing rule is that anything a client can observe —
 //! response bodies, status codes, event sequences — follows the original, including
 //! where the original looks accidental. Improvements are confined to what a client
 //! cannot see: concurrency, resource ownership, and the handful of places where the
 //! original simply crashes.
 //!
-//! # What is fixed, and where to look
+//! Architecture
 //!
-//! | | |
-//! |---|---|
-//! | one session registry instead of two half-safe maps | [`session`] |
-//! | resume ownership taken atomically, deadlines never orphaned | [`session`] |
-//! | no blocking work under a per-guild lock | [`player::actor`] |
-//! | voice and engine reports cannot be starved by REST traffic | [`player::actor`] |
-//! | reads do not mutate state | [`player::state`] |
-//! | bounded, prioritised outbound queue | [`sink`] |
-//! | node-wide ticks instead of per-session schedulers | [`ticker`] |
-//! | single-flight, cached loading off the async threads | [`loader`] |
-//! | constant-time password comparison | [`auth`] |
-//! | `User-Id` validated instead of asserted | [`ws`] |
+//! session owns the unified registry, atomic resume claims, and deadlines.
+//! player::actor keeps blocking work outside guild state and prioritizes engine and
+//! voice reports over REST traffic. player::state keeps reads side-effect free.
+//! sink bounds the outbound queue, while ticker provides node-wide scheduling.
+//! loader provides single-flight cached loading outside async worker threads.
+//! auth compares passwords in constant time, and ws validates User-Id.
 //!
-//! # What is not implemented
+//! What is not implemented
 //!
 //! Plugins, route planning and IP rotation. Each is advertised honestly rather than
-//! stubbed: `/v4/info` lists only what really runs, and a request naming a filter
-//! this node does not have is rejected with the original's 400. `MAINTENANCE.md`
-//! records why for each. `timescale` used to belong on this list — see
-//! `audio::filter`'s module docs for why it does not any more.
+//! stubbed: /v4/info lists only what really runs, and a request naming a filter
+//! this node does not have is rejected with the original's 400. MAINTENANCE.md
+//! records why for each. timescale used to belong on this list — see
+//! audio::filter's module docs for why it does not any more.
 
 // The default limit overflows when the trait solver checks auto-trait bounds
 // (Send/Sync) on the full REST router as one type — AppState pulls in
@@ -67,7 +61,7 @@ pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, 
 
 /// Fixtures shared across this crate's test modules.
 ///
-/// Not to be confused with [`audio::testing`], which holds fake collaborators for
+/// Not to be confused with audio::testing, which holds fake collaborators for
 /// the player actor. This is only for values that several unrelated modules need to
 /// construct and none of them care about.
 #[cfg(test)]
@@ -83,7 +77,7 @@ pub mod testing {
     use crate::voice::VoiceConnection;
 
     /// A fully-populated track, for tests that need one but do not care what is in
-    /// it. `title` is the one field callers routinely tell apart, so it is the only
+    /// it. title is the one field callers routinely tell apart, so it is the only
     /// parameter; anything asserting on the rest should build its own literal and
     /// say why.
     pub fn track(title: &str) -> Track {
@@ -105,10 +99,10 @@ pub mod testing {
         )
     }
 
-    /// A player actor + voice connection pair, wired the way `AppState::player`
-    /// wires production ones. `sink` is a parameter rather than always built
+    /// A player actor + voice connection pair, wired the way AppState::player
+    /// wires production ones. sink is a parameter rather than always built
     /// fresh, so a test can inspect the messages the spawned actor emits through
-    /// it (matching the session's own sink, in `AppState::player`'s wiring).
+    /// it (matching the session's own sink, in AppState::player's wiring).
     pub fn dummy_pair(guild_id: u64, sink: Arc<Sink>) -> (PlayerHandle, Arc<VoiceConnection>) {
         let voice_updates: VoiceUpdateSlot = Arc::new(OnceLock::new());
         let voice = Arc::new(VoiceConnection::new(guild_id, 1, Arc::clone(&voice_updates)));

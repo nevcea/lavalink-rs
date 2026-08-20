@@ -1,28 +1,28 @@
-//! The outbound websocket queue and its backpressure policy.
+//! The outbound WebSocket queue and its backpressure policy.
 //!
 //! The original writes straight into the Undertow channel with no bound
-//! (`SocketContext.kt:164`) and queues resume events in an unbounded
-//! `ConcurrentLinkedQueue` (`:74`). Both are unbounded in the direction that hurts:
+//! (SocketContext.kt:164) and queues resume events in an unbounded
+//! ConcurrentLinkedQueue (:74). Both are unbounded in the direction that hurts:
 //! a client that stops reading grows the server's memory until something breaks.
 //!
 //! Here the queue is bounded, and messages are split into two lanes:
 //!
-//! * Essential — ready and every event. Mutual order preserved, and not dropped
+//! • Essential — ready and every event. Mutual order preserved, and not dropped
 //!   in the sense that matters for a connected client: ws.rs closes the session
 //!   with 1008 once 2048 are outstanding, well under this lane's own 4096 cap,
 //!   so a connected client that is actually draining never sees one lost. A
-//!   resumable (detached) session has no websocket for anything to notice that
+//!   resumable (detached) session has no WebSocket for anything to notice that
 //!   on, so it only gets caught at the next per-second sweep tick
 //!   (SessionRegistry::sweep_expired polling is_overflowing) — every producer
 //!   here discards a SendError::Overflow (send's own Err case), so an essential
 //!   really can be silently lost for up to that one tick if a detached
 //!   session's queue crosses 4096 between sweeps.
-//! * **Snapshots** — `playerUpdate` and `stats`. Coalesced by key: an unsent update
+//! • Snapshots — playerUpdate and stats. Coalesced by key: an unsent update
 //!   for a guild is replaced by the newer one. Nothing is lost that the next message
 //!   does not already carry.
 //!
 //! Essentials are drained before snapshots, so a burst of updates cannot delay an
-//! event. The reverse ordering (a `playerUpdate` overtaking a `TrackStart`) is the
+//! event. The reverse ordering (a playerUpdate overtaking a TrackStart) is the
 //! one clients would notice.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -36,9 +36,9 @@ use tokio::sync::Notify;
 /// Generous: a healthy client drains continuously, and the only way to reach this
 /// is a client that has stopped reading entirely.
 ///
-/// `pub(crate)` rather than private: `ws.rs`'s `overflow_closes` needs the exact
-/// value it shares with [`Sink::send`], so a connected client that reaches actual
-/// data loss (this cap, not just [`crate::ws`]'s own lower `OVERFLOW_THRESHOLD`)
+/// pub(crate) rather than private: ws.rs's overflow_closes needs the exact
+/// value it shares with Sink::send, so a connected client that reaches actual
+/// data loss (this cap, not just crate::ws's own lower OVERFLOW_THRESHOLD)
 /// is closed unconditionally rather than only when the grace-period-after-resume
 /// logic happens to have armed.
 pub(crate) const ESSENTIAL_CAPACITY: usize = 4096;
@@ -54,10 +54,10 @@ pub enum SendError {
 #[derive(Debug, Default)]
 struct Inner {
     essential: VecDeque<Message>,
-    /// Keyed by [`Message::coalesce_key`], rendered to an owned key so the map can
+    /// Keyed by Message::coalesce_key, rendered to an owned key so the map can
     /// outlive the borrow.
     snapshots: BTreeMap<SnapshotKey, Message>,
-    /// Set while the session is `Resumable`: nothing is written, essentials
+    /// Set while the session is Resumable: nothing is written, essentials
     /// accumulate for replay, snapshots are dropped entirely.
     paused: bool,
     closed: bool,
@@ -130,9 +130,9 @@ impl Sink {
 
     /// Sends an essential message ahead of anything already queued.
     ///
-    /// For `ready`: it must be the first frame a (re)connecting client reads, even
+    /// For ready: it must be the first frame a (re)connecting client reads, even
     /// when a resumed session's essential lane already holds a replayed backlog —
-    /// `send` would put it behind that backlog instead.
+    /// send would put it behind that backlog instead.
     pub fn send_first(&self, message: Message) -> Result<(), SendError> {
         debug_assert!(
             message.coalesce_key().is_none(),
@@ -152,7 +152,7 @@ impl Sink {
         Ok(())
     }
 
-    /// Takes the next message to write, or `None` if there is nothing pending or the
+    /// Takes the next message to write, or None if there is nothing pending or the
     /// sink is paused or closed.
     pub fn try_recv(&self) -> Option<Message> {
         let mut inner = self.lock();
@@ -168,7 +168,7 @@ impl Sink {
         inner.snapshots.pop_first().map(|(_, message)| message)
     }
 
-    /// Waits until [`Self::try_recv`] may return something. Cancellation-safe.
+    /// Waits until Self::try_recv may return something. Cancellation-safe.
     pub async fn recv(&self) -> Option<Message> {
         loop {
             if let Some(message) = self.try_recv() {
@@ -181,14 +181,14 @@ impl Sink {
         }
     }
 
-    /// Enters the `Resumable` state: stop writing, keep essentials for replay.
+    /// Enters the Resumable state: stop writing, keep essentials for replay.
     pub fn pause(&self) {
         let mut inner = self.lock();
         inner.paused = true;
         inner.snapshots.clear();
     }
 
-    /// Leaves the `Resumable` state. Queued essentials are replayed in order by the
+    /// Leaves the Resumable state. Queued essentials are replayed in order by the
     /// writer task that picks up next.
     pub fn resume(&self) {
         {
@@ -225,13 +225,13 @@ impl Sink {
         self.lock().essential.len()
     }
 
-    /// Whether the essential queue is at [`ESSENTIAL_CAPACITY`] — the same
-    /// condition that makes `send` start returning [`SendError::Overflow`].
+    /// Whether the essential queue is at ESSENTIAL_CAPACITY — the same
+    /// condition that makes send start returning SendError::Overflow.
     ///
-    /// While a websocket is attached, an overflowing sink is noticed and the
-    /// session is closed with 1008 (`ws.rs`'s `pump`). A session in
-    /// `SessionState::Resumable` has no websocket to notice it, so nobody would
-    /// otherwise react — `SessionRegistry::sweep_expired` polls this instead, to
+    /// While a WebSocket is attached, an overflowing sink is noticed and the
+    /// session is closed with 1008 (ws.rs's pump). A session in
+    /// SessionState::Resumable has no WebSocket to notice it, so nobody would
+    /// otherwise react — SessionRegistry::sweep_expired polls this instead, to
     /// give an overflowing resumable session the same fate a connected one gets,
     /// rather than silently dropping every essential message past the cap for
     /// the rest of the resume window.
@@ -288,9 +288,9 @@ mod tests {
         assert_eq!(positions, vec![200, 300]);
     }
 
-    /// The bug this guards: `Message::Ready` sent through plain `send` lands behind
+    /// The bug this guards: Message::Ready sent through plain send lands behind
     /// whatever essentials a resumed session already queued for replay, so a
-    /// reconnecting client reads its backlog before `sessionId`/`resumed`.
+    /// reconnecting client reads its backlog before sessionId/resumed.
     #[test]
     fn send_first_jumps_ahead_of_an_existing_backlog() {
         let sink = Sink::new();

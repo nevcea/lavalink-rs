@@ -1,7 +1,7 @@
 //! Throughput of the DSP filter chain.
 //!
 //! Every stage here is a lavaplayer/lavadsp port that runs on every buffer of every
-//! playing track (`audio::filter`'s module docs), so this answers "what does turning
+//! playing track (audio::filter's module docs), so this answers "what does turning
 //! filters on cost" rather than anything about a single algorithm in isolation.
 
 use std::hint::black_box;
@@ -28,11 +28,11 @@ fn equalizer_only() -> Filters {
 /// Every implemented filter enabled at once — the worst case the chain can be
 /// asked to run per buffer.
 ///
-/// Every value here has to be one its filter's `is_enabled` accepts, which is not
-/// the same as "present in the request": `distortion` at all-zero offsets and
-/// unit scales, and `channelMix` at the identity matrix, are both *neutral*, so
-/// `FilterChain::process` skips them and they contribute nothing to the number.
-/// That silently left the two out of this case — including `distortion`, the only
+/// Every value here has to be one its filter's is_enabled accepts, which is not
+/// the same as "present in the request": distortion at all-zero offsets and
+/// unit scales, and channelMix at the identity matrix, are both neutral, so
+/// FilterChain::process skips them and they contribute nothing to the number.
+/// That silently left the two out of this case — including distortion, the only
 /// stage with three transcendentals per sample — so the values below are
 /// deliberately off-neutral.
 fn all_filters() -> Filters {
@@ -53,13 +53,13 @@ fn all_filters() -> Filters {
     .unwrap()
 }
 
-/// Each implemented filter on its own, at the same settings [`all_filters`] uses
+/// Each implemented filter on its own, at the same settings all_filters uses
 /// so the parts are comparable against the whole.
 ///
-/// `all_filters` answers "what does the worst case cost" but not "which stage is
+/// all_filters answers "what does the worst case cost" but not "which stage is
 /// the worst case", and the two are not the same question: the stages differ by
 /// more than an order of magnitude per sample — a multiply and a clamp for
-/// `channelMix` against three `libm` calls per sample for `distortion` — so
+/// channelMix against three libm calls per sample for distortion — so
 /// without this split there is no way to tell which one a chain's cost is.
 fn single_filters() -> Vec<(&'static str, Filters)> {
     [
@@ -94,7 +94,7 @@ fn single_filters() -> Vec<(&'static str, Filters)> {
     .collect()
 }
 
-/// An equalizer with the `count` lowest bands boosted.
+/// An equalizer with the count lowest bands boosted.
 ///
 /// The gains vary per band only so that no two bands are identical; what is being
 /// swept is how the cost scales with the number of active bands, not the sound.
@@ -162,7 +162,7 @@ fn bench_filter_chain(c: &mut Criterion) {
 
 /// Per-stage cost, and how the equalizer scales with active band count.
 ///
-/// Both groups run the chain directly rather than through `filter_interleaved`:
+/// Both groups run the chain directly rather than through filter_interleaved:
 /// the transpose is a fixed cost per buffer that every case would pay equally, so
 /// including it would only add the same constant to every number here.
 fn bench_filter_stages(c: &mut Criterion) {
@@ -192,7 +192,7 @@ fn bench_filter_stages(c: &mut Criterion) {
     // a parallel filterbank — each one reads the same input sample and only its own
     // history — so the cost should be linear in the count; a curve that flattens
     // instead would mean the per-band work is hidden behind the serial dependency
-    // of each band's own recurrence, which changes what is worth optimising.
+    // of each band's own recurrence, which changes what is worth optimizing.
     for count in [1, 4, 8, 15] {
         let filters = equalizer_bands(count);
         group.bench_function(BenchmarkId::new("equalizer_bands", count), |b| {
@@ -213,12 +213,12 @@ fn bench_filter_stages(c: &mut Criterion) {
     group.finish();
 }
 
-/// The same chain as above, but through `pump::filter_interleaved` — the entry
+/// The same chain as above, but through pump::filter_interleaved — the entry
 /// point playback actually uses.
 ///
 /// The pump holds PCM interleaved (that is what the ring and the mixer want) while
 /// every filter is a planar port, so a buffer with filters on pays a transpose in
-/// and a transpose back around `FilterChain::process`. `bench_filter_chain` above
+/// and a transpose back around FilterChain::process. bench_filter_chain above
 /// deliberately excludes that; this group is the honest per-buffer cost, and the
 /// gap between the two groups is what the transpose itself costs.
 fn bench_filter_interleaved(c: &mut Criterion) {

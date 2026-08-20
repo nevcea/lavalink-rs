@@ -1,6 +1,6 @@
 //! Direct HTTP(S) media source.
 //!
-//! # Probing without downloading
+//! Probing without downloading
 //!
 //! A track can be an hour long; the metadata is in the first few kilobytes. This
 //! fetches a bounded prefix and probes that. The cost is that formats which put
@@ -8,9 +8,9 @@
 //! Xing header — report a duration of 0 rather than a wrong one, which is what the
 //! original reports for them too.
 //!
-//! # Seekability
+//! Seekability
 //!
-//! Comes from `Accept-Ranges`, not from optimism. Without range support a seek would
+//! Comes from Accept-Ranges, not from optimism. Without range support a seek would
 //! mean re-fetching from byte zero, so the track is advertised as non-seekable and
 //! clients do not offer the control.
 
@@ -131,7 +131,7 @@ impl SourceManager for HttpSource {
 
 /// Whether a response shows the server honours range requests.
 ///
-/// A 206 is proof it already did; `Accept-Ranges: bytes` is a promise it would. Both
+/// A 206 is proof it already did; Accept-Ranges: bytes is a promise it would. Both
 /// the load-time probe and the playback-time reader need this, and they must agree —
 /// advertising a track as seekable that the reader then cannot seek would strand a
 /// client's seek control.
@@ -145,7 +145,7 @@ pub fn accepts_ranges(status: StatusCode, headers: &reqwest::header::HeaderMap) 
 
 /// Content types that are certainly not playable — a web page rather than a track.
 ///
-/// Deliberately a denylist: servers mislabel audio as `application/octet-stream`
+/// Deliberately a denylist: servers mislabel audio as application/octet-stream
 /// constantly, and rejecting on an allowlist would break URLs the original plays.
 /// The probe is the real gate; this only catches the "that's a website" case early,
 /// so it can be reported as "no results" rather than as a failure.
@@ -173,15 +173,15 @@ mod tests {
         HttpSource::new(None).unwrap()
     }
 
-    /// A server that ignores the probe's `Range` header, answers `200` (not `206`),
-    /// declares a `Content-Length` far larger than `PROBE_PREFIX_BYTES`, but only
-    /// ever sends `PROBE_PREFIX_BYTES` before dropping the connection — standing in
-    /// for a multi-gigabyte file behind a host that doesn't honor `Range`.
+    /// A server that ignores the probe's Range header, answers 200 (not 206),
+    /// declares a Content-Length far larger than PROBE_PREFIX_BYTES, but only
+    /// ever sends PROBE_PREFIX_BYTES before dropping the connection — standing in
+    /// for a multi-gigabyte file behind a host that doesn't honor Range.
     ///
-    /// If the probe ever goes back to reading the whole declared body (`response
-    /// .bytes()`), this becomes exactly the short-read-against-`Content-Length`
-    /// case `stream.rs`'s own tests already cover, and surfaces as
-    /// `SourceError::Io` instead of stopping cleanly at the bound.
+    /// If the probe ever goes back to reading the whole declared body (response
+    /// .bytes()), this becomes exactly the short-read-against-Content-Length
+    /// case stream.rs's own tests already cover, and surfaces as
+    /// SourceError::Io instead of stopping cleanly at the bound.
     fn spawn_range_ignoring_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

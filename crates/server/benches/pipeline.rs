@@ -24,7 +24,7 @@ const CHANNELS: u16 = 2;
 const TRACK_SECONDS: f64 = 5.0;
 
 /// A 16-bit PCM WAV written by hand, so the bench needs neither a fixture file nor
-/// an encoder on `PATH`. 44.1kHz is the common source rate the resampler exists
+/// an encoder on PATH. 44.1kHz is the common source rate the resampler exists
 /// for, so this exercises that conversion rather than the passthrough path.
 fn write_wav(path: &std::path::Path) {
     let frames = (f64::from(SAMPLE_RATE) * TRACK_SECONDS) as u32;
@@ -100,10 +100,10 @@ fn bench_pipeline(c: &mut Criterion) {
     ] {
         group.bench_function(BenchmarkId::new("run", name), |b| {
             // Setup (ring/channel/config) and the post-run drain are both outside the
-            // timed span — only `pump::run` itself, i.e. decode+resample+filter, is
+            // timed span — only pump::run itself, i.e. decode+resample+filter, is
             // measured. Folding the drain in here used to inflate every sample with
-            // an unrelated ring-read cost, the same conflation `ring.rs`'s
-            // `read_only` bench was restructured to avoid.
+            // an unrelated ring-read cost, the same conflation ring.rs's
+            // read_only bench was restructured to avoid.
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
@@ -134,10 +134,10 @@ fn bench_pipeline(c: &mut Criterion) {
                     let outcome = pump::run(config, writer, commands_rx, position, &|| {});
                     total += start.elapsed();
 
-                    // A broken `open()` (bad path, decoder registry regression) returns
-                    // almost instantly via `PumpOutcome::Failed`, which would otherwise
+                    // A broken open() (bad path, decoder registry regression) returns
+                    // almost instantly via PumpOutcome::Failed, which would otherwise
                     // report a suspiciously fast number for having decoded nothing —
-                    // the same check pump.rs's own tests make after every `pump::run`.
+                    // the same check pump.rs's own tests make after every pump::run.
                     assert!(matches!(outcome, PumpOutcome::Finished), "{outcome:?}");
 
                     // Drain so the reader's thread-local state doesn't accumulate across

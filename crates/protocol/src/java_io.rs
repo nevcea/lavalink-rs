@@ -1,13 +1,13 @@
-//! The `DataInput`/`DataOutput` primitives lavaplayer's track format is built from.
+//! The DataInput/DataOutput primitives lavaplayer's track format is built from.
 //!
-//! Kept separate from [`crate::encoded_track`] so the byte-level layer can be tested
+//! Kept separate from crate::encoded_track so the byte-level layer can be tested
 //! on its own — most codec bugs are really string-encoding bugs.
 //!
-//! The one that bites: `writeUTF` is *not* UTF-8. Java's "modified UTF-8" encodes
+//! The one that bites: writeUTF is not UTF-8. Java's "modified UTF-8" encodes
 //! U+0000 as two bytes so no NUL appears mid-string, and encodes characters outside
 //! the BMP as a surrogate pair of two three-byte sequences (six bytes) instead of
 //! one four-byte sequence. A track titled with an emoji round-trips through the
-//! original but not through `String::as_bytes`, so we work in UTF-16 code units.
+//! original but not through String::as_bytes, so we work in UTF-16 code units.
 
 use thiserror::Error;
 
@@ -80,7 +80,7 @@ impl<'a> DataInput<'a> {
         ]))
     }
 
-    /// Java `DataInput.readUTF`.
+    /// Java DataInput.readUTF.
     pub fn read_utf(&mut self) -> Result<String> {
         let len = self.read_u16()? as usize;
         let start = self.offset;
@@ -90,7 +90,7 @@ impl<'a> DataInput<'a> {
         })
     }
 
-    /// lavaplayer `DataFormatTools.readNullableText`: a presence flag, then the text.
+    /// lavaplayer DataFormatTools.readNullableText: a presence flag, then the text.
     pub fn read_nullable_utf(&mut self) -> Result<Option<String>> {
         if self.read_bool()? {
             Ok(Some(self.read_utf()?))
@@ -134,12 +134,12 @@ impl DataOutput {
         self.bytes.extend_from_slice(value);
     }
 
-    /// Java `DataOutput.writeUTF`.
+    /// Java DataOutput.writeUTF.
     ///
-    /// Encodes straight into `self.bytes` behind a placeholder length, then patches
-    /// the length in — rather than through [`encode_modified_utf8`], whose `Vec`
+    /// Encodes straight into self.bytes behind a placeholder length, then patches
+    /// the length in — rather than through encode_modified_utf8, whose Vec
     /// would be copied here and dropped. A track carries seven of these strings, so
-    /// that is seven allocations per encode, and `loadtracks` encodes a whole
+    /// that is seven allocations per encode, and loadtracks encodes a whole
     /// playlist in a loop.
     pub fn write_utf(&mut self, value: &str) -> Result<()> {
         let start = self.bytes.len();
@@ -162,7 +162,7 @@ impl DataOutput {
         }
     }
 
-    /// lavaplayer `DataFormatTools.writeNullableText`.
+    /// lavaplayer DataFormatTools.writeNullableText.
     pub fn write_nullable_utf(&mut self, value: Option<&str>) -> Result<()> {
         match value {
             Some(text) => {
@@ -184,7 +184,7 @@ pub fn encode_modified_utf8(value: &str) -> Vec<u8> {
     out
 }
 
-/// [`encode_modified_utf8`], appending to an existing buffer.
+/// encode_modified_utf8, appending to an existing buffer.
 fn encode_modified_utf8_into(value: &str, out: &mut Vec<u8>) {
     for unit in value.encode_utf16() {
         match unit {
@@ -204,11 +204,11 @@ fn encode_modified_utf8_into(value: &str, out: &mut Vec<u8>) {
     }
 }
 
-/// Inverse of [`encode_modified_utf8`]. On failure returns the offset of the bad byte.
+/// Inverse of encode_modified_utf8. On failure returns the offset of the bad byte.
 ///
-/// Byte-for-byte re-encoding is only guaranteed for input `encode_modified_utf8`
-/// itself could have produced. An overlong sequence (e.g. `0xC1 0xA1` for `'a'`) is
-/// accepted, matching `DataInputStream.readUTF`'s lack of a shortest-form check, but
+/// Byte-for-byte re-encoding is only guaranteed for input encode_modified_utf8
+/// itself could have produced. An overlong sequence (e.g. 0xC1 0xA1 for 'a') is
+/// accepted, matching DataInputStream.readUTF's lack of a shortest-form check, but
 /// normalised: it re-encodes shorter. See the surrogate caveat below for the other
 /// input this can't preserve.
 pub fn decode_modified_utf8(bytes: &[u8]) -> std::result::Result<String, usize> {
@@ -307,9 +307,9 @@ mod tests {
         assert!(decode_modified_utf8(&[0xC0]).is_err());
     }
 
-    /// `write_utf` encodes in place behind a placeholder length, so an over-long
+    /// write_utf encodes in place behind a placeholder length, so an over-long
     /// string has already written its bytes by the time the length is found not to
-    /// fit. It has to roll those back: a `DataOutput` left holding half a string
+    /// fit. It has to roll those back: a DataOutput left holding half a string
     /// would make every field written after it decode as garbage, and the caller has
     /// no way to tell that from a clean failure.
     #[test]

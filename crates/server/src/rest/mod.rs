@@ -32,7 +32,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(player::delete_player),
         )
         // Route planning belongs to the IP-rotation feature, which is out of scope.
-        // The original's own behaviour with no route planner configured (the only
+        // The original's own behavior with no route planner configured (the only
         // state this node can ever be in) is what's matched here, not a made-up
         // "not implemented" status: getStatus returns 204 with no body, and both
         // POST handlers throw RoutePlannerDisabledException, a plain 500
@@ -84,7 +84,7 @@ async fn method_not_allowed(method: Method, uri: Uri) -> ApiError {
 
 /// Parses a snowflake path segment.
 ///
-/// The original types the parameter as `Long` and lets Spring reject anything else
+/// The original types the parameter as Long and lets Spring reject anything else
 /// with a 400; doing it by hand keeps the error body ours.
 pub fn parse_guild_id(raw: &str) -> Result<u64, ApiError> {
     raw.parse::<u64>()
@@ -94,7 +94,7 @@ pub fn parse_guild_id(raw: &str) -> Result<u64, ApiError> {
 /// Resolves a session id, or reports the original's 404.
 ///
 /// Serves sessions awaiting resume as well as open ones: such a session is alive,
-/// only its websocket is gone.
+/// only its WebSocket is gone.
 pub fn session(
     state: &AppState,
     session_id: &str,
@@ -156,9 +156,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// The bug this fix targets: a non-UTF-8 (but present) `Authorization`
+    /// The bug this fix targets: a non-UTF-8 (but present) Authorization
     /// header used to be treated as "missing" (401) because
-    /// `HeaderValue::to_str()` fails silently on it — the original decodes
+    /// HeaderValue::to_str() fails silently on it — the original decodes
     /// it as Latin-1 and reports "present but wrong" (403) instead.
     #[tokio::test]
     async fn a_non_utf8_authorization_header_is_403_not_401() {
@@ -179,7 +179,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
-    /// An authenticated request to an unmatched path gets the Lavalink `Error`
+    /// An authenticated request to an unmatched path gets the Lavalink Error
     /// JSON shape, not axum's built-in empty-body 404.
     #[tokio::test]
     async fn an_unknown_path_gets_the_lavalink_error_shape() {
@@ -201,9 +201,9 @@ mod tests {
         assert_eq!(body["path"], "/v4/nope");
     }
 
-    /// `?trace=true` must populate a non-null `trace` field — dropped
-    /// entirely otherwise, per `the_body_matches_the_originals_shape` in
-    /// `error.rs`.
+    /// ?trace=true must populate a non-null trace field — dropped
+    /// entirely otherwise, per the_body_matches_the_originals_shape in
+    /// error.rs.
     #[tokio::test]
     async fn a_trace_query_param_populates_the_trace_field() {
         let app = router(test_state());
@@ -222,7 +222,7 @@ mod tests {
         assert!(body["trace"].is_string(), "expected a trace, got {body:?}");
     }
 
-    /// A known path with the wrong HTTP method gets the same `Error` shape as a
+    /// A known path with the wrong HTTP method gets the same Error shape as a
     /// 405, not axum's default bare status line.
     #[tokio::test]
     async fn a_known_path_with_the_wrong_method_gets_the_lavalink_error_shape() {
@@ -246,10 +246,10 @@ mod tests {
     }
 
     /// A request axum's own extractors reject (a missing required query
-    /// parameter, here) must still get the Lavalink `Error` JSON shape, the
+    /// parameter, here) must still get the Lavalink Error JSON shape, the
     /// same as every other error this API returns — not axum's own bare
-    /// plain-text rejection body, which carries no `path` and a status
-    /// `fill_error_path` never gets a chance to normalize.
+    /// plain-text rejection body, which carries no path and a status
+    /// fill_error_path never gets a chance to normalize.
     #[tokio::test]
     async fn a_missing_required_query_param_gets_the_lavalink_error_shape() {
         let app = router(test_state());
@@ -292,10 +292,10 @@ mod tests {
         assert_eq!(body["path"], "/v4/sessions/whatever");
     }
 
-    /// `PATCH /v4/sessions/{id}` with a negative `timeout` must echo it back
+    /// PATCH /v4/sessions/{id} with a negative timeout must echo it back
     /// unchanged — the original never rejects or clamps it
-    /// (`SessionRestHandler.kt`'s handler is a bare assignment), so a client
-    /// sending `-5` sees `-5` in the same response, not `0`.
+    /// (SessionRestHandler.kt's handler is a bare assignment), so a client
+    /// sending -5 sees -5 in the same response, not 0.
     #[tokio::test]
     async fn a_negative_timeout_seconds_round_trips_unclamped() {
         let state = test_state();
@@ -320,13 +320,13 @@ mod tests {
         assert_eq!(body["timeout"], -5);
     }
 
-    /// The bug this fix targets: `noReplace` fails to parse at the query
+    /// The bug this fix targets: noReplace fails to parse at the query
     /// extractor level (unlike the guild/session ids, which are only ever
-    /// validated deeper inside `patch_player` and so were never actually
+    /// validated deeper inside patch_player and so were never actually
     /// affected by extractor declaration order). Before this fix, axum
     /// short-circuited on that query rejection without ever attempting the
     /// JSON extractor, which axum requires to be declared last — but the
-    /// original resolves `@RequestBody` first (`PlayerRestHandler.kt`'s
+    /// original resolves @RequestBody first (PlayerRestHandler.kt's
     /// parameter order), so a client of the original sees the body's error
     /// here, not the query's.
     #[tokio::test]
@@ -353,7 +353,7 @@ mod tests {
         );
     }
 
-    /// A JSON body sent with no `Content-Type` header must keep axum's own 415
+    /// A JSON body sent with no Content-Type header must keep axum's own 415
     /// for that specific case, not the flat 400 every other body rejection
     /// gets here — the same status Spring's default gives it, which is what a
     /// client of the original would see.
@@ -377,10 +377,10 @@ mod tests {
         assert_eq!(body["path"], "/v4/sessions/whatever");
     }
 
-    /// A path segment axum's own `Path` extractor rejects (invalid UTF-8, here)
-    /// must still get the Lavalink `Error` JSON shape — see
-    /// [`crate::error::ValidatedPath`], which exists for the same reason
-    /// [`ValidatedJson`](crate::error::ValidatedJson) does on the body side.
+    /// A path segment axum's own Path extractor rejects (invalid UTF-8, here)
+    /// must still get the Lavalink Error JSON shape — see
+    /// crate::error::ValidatedPath, which exists for the same reason
+    /// ValidatedJson does on the body side.
     #[tokio::test]
     async fn a_non_utf8_path_segment_gets_the_lavalink_error_shape() {
         let app = router(test_state());
@@ -400,9 +400,9 @@ mod tests {
         assert_eq!(body["path"], "/v4/sessions/%ff/players");
     }
 
-    /// `util.kt`'s `decodeTrack` throws a bare `IllegalStateException`/
-    /// `IllegalArgumentException`, which no upstream handler catches — Spring's
-    /// uncaught-exception path is a plain 500, not the 400 a `FriendlyException`
+    /// util.kt's decodeTrack throws a bare IllegalStateException/
+    /// IllegalArgumentException, which no upstream handler catches — Spring's
+    /// uncaught-exception path is a plain 500, not the 400 a FriendlyException
     /// (a genuine load failure) gets.
     #[tokio::test]
     async fn a_malformed_encoded_track_fails_decode_with_500() {
@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(body["path"], "/v4/decodetrack");
     }
 
-    /// `RoutePlannerRestHandler.kt::getStatus` returns 204 with no body when no
+    /// RoutePlannerRestHandler.kt::getStatus returns 204 with no body when no
     /// route planner is configured, which is the only state this node is ever
     /// in — not a 404 or 501.
     #[tokio::test]
@@ -446,8 +446,8 @@ mod tests {
         assert!(bytes.is_empty());
     }
 
-    /// Both free-address endpoints throw `RoutePlannerDisabledException` in the
-    /// original, a plain 500 — not the Lavalink `Error` shape's own 501.
+    /// Both free-address endpoints throw RoutePlannerDisabledException in the
+    /// original, a plain 500 — not the Lavalink Error shape's own 501.
     #[tokio::test]
     async fn route_planner_free_endpoints_are_500_with_no_route_planner_configured() {
         for path in [

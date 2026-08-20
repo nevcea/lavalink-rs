@@ -13,9 +13,9 @@ use lavalink_server::loader::Loader;
 use lavalink_server::{rest, ticker, AppState};
 use tracing_subscriber::EnvFilter;
 
-/// Note the hand-built runtime rather than `#[tokio::main]`.
+/// Note the hand-built runtime rather than #[tokio::main].
 ///
-/// Source managers hold `reqwest::blocking` clients, and building one inside a tokio
+/// Source managers hold reqwest::blocking clients, and building one inside a tokio
 /// context panics — reqwest detects the runtime and refuses. So everything blocking
 /// is constructed first, and the runtime is entered afterwards.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -113,7 +113,7 @@ async fn serve(
     Ok(())
 }
 
-/// Builds the source list, which is also exactly what `/v4/info` advertises.
+/// Builds the source list, which is also exactly what /v4/info advertises.
 ///
 /// Order matters: the first manager that claims an identifier gets it. yt-dlp goes
 /// first so a YouTube URL is not swallowed by the generic HTTP source, which would
@@ -177,15 +177,15 @@ fn source_managers(
     managers
 }
 
-/// Waits for SIGINT or SIGTERM, whichever an orchestrator sends — `docker stop`,
-/// a Kubernetes pod eviction, and `systemctl stop` all send SIGTERM, not SIGINT,
-/// so `ctrl_c()` alone never caught them and `axum::serve`'s graceful shutdown
+/// Waits for SIGINT or SIGTERM, whichever an orchestrator sends — docker stop,
+/// a Kubernetes pod eviction, and systemctl stop all send SIGTERM, not SIGINT,
+/// so ctrl_c() alone never caught them and axum::serve's graceful shutdown
 /// never ran on a normal restart.
 ///
-/// Fires `shutdown_tx` before returning: `axum::serve`'s own graceful shutdown
+/// Fires shutdown_tx before returning: axum::serve's own graceful shutdown
 /// only stops accepting new connections and waits for existing ones to end on
-/// their own, which an already-upgraded websocket never does by itself. Every
-/// `ws.rs` connection watches this same channel to send a clean close frame
+/// their own, which an already-upgraded WebSocket never does by itself. Every
+/// ws.rs connection watches this same channel to send a clean close frame
 /// instead.
 async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<()>) {
     let ctrl_c = async {

@@ -5,33 +5,33 @@ use crate::omissible::Omissible;
 /// The REST error body.
 ///
 /// Shaped like Spring Boot's default error response because that is what clients
-/// parse — including `error`, the HTTP status *reason phrase*, and `path`.
+/// parse — including error, the HTTP status reason phrase, and path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Error {
     /// Milliseconds since the epoch.
     pub timestamp: i64,
     pub status: u16,
-    /// The status reason phrase, e.g. `"Bad Request"`.
+    /// The status reason phrase, e.g. "Bad Request".
     pub error: String,
-    /// Only populated when the request carried `trace=true`.
+    /// Only populated when the request carried trace=true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<String>,
     pub message: String,
     pub path: String,
 }
 
-/// `PATCH /v4/sessions/{id}` response.
+/// PATCH /v4/sessions/{id} response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub resuming: bool,
-    /// Seconds. Named `timeout` on the wire despite the unit-suffixed field name in
+    /// Seconds. Named timeout on the wire despite the unit-suffixed field name in
     /// the original.
     #[serde(rename = "timeout")]
     pub timeout_seconds: i64,
 }
 
-/// `PATCH /v4/sessions/{id}` request body.
+/// PATCH /v4/sessions/{id} request body.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUpdate {
     #[serde(default, skip_serializing_if = "Omissible::is_omitted")]

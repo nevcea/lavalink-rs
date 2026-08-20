@@ -1,9 +1,9 @@
 //! Local file source.
 //!
 //! Off by default in the shipped config, and for good reason: it turns
-//! `loadtracks?identifier=…` into arbitrary local file reads for anyone holding the
+//! loadtracks?identifier=… into arbitrary local file reads for anyone holding the
 //! node password. The original has the same property; enabling it is a deployment
-//! decision, not ours to second-guess, so the behaviour matches and the default
+//! decision, not ours to second-guess, so the behavior matches and the default
 //! stays off.
 
 use std::path::{Path, PathBuf};

@@ -6,16 +6,16 @@
 //! keeps changing. Owning that while removing features to stay small is
 //! self-contradictory, so it is bought rather than built.
 //!
-//! Only the `driver` half of songbird is used. Lavalink is *given* voice state and
+//! Only the driver half of songbird is used. Lavalink is given voice state and
 //! voice server updates by its own client over REST, which is exactly what the
 //! standalone driver takes, so no Discord gateway client is involved.
 //!
-//! # Ownership
+//! Ownership
 //!
-//! The split is strict: **the player actor owns player state, songbird owns
-//! connection state.** Nothing here asks the actor anything, and the actor never
-//! queries a driver — it caches what arrives as [`VoiceUpdate`] events. `connected`
-//! and `ping` in a `playerUpdate` therefore report what songbird observed, not what
+//! The split is strict: the player actor owns player state, songbird owns
+//! connection state. Nothing here asks the actor anything, and the actor never
+//! queries a driver — it caches what arrives as VoiceUpdate events. connected
+//! and ping in a playerUpdate therefore report what songbird observed, not what
 //! we hope is true.
 
 use std::num::NonZeroU64;
@@ -42,13 +42,13 @@ pub enum VoiceError {
     Connect(#[from] Box<ConnectionError>),
 }
 
-/// `driver` and `current` behind one lock, not two: `connect()` checks, dials
+/// driver and current behind one lock, not two: connect() checks, dials
 /// and records as a single critical section, so two concurrent connects for
-/// the same guild can't interleave and leave `current` pointing at a state
+/// the same guild can't interleave and leave current pointing at a state
 /// the driver didn't actually end up with.
 struct ConnectionState {
     driver: Driver,
-    /// What the last successful connect used, so a repeated `voice` field with
+    /// What the last successful connect used, so a repeated voice field with
     /// identical contents does not tear down a working connection.
     current: Option<VoiceState>,
 }
@@ -60,7 +60,7 @@ pub struct VoiceConnection {
     user_id: u64,
 }
 
-/// Whether `requested` differs from the voice state a connection was last built
+/// Whether requested differs from the voice state a connection was last built
 /// with — a client re-sending its current voice state unchanged must not tear
 /// down working audio to rebuild an identical connection.
 fn needs_reconnect(current: Option<&VoiceState>, requested: &VoiceState) -> bool {
@@ -101,13 +101,13 @@ impl VoiceConnection {
     /// Connects, or reconnects if the voice server details changed.
     ///
     /// The original tears down and rebuilds whenever any field differs
-    /// (`PlayerRestHandler.kt:115-127`); the same comparison is here, because a
+    /// (PlayerRestHandler.kt:115-127); the same comparison is here, because a
     /// client that re-sends an unchanged voice state expects its audio to keep
     /// playing.
     ///
     /// Held as one lock for the whole check-dial-record sequence: a second
-    /// `connect()` racing this one on the same guild waits for the lock rather
-    /// than reading a `current` that this call hasn't written yet.
+    /// connect() racing this one on the same guild waits for the lock rather
+    /// than reading a current that this call hasn't written yet.
     pub async fn connect(&self, voice: &VoiceState) -> Result<(), VoiceError> {
         let mut state = self.state.lock().await;
         if !needs_reconnect(state.current.as_ref(), voice) {
@@ -227,7 +227,7 @@ fn disconnect_update(reason: Option<DisconnectReason>) -> VoiceUpdate {
             by_remote: true,
         },
         // Everything else — requested, an ordinary teardown, a failed attempt — is
-        // reported the same way. None of them are a websocket close, and emitting
+        // reported the same way. None of them are a WebSocket close, and emitting
         // WebSocketClosedEvent for one would have clients trying to recover from
         // something they asked for, or from a failure the code cannot describe.
         _ => VoiceUpdate::Disconnected,
@@ -401,7 +401,7 @@ mod tests {
 
     // -- connect --------------------------------------------------------------
 
-    /// `connect()` validates before it ever touches the driver, so a malformed
+    /// connect() validates before it ever touches the driver, so a malformed
     /// voice state fails fast instead of hanging on a network attempt.
     #[tokio::test]
     async fn connecting_with_an_invalid_voice_state_fails_before_touching_the_driver() {

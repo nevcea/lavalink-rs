@@ -2,10 +2,10 @@
 //!
 //! Bandcamp streams full tracks with no subscription gate, so — unlike Deezer —
 //! there is a real audio stream to hand back, and this follows the same shape as
-//! [`youtube`](super::youtube) and [`soundcloud`](super::soundcloud): the URL shapes
-//! are ours, extraction belongs to the shared [`ytdlp`](super::ytdlp) backend.
+//! youtube and soundcloud: the URL shapes
+//! are ours, extraction belongs to the shared ytdlp backend.
 //!
-//! Only artist subdomains (`artist.bandcamp.com`) are recognised, matching what the
+//! Only artist subdomains (artist.bandcamp.com) are recognized, matching what the
 //! original's Bandcamp source claims — a label's custom domain proxying Bandcamp is
 //! not detectable from the URL alone.
 
@@ -50,9 +50,9 @@ impl SourceManager for BandcampSource {
 
 /// Whether this is an artist-subdomain Bandcamp page naming a track or an album.
 ///
-/// The apex domain (`bandcamp.com` itself, `www.bandcamp.com`) names no track, so it
+/// The apex domain (bandcamp.com itself, www.bandcamp.com) names no track, so it
 /// is deliberately left unclaimed — claiming it would turn the front page or the
-/// discovery feed into a failed load rather than `empty`.
+/// discovery feed into a failed load rather than empty.
 fn is_bandcamp_url(identifier: &str) -> bool {
     let Some(rest) = strip_scheme(identifier) else {
         return false;
@@ -80,7 +80,7 @@ fn is_bandcamp_url(identifier: &str) -> bool {
     false
 }
 
-/// Bandcamp spells a playlist `/album/`.
+/// Bandcamp spells a playlist /album/.
 fn is_album_url(identifier: &str) -> bool {
     identifier
         .split_once("bandcamp.com/")
@@ -132,7 +132,7 @@ mod tests {
         assert!(!is_album_url("https://anartist.bandcamp.com/track/a-track"));
     }
 
-    /// `load` is only ever called after `matches`, but a mismatch must not become a
+    /// load is only ever called after matches, but a mismatch must not become a
     /// subprocess launch against an arbitrary string.
     #[test]
     fn an_unclaimed_identifier_is_not_found_rather_than_extracted() {

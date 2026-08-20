@@ -1,12 +1,12 @@
 //! Lavalink v4 wire protocol.
 //!
-//! Pure serialization plus the lavaplayer `encodedTrack` codec — no server logic, no
+//! Pure serialization plus the lavaplayer encodedTrack codec — no server logic, no
 //! async runtime, no I/O. Usable on its own by anything that speaks to or for a
 //! Lavalink v4 node.
 //!
-//! The organising rule for this crate: **what a client can observe follows the
-//! original exactly.** Where the original's shape looks like an accident —
-//! `frameStats` omitted here but null there, `data: null` on an empty load result —
+//! The organizing rule for this crate: what a client can observe follows the
+//! original exactly. Where the original's shape looks like an accident —
+//! frameStats omitted here but null there, data: null on an empty load result —
 //! the accident is reproduced, and the reason is recorded next to the type rather
 //! than argued with.
 

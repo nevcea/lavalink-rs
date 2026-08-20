@@ -4,18 +4,16 @@
 //! filter — is CPU-bound and blocking, and doing it on an async worker would stall
 //! the runtime for every other player.
 //!
-//! ```text
 //! source → demux → decode → resample → filters → ring
-//! ```
 //!
 //! It has no deadline. Falling behind starves its own ring, which the reader reports
 //! as nulled frames; it cannot make another player late. Running ahead blocks on the
-//! ring, so it is never more than `frameBufferDurationMs` in front of playback.
+//! ring, so it is never more than frameBufferDurationMs in front of playback.
 //!
-//! # Seeking
+//! Seeking
 //!
 //! Seeking is ours to implement: the audio the mixer sees is a live stream, so it
-//! cannot seek it. The pump seeks the *demuxer*, discards the buffered audio and
+//! cannot seek it. The pump seeks the demuxer, discards the buffered audio and
 //! rebases the position counter. Precision therefore follows the container — exact
 //! where there is an index, approximate where the duration was guessed, refused on a
 //! live stream.
@@ -64,10 +62,10 @@ pub struct PumpConfig {
     pub filters: Filters,
     pub opener: Arc<StreamOpener>,
     pub resampling_quality: ResamplingQuality,
-    /// Set (by the engine) whenever a [`PumpCommand`] is enqueued, and checked
+    /// Set (by the engine) whenever a PumpCommand is enqueued, and checked
     /// by a stalled HTTP source between reconnect attempts so a waiting command
     /// cuts the retry short instead of waiting out the whole budget. Cleared
-    /// once [`State::drain_commands`] has drained the commands that set it.
+    /// once State::drain_commands has drained the commands that set it.
     pub interrupt: Arc<AtomicBool>,
     /// Whether any audio has reached the ring, kept outside State so a panic
     /// inside run (caught by engine.rs's catch_unwind, which cannot see State
@@ -80,7 +78,7 @@ pub struct PumpConfig {
 /// Runs one track to completion. Returns how it ended, for the actor to turn into
 /// the right event.
 ///
-/// `on_progress` is called (throttled by the caller) whenever audio reaches the
+/// on_progress is called (throttled by the caller) whenever audio reaches the
 /// ring; the actor uses it to decide the track is not stuck.
 pub fn run(
     config: PumpConfig,
@@ -106,7 +104,7 @@ struct State {
     decoder: Box<dyn AudioDecoder>,
     track_id: u32,
     resampler: Resampler,
-    /// Carried from `PumpConfig` so the `ResetRequired` rebuild (a mid-stream
+    /// Carried from PumpConfig so the ResetRequired rebuild (a mid-stream
     /// format change) can reconstruct the resampler with the same quality
     /// tier it started with.
     resampling_quality: ResamplingQuality,
@@ -114,7 +112,7 @@ struct State {
     volume: f32,
     end_time_ms: Option<i64>,
     /// Whether any audio has reached the ring. Distinguishes a track that failed to
-    /// start (`loadFailed`) from one that died partway (`finished`) — shared with
+    /// start (loadFailed) from one that died partway (finished) — shared with
     /// the engine (see PumpConfig::produced) so that distinction survives a panic
     /// here too.
     produced: Arc<AtomicBool>,
@@ -122,17 +120,17 @@ struct State {
     /// of them means the stream is broken.
     consecutive_errors: u32,
     /// Scratch buffers for the decode loop, reused every packet so a healthy stream
-    /// settles into decoding without allocating. `interleaved` and `filtered` are
-    /// taken out of `self` for the duration of a packet (see `decode_loop`) because
-    /// they are passed by `&mut` to methods that themselves take `&mut self`; `pcm`
-    /// and `planar` do not need that dance, since every call that touches them
+    /// settles into decoding without allocating. interleaved and filtered are
+    /// taken out of self for the duration of a packet (see decode_loop) because
+    /// they are passed by &mut to methods that themselves take &mut self; pcm
+    /// and planar do not need that dance, since every call that touches them
     /// borrows only disjoint fields.
     interleaved: Vec<f32>,
     pcm: Vec<f32>,
     planar: Vec<Vec<f32>>,
-    /// `filter_interleaved`'s output, reused the same way. Separate from `pcm`
-    /// because `timescale` can make it a different length than its input — see
-    /// `filter.rs`'s module docs — so it can no longer be written back in place.
+    /// filter_interleaved's output, reused the same way. Separate from pcm
+    /// because timescale can make it a different length than its input — see
+    /// filter.rs's module docs — so it can no longer be written back in place.
     filtered: Vec<f32>,
     /// Shared with the source: cleared here once a batch of commands has been
     /// fully drained, so a later, unrelated stall doesn't inherit a stale
@@ -144,13 +142,13 @@ struct State {
 const MAX_CONSECUTIVE_ERRORS: u32 = 32;
 
 /// A container-declared sample rate outside this range cannot be a real audio
-/// stream. Left unchecked, a degenerate value (e.g. `1`) makes the resampler's
-/// step size (`source_rate / 48000`) tiny, so a single ordinary packet reserves
+/// stream. Left unchecked, a degenerate value (e.g. 1) makes the resampler's
+/// step size (source_rate / 48000) tiny, so a single ordinary packet reserves
 /// tens of millions of output frames on a thread with no memory bound.
 const SANE_SAMPLE_RATE_HZ: std::ops::RangeInclusive<u32> = 4_000..=384_000;
 
 /// Reads the sample rate and channel count the resampler needs, validating the
-/// rate. Shared between `open` and the `ResetRequired` path (a mid-stream format
+/// rate. Shared between open and the ResetRequired path (a mid-stream format
 /// change, e.g. a chained Ogg segment at a different rate), so both build the
 /// resampler from the same source of truth instead of one trusting stale params.
 fn source_params(params: &AudioCodecParameters) -> Result<(u32, usize), Exception> {
@@ -169,7 +167,7 @@ fn source_params(params: &AudioCodecParameters) -> Result<(u32, usize), Exceptio
     Ok((source_rate, source_channels))
 }
 
-/// How long `write_interruptibly` waits for ring space before checking for new
+/// How long write_interruptibly waits for ring space before checking for new
 /// commands again. Long enough that an idle wait costs nothing, short enough that a
 /// pause or a seek is not sitting behind a full ring for a noticeable time.
 const COMMAND_POLL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -268,7 +266,7 @@ impl State {
                 return PumpOutcome::Stopped;
             }
 
-            // The configured end time is enforced against the *playback* position,
+            // The configured end time is enforced against the playback position,
             // not the decode position, so the track ends when the listener reaches
             // it rather than when the pump does.
             if let Some(end_time) = self.end_time_ms {
@@ -287,7 +285,7 @@ impl State {
                 Err(SymphoniaError::ResetRequired) => {
                     // The stream changed format mid-flight (a chained Ogg segment is
                     // the common case), which for us means the decoder's state is
-                    // stale and the resampler's *configuration* — the source rate and
+                    // stale and the resampler's configuration — the source rate and
                     // channel count open read once — is stale too, not just its
                     // interpolation state. Rebuilding it from the track's current
                     // codec params is what resampler.reset() alone did not do.
@@ -364,19 +362,19 @@ impl State {
             };
             self.consecutive_errors = 0;
 
-            // What the container declared (`source_params`, which `open` and the
+            // What the container declared (source_params, which open and the
             // ResetRequired arm above both build the resampler from) is a hint,
             // not a guarantee. The decoder is the authority on what it actually
             // produced, and the two disagree often enough to matter:
             //
-            // * HE-AAC's SBR outputs at twice the rate the container declares,
+            // • HE-AAC's SBR outputs at twice the rate the container declares,
             //   so the resample ratio is off by a factor of two and the whole
             //   track plays at half speed.
-            // * `params.channels` is `None` for more containers than not, and
-            //   `source_params` falls back to stereo. For a mono stream
-            //   `to_interleaved` then emits one sample per frame while
-            //   `fill_stereo_frames` reads them back two at a time
-            //   (`resample.rs`'s `chunks_exact`), so adjacent mono samples
+            // • params.channels is None for more containers than not, and
+            //   source_params falls back to stereo. For a mono stream
+            //   to_interleaved then emits one sample per frame while
+            //   fill_stereo_frames reads them back two at a time
+            //   (resample.rs's chunks_exact), so adjacent mono samples
             //   become an L/R pair and the track plays at double speed with the
             //   channels smeared into each other.
             //
@@ -386,7 +384,7 @@ impl State {
             let spec = decoded.spec();
             let (decoded_rate, decoded_channels) = (spec.rate(), spec.channels().count());
             if !self.resampler.matches_source(decoded_rate, decoded_channels) {
-                // Same bound `source_params` puts on a container-declared rate,
+                // Same bound source_params puts on a container-declared rate,
                 // and for the same reason: the rate is the resampler's step
                 // divisor, so a degenerate one reserves an unbounded output
                 // buffer on a thread with no memory limit.
@@ -444,12 +442,12 @@ impl State {
         }
     }
 
-    /// Writes `samples`, blocking while the ring is full — like
-    /// [`RingWriter::write`], but checks for new commands between attempts
+    /// Writes samples, blocking while the ring is full — like
+    /// RingWriter::write, but checks for new commands between attempts
     /// instead of leaving them queued.
     ///
-    /// Pausing stalls the pump on a full ring by design (`engine.rs`'s
-    /// `set_paused` docs): without this, a Seek/SetVolume/SetFilters/SetEndTime
+    /// Pausing stalls the pump on a full ring by design (engine.rs's
+    /// set_paused docs): without this, a Seek/SetVolume/SetFilters/SetEndTime
     /// sent while paused would sit unprocessed until the player is unpaused and
     /// the write already in progress finally drains, rather than taking effect
     /// right away.
@@ -496,8 +494,8 @@ impl State {
         writer: &RingWriter,
     ) -> ControlFlow {
         let mut reset = false;
-        // Whether `interrupt` has been cleared since the last command was taken
-        // off the channel. See the `Empty` arm below for why one clear is not
+        // Whether interrupt has been cleared since the last command was taken
+        // off the channel. See the Empty arm below for why one clear is not
         // enough on its own.
         let mut cleared = false;
         loop {
@@ -505,7 +503,7 @@ impl State {
                 Ok(command) => command,
                 Err(TryRecvError::Empty) => {
                     if cleared {
-                        // Empty *after* a clear: nothing arrived in the window
+                        // Empty after a clear: nothing arrived in the window
                         // that clear could have wiped, so the flag is genuinely
                         // stale and staying false is correct.
                         return ControlFlow::Continue { reset };
@@ -514,16 +512,16 @@ impl State {
                     // its full reconnect budget again, rather than carrying
                     // this batch's "something is waiting" forward forever.
                     //
-                    // But one clear is not enough. `signal_pump` sends before
+                    // But one clear is not enough. signal_pump sends before
                     // it sets the flag, which closes the window where this
-                    // observes Empty and only *then* receives the command — it
+                    // observes Empty and only then receives the command — it
                     // does not close the mirror of it, where the engine's
-                    // send-and-set both land between the `try_recv` above and
+                    // send-and-set both land between the try_recv above and
                     // this store, and the store then wipes a flag raised for a
                     // command still sitting in the channel. The stalled HTTP
                     // source would go back to burning its whole reconnect
-                    // budget (`stream.rs`'s `interrupt` check) with that
-                    // command waiting behind it — for `Stop`, tens of seconds
+                    // budget (stream.rs's interrupt check) with that
+                    // command waiting behind it — for Stop, tens of seconds
                     // of a track that was already replaced. So clear, then go
                     // round once more: only an Empty seen after the clear
                     // proves nothing was lost to it.
@@ -575,7 +573,7 @@ impl State {
     /// Returns whether the seek actually landed. The caller must not rebase the
     /// reported position or discard buffered audio on a failed seek — the decoder
     /// carries on from wherever it actually is, and treating that as "now at
-    /// `position_ms`" would desync the reported position from the real audio
+    /// position_ms" would desync the reported position from the real audio
     /// forever, since nothing after this ever corrects it back.
     fn seek(&mut self, position_ms: i64) -> bool {
         let position_ms = position_ms.max(0) as u64;
@@ -614,15 +612,15 @@ impl State {
         succeeded
     }
 
-    /// Applies the player's own `volume` field, which is a gain and not a filter
-    /// stage (see `filter::player_volume_multiplier`).
+    /// Applies the player's own volume field, which is a gain and not a filter
+    /// stage (see filter::player_volume_multiplier).
     ///
-    /// Clamped, because the multiplier reaches 16.4x at `volume: 1000` and nothing
-    /// downstream would bring it back: with no filters enabled `filter_interleaved`
+    /// Clamped, because the multiplier reaches 16.4x at volume: 1000 and nothing
+    /// downstream would bring it back: with no filters enabled filter_interleaved
     /// is a straight copy, so an out-of-range sample would travel intact to the
     /// mixer's Opus encoder. The original saturates here for free by working on
-    /// `short`s; on `f32` it has to be said. Every `AudioFilter::process` in
-    /// `filter.rs` ends the same way.
+    /// shorts; on f32 it has to be said. Every AudioFilter::process in
+    /// filter.rs ends the same way.
     fn apply_volume(&self, samples: &mut [f32]) {
         if (self.volume - 1.0).abs() < f32::EPSILON {
             return;
@@ -644,25 +642,25 @@ impl State {
 }
 
 enum ControlFlow {
-    /// `reset` is set when a command in this batch was a seek that landed,
+    /// reset is set when a command in this batch was a seek that landed,
     /// discarding whatever the ring held before it.
     Continue { reset: bool },
     Stopped,
 }
 
-/// Runs the filter chain over an interleaved buffer, writing the result into `out`
+/// Runs the filter chain over an interleaved buffer, writing the result into out
 /// (cleared first, capacity reused — a healthy pump allocates nothing here once
-/// warm) rather than back into `samples` in place, since `timescale` (the one
-/// length-changing filter — see `filter.rs`'s module docs) can make the output a
+/// warm) rather than back into samples in place, since timescale (the one
+/// length-changing filter — see filter.rs's module docs) can make the output a
 /// different number of frames than the input.
 ///
-/// `planar` is the transpose scratch, also reused across calls. The chain works on
+/// planar is the transpose scratch, also reused across calls. The chain works on
 /// planar channels and the ring wants interleaved, so a buffer with any filter
 /// enabled pays two extra full passes on top of the DSP itself (three once
-/// `timescale` is active, for the same reason `out` exists at all). That transpose
+/// timescale is active, for the same reason out exists at all). That transpose
 /// is the pump's cost, not the chain's, which is why this lives here rather than in
-/// `filter.rs` — and why it is free-standing and public rather than a method on
-/// `State`: `benches/filter.rs` measures the chain *with* the transpose around it,
+/// filter.rs — and why it is free-standing and public rather than a method on
+/// State: benches/filter.rs measures the chain with the transpose around it,
 /// which is the only shape playback actually runs.
 pub fn filter_interleaved(
     chain: &mut FilterChain,
@@ -693,8 +691,8 @@ pub fn filter_interleaved(
     }
 }
 
-/// Flattens any of symphonia's buffer types into interleaved `f32`, appended into
-/// `out` (cleared first) so a healthy decode loop never allocates here.
+/// Flattens any of symphonia's buffer types into interleaved f32, appended into
+/// out (cleared first) so a healthy decode loop never allocates here.
 fn to_interleaved(buffer: &GenericAudioBufferRef<'_>, out: &mut Vec<f32>) {
     use symphonia::core::audio::sample::{i24, u24, Sample as _};
 
@@ -830,11 +828,11 @@ mod tests {
     ///
     /// The reader here stands in for the mixer, which pulls on a 20ms clock. An
     /// unpaced reader outruns the decoder and gets starvation silence, which is
-    /// correct behaviour but is not delivered audio — so each read is classified by
-    /// `nulled` (whether *this* read was a starved one), not `sent`: `sent` counts
-    /// whole [`super::super::ring::FRAME_SAMPLES`] frames of real audio with a
+    /// correct behavior but is not delivered audio — so each read is classified by
+    /// nulled (whether this read was a starved one), not sent: sent counts
+    /// whole super::super::ring::FRAME_SAMPLES frames of real audio with a
     /// carried remainder, so a partial real read (buffer briefly short of a whole
-    /// frame) may not tick it on the same call it happened. `nulled` stays a
+    /// frame) may not tick it on the same call it happened. nulled stays a
     /// reliable per-call flag here because every read in this loop asks for
     /// exactly one frame, so a starved read's silence is never partial.
     fn play(config: PumpConfig) -> (PumpOutcome, usize, i64) {
@@ -881,7 +879,7 @@ mod tests {
     /// Decodes a whole track into the samples that reached the ring.
     ///
     /// A big enough ring that the pump never blocks, so this stays single-threaded
-    /// (decode, then read) rather than needing `play`'s reader thread — which makes
+    /// (decode, then read) rather than needing play's reader thread — which makes
     /// the output exactly reproducible across runs, as the tests that compare two
     /// runs sample-for-sample need it to be.
     fn decode_to_samples(config: PumpConfig) -> Vec<f32> {
@@ -951,11 +949,11 @@ mod tests {
         assert!(position >= 480, "expected at least 480ms, got {position}");
     }
 
-    /// Both of `to_interleaved`'s arms — the stereo one and the general one — have
-    /// to agree on frame-major order, and both have to keep dividing by `i16::MAX`.
+    /// Both of to_interleaved's arms — the stereo one and the general one — have
+    /// to agree on frame-major order, and both have to keep dividing by i16::MAX.
     ///
     /// The divisor is the reason this asserts on exact values rather than shape.
-    /// symphonia ships `copy_to_vec_interleaved`, which does everything this
+    /// symphonia ships copy_to_vec_interleaved, which does everything this
     /// function does and skips the per-sample plane lookup, but it scales 16-bit
     /// samples by 32768 rather than 32767 — so adopting it would quietly rescale
     /// every sample of every 16-bit source. This test is what catches that.
@@ -1001,7 +999,7 @@ mod tests {
         assert!(frames.abs_diff(9_600) < 256, "got {frames} frames");
     }
 
-    /// Starting mid-track is a seek, so this exercises the same path a `position`
+    /// Starting mid-track is a seek, so this exercises the same path a position
     /// in a play request takes.
     #[test]
     fn starting_part_way_in_skips_that_much_audio() {
@@ -1025,7 +1023,7 @@ mod tests {
         );
     }
 
-    /// `endTime` is enforced against playback position, so the track stops early.
+    /// endTime is enforced against playback position, so the track stops early.
     #[test]
     fn an_end_time_cuts_the_track_short() {
         let wav = TempWav::new("pump-endtime", 48_000, 2, 2.0);
@@ -1104,8 +1102,8 @@ mod tests {
         }
     }
 
-    /// Wraps a real format reader but returns the `interrupt` error kind from
-    /// `stream.rs`'s reconnect loop exactly once, then delegates normally — a
+    /// Wraps a real format reader but returns the interrupt error kind from
+    /// stream.rs's reconnect loop exactly once, then delegates normally — a
     /// stalled HTTP source giving up early because a command is waiting,
     /// without needing a genuinely stalled source in the test.
     struct InterruptOnceFormat {
@@ -1162,11 +1160,11 @@ mod tests {
         }
     }
 
-    /// The bug this fix targets: `next_packet()` returning the `Interrupted`
+    /// The bug this fix targets: next_packet() returning the Interrupted
     /// error kind — what a stalled HTTP source now does the moment a pump
     /// command is waiting, instead of exhausting its reconnect budget first —
-    /// used to have no dedicated handling in `decode_loop`, so it fell into the
-    /// catch-all `Err(error) => self.fail(error)` arm and ended the track as a
+    /// used to have no dedicated handling in decode_loop, so it fell into the
+    /// catch-all Err(error) => self.fail(error) arm and ended the track as a
     /// spurious failure. It must instead drain the waiting command and keep
     /// decoding.
     #[test]
@@ -1204,7 +1202,7 @@ mod tests {
         );
     }
 
-    /// The bug: `drain_commands` used to call `writer.reset(position_ms)`
+    /// The bug: drain_commands used to call writer.reset(position_ms)
     /// unconditionally, so a seek that the container refused (the way an
     /// unindexed container or a live stream would) still rebased the reported
     /// position to the requested target — permanently desyncing it from the
@@ -1240,11 +1238,11 @@ mod tests {
         );
     }
 
-    /// The same failure seen one layer down: `seek` computed `succeeded` and then
+    /// The same failure seen one layer down: seek computed succeeded and then
     /// reset the decoder, resampler and filter chain regardless. On the failure
     /// path nothing moved — the decoder is still mid-stream and carries on — so
     /// the reset threw away decoder state, the resampler's carried tail and (via
-    /// `TimescaleFilter::reset`) tens of ms of overlap-add state, putting an
+    /// TimescaleFilter::reset) tens of ms of overlap-add state, putting an
     /// audible discontinuity in the output for a seek that did nothing. The live
     /// stream a client keeps retrying seeks against is exactly this case.
     #[test]
@@ -1275,22 +1273,22 @@ mod tests {
         );
     }
 
-    /// The bug: `drain_commands` cleared `interrupt` the moment it saw an empty
-    /// channel, with nothing re-checking afterwards. `signal_pump` sends before
+    /// The bug: drain_commands cleared interrupt the moment it saw an empty
+    /// channel, with nothing re-checking afterwards. signal_pump sends before
     /// it sets the flag, which closes the window where the pump observes Empty
     /// and only then receives the command — but not the mirror of it, where the
-    /// engine's send-and-set both land between that `try_recv` and the pump's
+    /// engine's send-and-set both land between that try_recv and the pump's
     /// own store, so the store wipes a flag raised for a command still queued.
     /// The stalled HTTP source then burns its whole reconnect budget with that
-    /// command waiting (`stream.rs`'s `interrupt` check).
+    /// command waiting (stream.rs's interrupt check).
     ///
-    /// The bug: the resampler was built once, from what the *container*
-    /// declared (`source_params`), and never checked against what the decoder
+    /// The bug: the resampler was built once, from what the container
+    /// declared (source_params), and never checked against what the decoder
     /// actually produced. HE-AAC's SBR outputs at twice the declared rate, and
-    /// `params.channels` is `None` often enough that `source_params` falls back
+    /// params.channels is None often enough that source_params falls back
     /// to stereo for a mono stream — either way the track plays at the wrong
-    /// speed, silently, with `to_interleaved` framing the buffer by its real
-    /// channel count and `fill_stereo_frames` de-framing it by the declared one.
+    /// speed, silently, with to_interleaved framing the buffer by its real
+    /// channel count and fill_stereo_frames de-framing it by the declared one.
     ///
     /// The lie is injected rather than found: a container whose declaration is
     /// wrong in exactly this way is a fixture this test would have to ship a
@@ -1351,13 +1349,13 @@ mod tests {
     }
 
     /// The player's volume is a gain, not a filter stage, so nothing downstream
-    /// bounds it: with no filters configured `filter_interleaved` copies straight
+    /// bounds it: with no filters configured filter_interleaved copies straight
     /// through, and the ring hands the mixer whatever it was given. At
-    /// `volume: 1000` the multiplier is 16.4x, so a half-scale source lands at
+    /// volume: 1000 the multiplier is 16.4x, so a half-scale source lands at
     /// ~8.2 — out of range for the Opus encoder on the other side of the ring.
     ///
     /// Asserts on the range rather than on exact samples: the curve itself is
-    /// pinned by `filter::tests::player_volume_follows_the_lavaplayer_curve`, and
+    /// pinned by filter::tests::player_volume_follows_the_lavaplayer_curve, and
     /// what this one is here to catch is the missing clamp.
     #[test]
     fn a_loud_player_volume_saturates_instead_of_leaving_the_ring() {
@@ -1378,14 +1376,14 @@ mod tests {
         assert!(loudest > 0.9, "expected a saturating signal, got {loudest}");
     }
 
-    /// Upstream applies the player's volume in a `VolumePostProcessor`, which runs
-    /// on what `FinalPcmAudioFilter` hands the post-processors — after every
+    /// Upstream applies the player's volume in a VolumePostProcessor, which runs
+    /// on what FinalPcmAudioFilter hands the post-processors — after every
     /// lavadsp filter Lavalink configured. Applying it before the chain instead
-    /// feeds gained audio into stages that are not linear, and `distortion` is the
-    /// clearest of those: `sin*cos*tan` of a scaled sample is nothing like a scaled
-    /// `sin*cos*tan`.
+    /// feeds gained audio into stages that are not linear, and distortion is the
+    /// clearest of those: sin*cos*tan of a scaled sample is nothing like a scaled
+    /// sin*cos*tan.
     ///
-    /// Pinned as the property that ordering *is*: with volume last, turning it down
+    /// Pinned as the property that ordering is: with volume last, turning it down
     /// scales the filtered output and changes nothing else. A quiet volume (0.42x)
     /// keeps every sample well inside the clamp, so this compares real values
     /// rather than saturation.
@@ -1426,9 +1424,9 @@ mod tests {
     /// its absence: the window is two instructions wide with no seam to inject
     /// a send into, and a racing soak (tried, 2 000 rounds) never lands in it
     /// because spawning the producer costs orders of magnitude more than the
-    /// drain does. `signal_pump`'s own half of the same ordering
-    /// (`engine.rs`) is untested for the same reason. What is pinned here is
-    /// the part that *is* deterministic and that the rewritten loop could
+    /// drain does. signal_pump's own half of the same ordering
+    /// (engine.rs) is untested for the same reason. What is pinned here is
+    /// the part that is deterministic and that the rewritten loop could
     /// plausibly break: the clear still happens, and every queued command is
     /// still applied across the extra round trip the recheck adds.
     #[test]
@@ -1464,9 +1462,9 @@ mod tests {
     }
 
     /// The bug: the pump only checked for new commands between packets, at the
-    /// top of `decode_loop`. A full ring — exactly what pausing causes,
-    /// deliberately (`engine.rs`'s `set_paused` docs) — used to block inside
-    /// `write` with no visibility into the command channel at all, so a
+    /// top of decode_loop. A full ring — exactly what pausing causes,
+    /// deliberately (engine.rs's set_paused docs) — used to block inside
+    /// write with no visibility into the command channel at all, so a
     /// Seek/SetVolume/SetFilters/SetEndTime sent while paused sat unprocessed
     /// until the player was unpaused and the write already in flight finally
     /// drained.
@@ -1499,7 +1497,7 @@ mod tests {
         drop(commands_tx);
 
         // The ring has no room at all, so if commands were only checked
-        // between packets (the old behaviour), this call would have to wait
+        // between packets (the old behavior), this call would have to wait
         // for space that will never come — it must instead see both commands
         // on its very first attempt and return immediately.
         let more_samples = vec![0.0; 10];
@@ -1514,7 +1512,7 @@ mod tests {
     }
 
     /// A seek that interrupts a blocked write discards the ring's stale
-    /// pre-seek audio (`RingWriter::reset`, from within `drain_commands`) — the
+    /// pre-seek audio (RingWriter::reset, from within drain_commands) — the
     /// samples this call was in the middle of writing when the seek arrived
     /// are exactly that kind of stale audio, decoded before the seek, and must
     /// not be appended back in once the reset has run.
@@ -1623,7 +1621,7 @@ mod tests {
         assert_eq!(extension_hint(&track), None);
     }
 
-    /// `open` and the `ResetRequired` path must agree on what a valid source rate
+    /// open and the ResetRequired path must agree on what a valid source rate
     /// is — this is the one function both call into.
     #[test]
     fn source_params_reads_the_declared_rate_and_channels() {
@@ -1643,9 +1641,9 @@ mod tests {
     }
 
     /// The bug this guards: an unchecked container-declared sample rate makes the
-    /// resampler's step size (`source_rate / 48000`) tiny, so one ordinary packet
+    /// resampler's step size (source_rate / 48000) tiny, so one ordinary packet
     /// would reserve tens of millions of output frames. A WAV declaring 1Hz must be
-    /// refused at `open`, not decoded.
+    /// refused at open, not decoded.
     #[test]
     fn an_implausible_sample_rate_fails_without_having_started() {
         let wav = TempWav::new("implausible-rate", 1, 1, 1.0);

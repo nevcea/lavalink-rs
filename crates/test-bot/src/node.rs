@@ -1,9 +1,9 @@
-//! The node's v4 REST surface, as a client sees it.
+//! The node's v4 REST API from a client's perspective.
 //!
 //! Deliberately thin: every method is one request and the bodies are
-//! [`lavalink_protocol`] types, so a field this node gets wrong shows up as a
+//! lavalink_protocol types, so a field this node gets wrong shows up as a
 //! deserialization failure here rather than as a silently ignored key. That is the
-//! point of the bot — it is a second implementation reading what the first writes.
+//! purpose of the bot: a second implementation reads what the first writes.
 
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ pub enum NodeError {
     /// because the body is the node's own error DTO and worth showing verbatim.
     #[error("node returned {status}: {body}")]
     Status { status: StatusCode, body: String },
-    /// `/join` has not run yet, so there is no session to address a player to.
+    /// /join has not run yet, so there is no session to address a player to.
     #[error("no session yet — the node websocket has not sent `ready`")]
     NoSession,
     /// The command was wrong, not the node. Carried here so the dispatch table has
@@ -31,8 +31,8 @@ pub enum NodeError {
 
 /// A handle on one node.
 ///
-/// The session id arrives asynchronously over the websocket (`op: "ready"`), so it
-/// lives behind a lock that the websocket task writes and the command handlers read.
+/// The session ID arrives asynchronously over the WebSocket (op: "ready"), so it
+/// lives behind a lock shared by the WebSocket task and command handlers.
 pub struct Node {
     client: reqwest::Client,
     pub(crate) host: String,
@@ -50,7 +50,7 @@ impl Node {
         }
     }
 
-    /// Shared with the websocket task, which fills it in on `ready`.
+    /// Filled by the WebSocket task on ready.
     pub fn session_slot(&self) -> Arc<RwLock<Option<String>>> {
         Arc::clone(&self.session_id)
     }
@@ -60,7 +60,7 @@ impl Node {
     }
 
     /// Sends a request and checks the status, leaving the body's shape (or absence)
-    /// to the caller — a `DELETE` answers 204 with nothing, which [`send`] cannot
+    /// to the caller — a DELETE answers 204 with nothing, which send cannot
     /// share since it always decodes JSON.
     async fn request(
         &self,
@@ -105,8 +105,8 @@ impl Node {
         self.send(Method::GET, "/v4/stats", &[], NO_BODY).await
     }
 
-    /// `GET /v4/loadtracks`. The identifier is whatever the user typed — a URL, a
-    /// path, or a `ytsearch:`/`scsearch:` query.
+    /// GET /v4/loadtracks. The identifier is whatever the user typed — a URL, a
+    /// path, or a ytsearch:/scsearch: query.
     pub async fn load_tracks(&self, identifier: &str) -> Result<LoadResult, NodeError> {
         self.send(
             Method::GET,
@@ -156,7 +156,7 @@ impl Node {
         .await
     }
 
-    /// `DELETE` answers 204 with no body, so it does not go through [`send`].
+    /// DELETE answers 204 with no body, so it does not go through send.
     pub async fn destroy_player(&self, guild_id: u64) -> Result<(), NodeError> {
         let session = self.session_id().await?;
         self.request(
@@ -170,7 +170,7 @@ impl Node {
     }
 }
 
-/// `None` needs a type for the generic body parameter, and `()` serializes to
-/// `null` rather than to nothing — this names the absent body once instead of
+/// None needs a type for the generic body parameter, and () serializes to
+/// null rather than to nothing — this names the absent body once instead of
 /// spelling the turbofish at every call site.
 const NO_BODY: Option<&()> = None;

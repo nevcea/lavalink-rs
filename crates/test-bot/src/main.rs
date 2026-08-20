@@ -1,17 +1,16 @@
 //! A Discord bot whose only purpose is to exercise this node against real Discord.
 //!
-//! The node has never completed a voice handshake — everything up to the point where
-//! bytes leave for Discord is tested, and nothing past it. This bot closes that loop:
+//! Unit tests stop before a real Discord voice handshake. This bot closes that gap:
 //! it is a v4 client like Wavelink or Lavalink.py, driving the node over REST and
-//! reading back what the node sends over its websocket.
+//! reading back what the node sends over its WebSocket.
 //!
-//! # Why songbird is here again, and differently
+//! Why songbird is here again, and differently
 //!
-//! The server links songbird's `driver` and no gateway. This links its `gateway` and
+//! The server links songbird's driver and no gateway. This links its gateway and
 //! no driver — the two halves of the same library on opposite sides of the same
-//! connection. That is the actual Lavalink architecture: the *client* asks Discord to
+//! connection. That is the actual Lavalink architecture: the client asks Discord to
 //! move the bot into a voice channel and receives the credentials, then hands them to
-//! the *node*, which is what actually speaks voice. Nothing here touches audio.
+//! the node, which is what actually speaks voice. Nothing here touches audio.
 
 mod commands;
 mod node;
@@ -43,23 +42,23 @@ struct Handler {
     /// live immediately, unlike global commands, which can take up to an hour to
     /// propagate. Fine for a bot that only ever runs against one test server.
     guild: GuildId,
-    /// Filters are cumulative on the wire — a `PATCH` carrying only `equalizer`
+    /// Filters are cumulative on the wire — a PATCH carrying only equalizer
     /// replaces the whole chain — so the last state sent is kept per guild and
-    /// re-sent in full. Without this, `/lowpass` would silently undo `/eq`.
+    /// re-sent in full. Without this, /lowpass would silently undo /eq.
     filters: Mutex<HashMap<u64, Filters>>,
-    /// Set once `main` has the built [`Client`] in hand — it does not exist yet when
-    /// `Handler` is constructed. `/ping` reads the shard's heartbeat latency from it.
+    /// Set once main has the built Client in hand — it does not exist yet when
+    /// Handler is constructed. /ping reads the shard's heartbeat latency from it.
     shard_manager: Arc<OnceLock<Arc<ShardManager>>>,
-    /// `ready` fires on every IDENTIFY, not just the first — a failed session resume
+    /// ready fires on every IDENTIFY, not just the first — a failed session resume
     /// re-triggers it. Without this guard, each re-identify would spawn another
-    /// websocket task, register another session on the node, and re-register the
+    /// WebSocket task, register another session on the node, and re-register the
     /// same slash commands.
     ws_started: OnceLock<()>,
 }
 
 #[async_trait]
 impl EventHandler for Handler {
-    /// The node websocket cannot open before this point: it needs the bot's user id
+    /// The node WebSocket cannot open before this point: it needs the bot's user ID
     /// as a header, and that is not known until Discord says so.
     async fn ready(&self, ctx: Context, ready: Ready) {
         let user_id = ready.user.id.get();
@@ -318,7 +317,7 @@ impl Handler {
     ///
     /// The two steps are the whole architecture in miniature: songbird performs the
     /// gateway op4 and waits for Discord's voice state + voice server updates, and
-    /// the node is then *told* the result. It never talks to the gateway itself.
+    /// the node is then told the result. It never talks to the gateway itself.
     async fn join(
         &self,
         ctx: &Context,
@@ -357,7 +356,7 @@ impl Handler {
     /// Destroys the player before leaving, in that order.
     ///
     /// The reverse leaves the node holding a voice connection Discord has already
-    /// torn down, which surfaces as a `WebSocketClosedEvent` the client never asked
+    /// torn down, which surfaces as a WebSocketClosedEvent the client never asked
     /// for — worth avoiding here so that any such event during testing is real.
     async fn leave(&self, guild: u64) -> Result<String, NodeError> {
         self.node.destroy_player(guild).await?;
@@ -412,7 +411,7 @@ impl Handler {
     }
 
     /// Loads without playing, so a source can be checked before a voice channel is
-    /// involved — which is most of what `loadtracks` verification needs.
+    /// involved — which is most of what loadtracks verification needs.
     async fn search(&self, identifier: &str) -> Result<String, NodeError> {
         let result = self.node.load_tracks(identifier).await?;
         Ok(match result {
@@ -433,7 +432,7 @@ impl Handler {
     }
 
     /// Mutates the remembered filter chain for a guild and re-sends all of it — a
-    /// `PATCH` carrying only one filter key replaces the whole chain server-side.
+    /// PATCH carrying only one filter key replaces the whole chain server-side.
     async fn apply_filters(
         &self,
         guild: u64,
@@ -457,7 +456,7 @@ impl Handler {
     }
 
     /// The Discord gateway heartbeat latency for the shard this interaction arrived
-    /// on — the same number the client logs on every `Ready`/`Resumed`, surfaced on
+    /// on — the same number the client logs on every Ready/Resumed, surfaced on
     /// demand.
     async fn gateway_latency(&self, ctx: &Context) -> String {
         let Some(shard_manager) = self.shard_manager.get().cloned() else {

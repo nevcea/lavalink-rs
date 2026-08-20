@@ -1,16 +1,15 @@
 //! The whole pump, without Discord — for #9.
 //!
-//! `repro_stuck.rs` drives symphonia's probe and decoder directly, which is only the
-//! left half of the pipeline. This runs the *real* `pump::run` against the *real*
-//! `StreamOpener`, writing into a real ring, with a reader pulling on a 20ms clock
+//! repro_stuck.rs drives symphonia's probe and decoder directly, which is only the
+//! left half of the pipeline. This runs the real pump::run against the real
+//! StreamOpener, writing into a real ring, with a reader pulling on a 20ms clock
 //! the way songbird's mixer does. That is the only piece left between "the standalone
 //! harness decodes this file fine" and "the node reports the track stuck": everything
 //! here is the service's own code path minus the voice connection.
 //!
-//! ```sh
+//! Example commands:
 //! cargo run -p lavalink-server --release --example repro_pump -- J8io3r9b3rs
 //! cargo run -p lavalink-server --release --example repro_pump -- https://example.invalid/a.mp3
-//! ```
 //!
 //! Prints a line per second: playback position, frames delivered, frames nulled. A
 //! position that never leaves 0 with nulled frames climbing is the reported bug; the
@@ -31,7 +30,7 @@ use lavalink_server::audio::source::YtDlp;
 use lavalink_server::audio::stream::StreamOpener;
 use lavalink_server::config::ResamplingQuality;
 
-/// `frameBufferDurationMs`' default (`config.rs`), so the ring is the size service
+/// frameBufferDurationMs' default (config.rs), so the ring is the size service
 /// actually runs with — a smaller one would park the pump far sooner and change the
 /// very timing under investigation.
 const BUFFER_MS: u32 = 5_000;
@@ -145,7 +144,7 @@ fn main() {
     eprintln!("pump outcome: {:?}", pump.join().expect("the pump panicked"));
 }
 
-/// The same shape the loader produces, which is what decides `StreamOpener::open`'s
+/// The same shape the loader produces, which is what decides StreamOpener::open's
 /// branch — a bare video id is a youtube track, anything else is a plain http one.
 fn track_info(identifier: &str) -> TrackInfo {
     let is_url = identifier.starts_with("http");

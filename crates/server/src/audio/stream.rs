@@ -1,6 +1,6 @@
 //! Opening a track's bytes for the pump.
 //!
-//! Produces a [`MediaSource`] — the demuxer's view of a byte stream — for each of
+//! Produces a MediaSource — the demuxer's view of a byte stream — for each of
 //! our sources. The interesting one is HTTP: whether it is seekable, and what
 //! happens when a long-running stream drops mid-track.
 
@@ -23,26 +23,26 @@ use super::source::{SourceError, YtDlp};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What a stalled source returns instead of retrying, once the pump has a command
-/// waiting. Carried as an [`io::Error`] payload rather than as an [`io::ErrorKind`].
+/// waiting. Carried as an io::Error payload rather than as an io::ErrorKind.
 ///
-/// `ErrorKind::Interrupted` is the obvious spelling and is what this used to be —
+/// ErrorKind::Interrupted is the obvious spelling and is what this used to be —
 /// but it is the one kind symphonia deliberately retries rather than propagates.
-/// `MediaSourceStream::read_buf_exact` swallows it and calls `read` again, and that
-/// is the path a packet body takes (`read_mpeg_frame` reads the frame that way), so
-/// the error never escaped to `decode_loop` from a real demuxer at all — only from
-/// the mock `FormatReader` the pump's tests use.
+/// MediaSourceStream::read_buf_exact swallows it and calls read again, and that
+/// is the path a packet body takes (read_mpeg_frame reads the frame that way), so
+/// the error never escaped to decode_loop from a real demuxer at all — only from
+/// the mock FormatReader the pump's tests use.
 ///
 /// The result was worse than having no interrupt at all: the flag is only cleared
-/// by `drain_commands`, which a pump parked inside `next_packet()` never reaches,
+/// by drain_commands, which a pump parked inside next_packet() never reaches,
 /// and the check sits above the reconnect guard, so the source could not recover
-/// either. A silent connection plus a pending stop meant `read` returning this and
-/// symphonia retrying it every `read_timeout` until `MAX_REQUEST_DURATION` — six
+/// either. A silent connection plus a pending stop meant read returning this and
+/// symphonia retrying it every read_timeout until MAX_REQUEST_DURATION — six
 /// hours — with the pump thread, reader thread and socket pinned throughout.
 /// Without the flag the same source would have failed for good after
-/// `MAX_RECONNECT_ATTEMPTS`, and that error *does* propagate.
+/// MAX_RECONNECT_ATTEMPTS, and that error does propagate.
 ///
 /// Every other kind propagates, so what identifies this is the payload type rather
-/// than the kind: a genuine `ErrorKind::Other` off the network must not be mistaken
+/// than the kind: a genuine ErrorKind::Other off the network must not be mistaken
 /// for a pending command and skipped.
 #[derive(Debug)]
 pub struct CommandPending;
@@ -55,7 +55,7 @@ impl std::fmt::Display for CommandPending {
 
 impl std::error::Error for CommandPending {}
 
-/// Whether an I/O error is [`CommandPending`] — a cue for `decode_loop` to go drain
+/// Whether an I/O error is CommandPending — a cue for decode_loop to go drain
 /// its command queue, not a real read failure.
 pub fn is_command_pending(error: &io::Error) -> bool {
     error
@@ -65,8 +65,8 @@ pub fn is_command_pending(error: &io::Error) -> bool {
 
 /// How long a single read may go without a byte before it is treated as stalled.
 ///
-/// Comfortably under `trackStuckThresholdMs`'s 10s default, so a stall is caught
-/// and reconnected (see `MAX_RECONNECT_ATTEMPTS`) before the player ever has to
+/// Comfortably under trackStuckThresholdMs's 10s default, so a stall is caught
+/// and reconnected (see MAX_RECONNECT_ATTEMPTS) before the player ever has to
 /// report the track stuck.
 const READ_TIMEOUT: Duration = Duration::from_secs(6);
 
@@ -77,21 +77,21 @@ const READ_TIMEOUT: Duration = Duration::from_secs(6);
 /// tolerate a run of those either.
 const MAX_RECONNECT_ATTEMPTS: u32 = 3;
 
-/// Hard ceiling on how long a single HTTP request (one [`HttpMediaSource::connect`]
+/// Hard ceiling on how long a single HTTP request (one HttpMediaSource::connect
 /// call) may run, applied per-request rather than at the client level.
 ///
-/// `reqwest::blocking` has no idle-read timeout of its own in its public API — the
-/// async client's `ClientBuilder::read_timeout` would be exactly right, but the
-/// blocking wrapper never exposes it — and `tcp_user_timeout` doesn't help either,
+/// reqwest::blocking has no idle-read timeout of its own in its public API — the
+/// async client's ClientBuilder::read_timeout would be exactly right, but the
+/// blocking wrapper never exposes it — and tcp_user_timeout doesn't help either,
 /// since it only fires on data left unacknowledged, not on a connection that is
 /// simply silent. Without some bound, a connection that goes quiet without closing
-/// pins `ReaderChannel::spawn`'s reader thread in a blocking `Response::read()`
-/// forever once a reconnect replaces it: `HttpMediaSource::read`'s reconnect logic
-/// only stops the *caller* from waiting past `read_timeout`, it does nothing to the
+/// pins ReaderChannel::spawn's reader thread in a blocking Response::read()
+/// forever once a reconnect replaces it: HttpMediaSource::read's reconnect logic
+/// only stops the caller from waiting past read_timeout, it does nothing to the
 /// thread being left behind, so a long-running stream that stalls repeatedly can
 /// leak one OS thread and socket per stall, without limit.
 ///
-/// A seekable source (the only kind that ever reconnects, see `connect`'s callers)
+/// A seekable source (the only kind that ever reconnects, see connect's callers)
 /// resumes transparently well before this fires; hitting it just forces that
 /// resume a little early. For a non-seekable source it ends a request that has
 /// been running for an implausibly long time instead of leaking its thread
@@ -109,15 +109,15 @@ const MAX_REQUEST_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 pub struct StreamOpener {
     ytdlp: Option<Arc<YtDlp>>,
     proxy: Option<reqwest::Proxy>,
-    /// `lavalink.server.timeouts.connectTimeoutMs`.
+    /// lavalink.server.timeouts.connectTimeoutMs.
     connect_timeout: Duration,
-    /// `lavalink.server.timeouts.socketTimeoutMs` — the idle-read stall threshold
-    /// (Apache's `SO_TIMEOUT`), not an overall request timeout.
+    /// lavalink.server.timeouts.socketTimeoutMs — the idle-read stall threshold
+    /// (Apache's SO_TIMEOUT), not an overall request timeout.
     read_timeout: Duration,
 }
 
-/// Matches the constructor a zero-config `StreamOpener` gets everywhere except
-/// `main.rs`: no yt-dlp, no proxy, and the same timeouts production used before
+/// Matches the constructor a zero-config StreamOpener gets everywhere except
+/// main.rs: no yt-dlp, no proxy, and the same timeouts production used before
 /// they became configurable.
 impl Default for StreamOpener {
     fn default() -> Self {
@@ -145,8 +145,8 @@ impl StreamOpener {
         }
     }
 
-    /// `interrupt` is polled by a stalled HTTP source between reconnect attempts —
-    /// see [`HttpMediaSource`]'s field of the same name — so a pump command that
+    /// interrupt is polled by a stalled HTTP source between reconnect attempts —
+    /// see HttpMediaSource's field of the same name — so a pump command that
     /// arrived while the source was stuck retrying can be acted on immediately
     /// rather than after the retry budget runs out.
     pub fn open(
@@ -232,80 +232,80 @@ impl StreamOpener {
 
 /// An HTTP resource as a seekable byte stream.
 ///
-/// Seeking re-issues the request with a `Range` header. That is the only way to move
+/// Seeking re-issues the request with a Range header. That is the only way to move
 /// backwards in a stream we are not storing, and it is why seek support is reported
-/// from `Accept-Ranges` rather than assumed: on a server without it, symphonia would
+/// from Accept-Ranges rather than assumed: on a server without it, symphonia would
 /// otherwise ask for a seek that silently returns the wrong bytes.
 pub struct HttpMediaSource {
     client: Client,
     url: String,
-    /// `None` for a live stream with no declared length.
+    /// None for a live stream with no declared length.
     length: Option<u64>,
     seekable: bool,
     position: u64,
-    /// Behind a mutex purely to satisfy [`MediaSource`]'s `Sync` bound — the pump
+    /// Behind a mutex purely to satisfy MediaSource's Sync bound — the pump
     /// owns this exclusively and never shares it.
     reader: Mutex<Option<ReaderChannel>>,
     /// Consecutive reconnects since the last byte actually read. Resets on any
     /// successful read, so it counts a run of failures, not a track's total.
     reconnect_attempts: u32,
-    /// `READ_TIMEOUT` in production; shrunk in tests so a stall scenario doesn't
+    /// READ_TIMEOUT in production; shrunk in tests so a stall scenario doesn't
     /// have to burn the real multi-second timeout to exercise it.
     read_timeout: Duration,
-    /// `MAX_REQUEST_DURATION` in production; shrunk in tests that specifically
+    /// MAX_REQUEST_DURATION in production; shrunk in tests that specifically
     /// exercise it.
     request_duration: Duration,
-    /// Set by the pump whenever a command (`Seek`, `Stop`, ...) is waiting to be
+    /// Set by the pump whenever a command (Seek, Stop, ...) is waiting to be
     /// applied. Checked between reconnect attempts so a stalled connection gives
     /// up its remaining retry budget immediately instead of making the command
-    /// wait out the whole thing — up to `MAX_RECONNECT_ATTEMPTS` full
+    /// wait out the whole thing — up to MAX_RECONNECT_ATTEMPTS full
     /// connect-and-stall cycles, tens of seconds, otherwise. Cleared by the pump
     /// once it has drained the commands that set it.
     interrupt: Arc<AtomicBool>,
 }
 
 /// Bytes off a socket, one chunk at a time, from a dedicated thread — so the
-/// consumer can bound how long it waits for the next one via `recv_timeout`.
-/// `reqwest::blocking` has no idle-read timeout of its own, and a plain blocking
-/// `Response::read` can hang forever on a connection that stopped sending without
+/// consumer can bound how long it waits for the next one via recv_timeout.
+/// reqwest::blocking has no idle-read timeout of its own, and a plain blocking
+/// Response::read can hang forever on a connection that stopped sending without
 /// closing, which is exactly the failure mode a stalled CDN edge produces.
 struct ReaderChannel {
     chunks: Receiver<io::Result<Vec<u8>>>,
     /// Spent read buffers returned to the reader thread for reuse. Bounded to two
     /// entries, matching the reader's two-buffer working set (one in flight in
-    /// `chunks`, one drained here) — the reader consumes from this on every read,
-    /// so a `try_send` here that finds the channel full is a bug, not a normal
+    /// chunks, one drained here) — the reader consumes from this on every read,
+    /// so a try_send here that finds the channel full is a bug, not a normal
     /// case, and dropping the buffer would silently degrade to per-read allocation.
     returns: SyncSender<Vec<u8>>,
-    /// Bytes already received but not yet handed to the caller of `read`.
+    /// Bytes already received but not yet handed to the caller of read.
     leftover: Vec<u8>,
     leftover_pos: usize,
-    /// Bytes received since `window_start`, for the throughput floor below.
+    /// Bytes received since window_start, for the throughput floor below.
     window_bytes: usize,
     window_start: Instant,
 }
 
 /// Chunk size for the reader thread's own reads. Unrelated to the caller's buffer
-/// size — it only bounds how much a single stalled `recv_timeout` can be behind.
+/// size — it only bounds how much a single stalled recv_timeout can be behind.
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
-/// The least a source may deliver within one `read_timeout` window and still count
+/// The least a source may deliver within one read_timeout window and still count
 /// as alive.
 ///
 /// The idle-gap timeout alone only catches a source that goes fully silent; one
 /// that sends a byte or two just before every timeout never trips it, while still
-/// pinning the pump thread and this reader thread indefinitely — `next_packet()`
+/// pinning the pump thread and this reader thread indefinitely — next_packet()
 /// only checks for a pending stop between packets, so a source that never finishes
 /// a packet never gives the pump a chance to notice it was asked to stop. Set far
 /// below any real stream's bitrate (even an 8kbps low-bitrate radio feed is
-/// roughly 6 000 bytes over `READ_TIMEOUT`) so this only catches a source making
+/// roughly 6 000 bytes over READ_TIMEOUT) so this only catches a source making
 /// essentially no progress, not a genuinely slow one.
 const MIN_WINDOW_BYTES: usize = 256;
 
 impl ReaderChannel {
     fn spawn(mut response: Response) -> Self {
         let (chunks_tx, chunks_rx) = sync_channel::<io::Result<Vec<u8>>>(2);
-        // Two entries — one buffer sits in `chunks_rx` awaiting the receiver while
+        // Two entries — one buffer sits in chunks_rx awaiting the receiver while
         // the other is being read into. Pre-filled so the reader never has to
         // allocate: a warmed-up track cycles the same two Vecs forever.
         let (returns_tx, returns_rx) = sync_channel::<Vec<u8>>(2);
@@ -317,9 +317,9 @@ impl ReaderChannel {
             .expect("the returns channel has capacity for two, and holds one here");
         std::thread::spawn(move || {
             loop {
-                // Blocks the reader whenever both buffers are queued in `chunks_tx`
+                // Blocks the reader whenever both buffers are queued in chunks_tx
                 // and the receiver has not sent one back yet — natural backpressure
-                // that matches what `sync_channel(2)` gave us before this change.
+                // that matches what sync_channel(2) gave us before this change.
                 // The Err arm means the receiver has been dropped; nothing to do.
                 let Ok(mut buf) = returns_rx.recv() else { return };
                 buf.resize(READ_CHUNK_BYTES, 0);
@@ -365,7 +365,7 @@ impl ReaderChannel {
                     // Hand the just-drained buffer back to the reader for reuse.
                     // Only if it can hold a full chunk without reallocating — the
                     // first swap sees Vec::new() from the constructor, which is
-                    // pointless to return. `try_send` never blocks: with the
+                    // pointless to return. try_send never blocks: with the
                     // two-buffer working set the channel has room by construction
                     // (the reader just consumed the entry we're refilling), but a
                     // full channel simply means we drop the buf and the reader
@@ -416,8 +416,8 @@ impl ReaderChannel {
 }
 
 impl HttpMediaSource {
-    /// `user_agent` overrides the default when the resource must be fetched as the
-    /// same client that negotiated its URL (see `STREAM_USER_AGENT`).
+    /// user_agent overrides the default when the resource must be fetched as the
+    /// same client that negotiated its URL (see STREAM_USER_AGENT).
     pub fn open(
         url: &str,
         user_agent: Option<&str>,
@@ -434,10 +434,10 @@ impl HttpMediaSource {
         )
     }
 
-    /// `connect_timeout` is `timeouts.connectTimeoutMs`; `read_timeout` is
-    /// `timeouts.socketTimeoutMs` — an idle-read stall threshold (Apache's
-    /// `SO_TIMEOUT`), not an overall request timeout. `request_duration` is
-    /// `MAX_REQUEST_DURATION` in production; only tests exercising it directly
+    /// connect_timeout is timeouts.connectTimeoutMs; read_timeout is
+    /// timeouts.socketTimeoutMs — an idle-read stall threshold (Apache's
+    /// SO_TIMEOUT), not an overall request timeout. request_duration is
+    /// MAX_REQUEST_DURATION in production; only tests exercising it directly
     /// pass anything else.
     fn open_with_timeouts(
         url: &str,
@@ -454,7 +454,7 @@ impl HttpMediaSource {
         // and applies read_timeout on the receiving end — stalls surface as read
         // errors, same as a dropped connection. connect applies request_duration
         // per request instead, as a ceiling on how long any one request may run.
-        // Every connect() below replaces `self.reader` outright rather than reusing
+        // Every connect() below replaces self.reader outright rather than reusing
         // the old response, so a pooled idle connection is never actually reused —
         // it can only go stale and race a server that's already closed it (seen as
         // a flaky "error sending request" on reconnect/seek). Disabling the pool
@@ -486,11 +486,11 @@ impl HttpMediaSource {
         Ok(source)
     }
 
-    /// (Re-)issues the request starting at `offset`.
+    /// (Re-)issues the request starting at offset.
     ///
-    /// Always sent as a `Range` request, even at `offset == 0` (`bytes=0-`): some
-    /// CDNs (googlevideo's `gir=yes` URLs among them) 403 a rangeless GET but serve
-    /// the same bytes fine once a `Range` header is present at all.
+    /// Always sent as a Range request, even at offset == 0 (bytes=0-): some
+    /// CDNs (googlevideo's gir=yes URLs among them) 403 a rangeless GET but serve
+    /// the same bytes fine once a Range header is present at all.
     fn connect(&mut self, offset: u64) -> Result<(), SourceError> {
         let request = self
             .client
@@ -574,8 +574,8 @@ impl HttpMediaSource {
     }
 }
 
-/// The resource's full length, from `Content-Range` when the response is partial and
-/// `Content-Length` otherwise.
+/// The resource's full length, from Content-Range when the response is partial and
+/// Content-Length otherwise.
 fn total_length(response: &Response) -> Option<u64> {
     let headers = response.headers();
 
@@ -692,7 +692,7 @@ mod tests {
 
     use super::*;
 
-    /// Reads one HTTP request off `stream` far enough to know it happened, ignoring
+    /// Reads one HTTP request off stream far enough to know it happened, ignoring
     /// its content — these tests only care about what the server sends back.
     fn consume_request(stream: &std::net::TcpStream) {
         let mut reader = BufReader::new(stream);
@@ -706,9 +706,9 @@ mod tests {
     }
 
     /// A server that answers the first request with a body cut short of what
-    /// `Content-Length` promised — as if the connection dropped mid-stream — and the
-    /// second (the resume, identified by its `Range` header) with the rest, as `200`
-    /// or `206` depending on `resume_status`.
+    /// Content-Length promised — as if the connection dropped mid-stream — and the
+    /// second (the resume, identified by its Range header) with the rest, as 200
+    /// or 206 depending on resume_status.
     fn spawn_dropping_server(full_body: &'static [u8], cut_at: usize) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -748,7 +748,7 @@ mod tests {
     }
 
     /// A server that answers the first request with the full body and Accept-Ranges,
-    /// and any subsequent `Range` request with `416 Range Not Satisfiable` — what a
+    /// and any subsequent Range request with 416 Range Not Satisfiable — what a
     /// real server sends when the requested range starts at or past the resource's
     /// end.
     fn spawn_server_that_416s_past_eof(full_body: &'static [u8]) -> String {
@@ -784,9 +784,9 @@ mod tests {
 
     /// The bug this fix targets: symphonia 0.6's probe seeks near the end of a
     /// seekable source looking for trailing metadata (ID3v1/APE tags). A seek to
-    /// (or past) the resource's actual end is answered by real servers with `416`,
-    /// which used to propagate straight out of `connect` as a hard failure —
-    /// surfacing as `Could not read the container: 416: Range Not Satisfiable`
+    /// (or past) the resource's actual end is answered by real servers with 416,
+    /// which used to propagate straight out of connect as a hard failure —
+    /// surfacing as Could not read the container: 416: Range Not Satisfiable
     /// even for an otherwise perfectly playable file. It must instead be treated
     /// as "nothing left to read from here", the same as any other clean EOF.
     #[test]
@@ -804,12 +804,12 @@ mod tests {
         assert_eq!(read, 0, "a seek past EOF must read as empty, not error");
     }
 
-    /// The bug this fix targets: `connect` treated *every* `416` at a non-zero
+    /// The bug this fix targets: connect treated every 416 at a non-zero
     /// offset as a clean end of stream, which is only true past the end of the
-    /// resource. A resume for a range well inside the declared length gets a `416`
+    /// resource. A resume for a range well inside the declared length gets a 416
     /// when the URL has expired or the resource rotated — googlevideo's do, hours
     /// after yt-dlp hands them over — and swallowing that as EOF ends the track
-    /// as `finished` part way through, with no error anywhere to explain the
+    /// as finished part way through, with no error anywhere to explain the
     /// truncation. It has to surface as a failure instead.
     #[test]
     fn a_416_inside_the_declared_length_is_a_failure_not_an_end_of_stream() {
@@ -874,9 +874,9 @@ mod tests {
 
     /// The scenario from the bug report: a track that has already produced audio
     /// hits a mid-stream read error. Before this fix that error propagated straight
-    /// out of `read`, which the pump turns into a track-ending `Failed` outcome even
+    /// out of read, which the pump turns into a track-ending Failed outcome even
     /// though the source could have kept going. Now the source reconnects with a
-    /// `Range` request from where it left off and the read succeeds transparently.
+    /// Range request from where it left off and the read succeeds transparently.
     #[test]
     fn a_dropped_connection_is_resumed_with_a_range_request() {
         const BODY: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
@@ -898,13 +898,13 @@ mod tests {
         assert_eq!(collected, BODY);
     }
 
-    /// The bug this fix targets: `HttpMediaSource::read`'s reconnect loop had no
+    /// The bug this fix targets: HttpMediaSource::read's reconnect loop had no
     /// way to know a pump command was waiting, so a stalled or dropped
     /// connection made a Seek/Stop/SetFilters wait out the whole reconnect
-    /// budget — up to `MAX_RECONNECT_ATTEMPTS` attempts, each up to
-    /// `connect_timeout + read_timeout` — before the pump ever got a chance to
-    /// see it (`pump.rs` only checks for commands between packets). Setting
-    /// `interrupt` (what `pump.rs` does the moment a command arrives) must make
+    /// budget — up to MAX_RECONNECT_ATTEMPTS attempts, each up to
+    /// connect_timeout + read_timeout — before the pump ever got a chance to
+    /// see it (pump.rs only checks for commands between packets). Setting
+    /// interrupt (what pump.rs does the moment a command arrives) must make
     /// the very next read give up immediately instead of even trying to
     /// reconnect.
     #[test]
@@ -986,19 +986,19 @@ mod tests {
         );
     }
 
-    /// The bug: this used to be `ErrorKind::Interrupted`, which is the one kind
+    /// The bug: this used to be ErrorKind::Interrupted, which is the one kind
     /// symphonia retries rather than propagates —
-    /// `MediaSourceStream::read_buf_exact` swallows it and calls `read` again, and
+    /// MediaSourceStream::read_buf_exact swallows it and calls read again, and
     /// that is the path a packet body takes. So the interrupt never reached
-    /// `decode_loop` from a real demuxer at all, and since only `drain_commands`
-    /// clears the flag (which a pump inside `next_packet()` never reaches) and the
+    /// decode_loop from a real demuxer at all, and since only drain_commands
+    /// clears the flag (which a pump inside next_packet() never reaches) and the
     /// check sits above the reconnect guard, the source could not recover either:
-    /// a silent connection plus a pending stop retried until `MAX_REQUEST_DURATION`
+    /// a silent connection plus a pending stop retried until MAX_REQUEST_DURATION
     /// — six hours — with the pump thread, reader thread and socket pinned.
     ///
-    /// `pump.rs`'s own interrupt test cannot catch this: it uses a mock
-    /// `FormatReader`, so real symphonia is never in the path. This drives the real
-    /// thing, and asserts the error escapes on the *first* attempt rather than
+    /// pump.rs's own interrupt test cannot catch this: it uses a mock
+    /// FormatReader, so real symphonia is never in the path. This drives the real
+    /// thing, and asserts the error escapes on the first attempt rather than
     /// being retried at all.
     #[test]
     fn a_pending_command_escapes_symphonias_retry_loop() {
@@ -1058,10 +1058,10 @@ mod tests {
 
     /// The bug this fix targets: a connection that stays open but stops sending
     /// bytes entirely (no error, no close — the failure mode behind the reported
-    /// `TrackStuckEvent`s on long-running streams). Before `ReaderChannel`, this
-    /// hung in `Response::read` until the pump's own stuck-detector fired, and
+    /// TrackStuckEvents on long-running streams). Before ReaderChannel, this
+    /// hung in Response::read until the pump's own stuck-detector fired, and
     /// nothing about that detector could recover the track. Now a stall surfaces
-    /// as a timeout, which the existing reconnect-with-`Range` path already
+    /// as a timeout, which the existing reconnect-with-Range path already
     /// handles exactly like a dropped connection.
     #[test]
     fn a_stalled_connection_is_reconnected_after_the_read_timeout() {
@@ -1131,15 +1131,15 @@ mod tests {
         assert_eq!(collected, BODY);
     }
 
-    /// The bug this fix targets: nothing keeps a `JoinHandle` for the reader
-    /// thread `ReaderChannel::spawn` starts, so once a reconnect replaces it, the
-    /// *old* thread's blocking `Response::read()` had no bound of its own and
+    /// The bug this fix targets: nothing keeps a JoinHandle for the reader
+    /// thread ReaderChannel::spawn starts, so once a reconnect replaces it, the
+    /// old thread's blocking Response::read() had no bound of its own and
     /// could stay parked forever on a connection that goes silent without
-    /// closing — `reqwest::blocking` exposes no idle-read timeout in its public
-    /// API. `connect` now puts a ceiling on the request itself
-    /// (`MAX_REQUEST_DURATION` in production), so even a silent connection's read
+    /// closing — reqwest::blocking exposes no idle-read timeout in its public
+    /// API. connect now puts a ceiling on the request itself
+    /// (MAX_REQUEST_DURATION in production), so even a silent connection's read
     /// eventually returns instead of hanging. This test isolates that mechanism
-    /// from the pre-existing idle-gap check by making `read_timeout` deliberately
+    /// from the pre-existing idle-gap check by making read_timeout deliberately
     /// larger than the request ceiling, so only the new per-request bound can be
     /// what ends the read.
     #[test]
@@ -1195,7 +1195,7 @@ mod tests {
     /// timeout, forever. Before the throughput floor this satisfied the previous
     /// test's exact protection on every single chunk and never failed, which is
     /// precisely the shape of connection that can pin the pump thread and this
-    /// reader thread indefinitely: `pump.rs`'s `next_packet()` only checks for a
+    /// reader thread indefinitely: pump.rs's next_packet() only checks for a
     /// pending stop between finished packets, and a source that never finishes
     /// one never gives it the chance. Not seekable, so the error must surface on
     /// its own rather than through the reconnect path.
@@ -1251,19 +1251,19 @@ mod tests {
     }
 
     /// The bug: the end-of-stream marker (an empty chunk) was charged against the
-    /// throughput floor like any other chunk. `recv_timeout` is paced by playback,
+    /// throughput floor like any other chunk. recv_timeout is paced by playback,
     /// so on a stream whose chunk lasts longer than the timeout every chunk resets
-    /// the window and the marker arrives one gap later against a `window_bytes` of
-    /// 0 — failing the floor. A 64 kbps mp3 over `READ_CHUNK_BYTES` does exactly
+    /// the window and the marker arrives one gap later against a window_bytes of
+    /// 0 — failing the floor. A 64 kbps mp3 over READ_CHUNK_BYTES does exactly
     /// that, deterministically, on every track: not seekable, so the error
-    /// surfaces straight to `decode_loop` and a finished track is reported to the
+    /// surfaces straight to decode_loop and a finished track is reported to the
     /// client as a playback exception instead.
     ///
-    /// The pacing has to be on the *consumer*, which is where it is in production:
+    /// The pacing has to be on the consumer, which is where it is in production:
     /// the server hands over both chunks at once, and the reads are spread out the
     /// way the pump's are by a full ring. With a 300ms window and ~420ms spent
     /// draining each 300-byte chunk, the second chunk resets the window and the
-    /// marker then arrives a full window later against a `window_bytes` of 0.
+    /// marker then arrives a full window later against a window_bytes of 0.
     #[test]
     fn a_clean_end_of_stream_is_not_charged_against_the_throughput_floor() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1365,7 +1365,7 @@ mod tests {
         }
     }
 
-    /// `Box<dyn MediaSource>` is not `Debug`, so `unwrap_err` is unavailable.
+    /// Box<dyn MediaSource> is not Debug, so unwrap_err is unavailable.
     fn open_err(info: &TrackInfo) -> SourceError {
         match StreamOpener::default().open(info, Arc::new(AtomicBool::new(false))) {
             Err(error) => error,

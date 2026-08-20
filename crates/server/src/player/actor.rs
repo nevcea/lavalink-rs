@@ -1,20 +1,20 @@
 //! The player actor and its discipline.
 //!
-//! The original guards each player with `synchronized(player)` and then does slow
-//! things inside it — waiting on a voice connection with `.join()`
-//! (`PlayerRestHandler.kt:114-141`), which stalls every other request for that guild
+//! The original guards each player with synchronized(player) and then does slow
+//! things inside it — waiting on a voice connection with .join()
+//! (PlayerRestHandler.kt:114-141), which stalls every other request for that guild
 //! while Discord is slow.
 //!
 //! Replacing a lock with an actor only helps if the actor cannot block either;
 //! otherwise the lock has just become a queue. So three rules are enforced by
 //! construction here:
 //!
-//! 1. **The loop never awaits external I/O.** Every handler is a state transition
+//! 1. The loop never awaits external I/O. Every handler is a state transition
 //!    plus a message send, and returns immediately.
-//! 2. **Loading happens outside.** Resolving an identifier, decoding a track and
+//! 2. Loading happens outside. Resolving an identifier, decoding a track and
 //!    establishing the voice connection are all done by the caller before
-//!    [`Command::Patch`] arrives, so the actor only ever sees a finished result.
-//! 3. **The actor does not touch audio data.** It starts and stops the engine and
+//!    Command::Patch arrives, so the actor only ever sees a finished result.
+//! 3. The actor does not touch audio data. It starts and stops the engine and
 //!    reads a counter.
 //!
 //! What is left is small enough to read as a transition table.
@@ -35,11 +35,11 @@ use crate::player::state::{PlayerModel, VoiceConnection};
 use crate::sink::{Sink, SendError};
 
 /// Bounded so a runaway producer applies backpressure to its caller rather than
-/// growing without limit. REST awaits a slot for up to [`SEND_TIMEOUT`]; past
+/// growing without limit. REST awaits a slot for up to SEND_TIMEOUT; past
 /// that the actor is considered wedged, which the caller turns into 503.
 const COMMAND_CAPACITY: usize = 64;
 
-/// How long [`PlayerHandle::send`] waits for room in a full queue before giving
+/// How long PlayerHandle::send waits for room in a full queue before giving
 /// up. The actor loop never awaits I/O, so a healthy actor drains a full queue
 /// in microseconds — only a wedged one holds it open this long.
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -52,19 +52,19 @@ const STUCK_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 /// bigger than "one", not big.
 const VOICE_UPDATE_CAPACITY: usize = 16;
 
-/// Same reasoning as [`VOICE_UPDATE_CAPACITY`], and the same size for the same
+/// Same reasoning as VOICE_UPDATE_CAPACITY, and the same size for the same
 /// reason: it only has to be bigger than "one". A track produces exactly one
-/// terminal event, and `Progress` is throttled to one per 500ms by the engine's
-/// `PROGRESS_INTERVAL`.
+/// terminal event, and Progress is throttled to one per 500ms by the engine's
+/// PROGRESS_INTERVAL.
 const ENGINE_CAPACITY: usize = 16;
 
 #[derive(Debug)]
 pub enum Command {
-    /// One `PATCH /v4/sessions/{id}/players/{guildId}`, applied in the original's
+    /// One PATCH /v4/sessions/{id}/players/{guildId}, applied in the original's
     /// order in a single step so no other command can interleave halfway.
     Patch(Box<PatchRequest>, oneshot::Sender<Player>),
     Snapshot(oneshot::Sender<Player>),
-    /// Emit a `playerUpdate` to the session. Sent by the global tick and on session
+    /// Emit a playerUpdate to the session. Sent by the global tick and on session
     /// resume, neither of which reads player state itself — asking the actor to
     /// publish keeps it the only reader of its own fields.
     EmitUpdate,
@@ -81,7 +81,7 @@ pub struct PatchRequest {
     pub position: Omissible<i64>,
     pub end_time: Omissible<Option<i64>>,
     pub filters: Omissible<Filters>,
-    /// `None` means the request said nothing about the track.
+    /// None means the request said nothing about the track.
     pub track: Option<TrackChange>,
     pub no_replace: bool,
 }
@@ -90,7 +90,7 @@ pub struct PatchRequest {
 pub enum TrackChange {
     /// A resolved track, ready to hand to the engine.
     Play(Box<Track>),
-    /// `encodedTrack: null` — an explicit stop (`PlayerRestHandler.kt:225`).
+    /// encodedTrack: null — an explicit stop (PlayerRestHandler.kt:225).
     Clear,
 }
 
@@ -111,32 +111,32 @@ pub enum VoiceUpdate {
 pub struct PlayerHandle {
     pub guild_id: u64,
     commands: mpsc::Sender<Command>,
-    /// Separate from `commands`: a voice transition (the only writer of the
+    /// Separate from commands: a voice transition (the only writer of the
     /// connection cache) must not be able to lose its turn behind a burst of
     /// unrelated REST traffic sharing the same queue — see the channel's own
-    /// docs on `PlayerActor`.
+    /// docs on PlayerActor.
     voice_updates: mpsc::Sender<VoiceUpdate>,
     /// Teardown, off every other queue.
     ///
     /// Two reasons it cannot share the command queue. It must not have to wait
-    /// for room behind a burst of REST traffic: `send`'s own `SEND_TIMEOUT` is
-    /// the same 5s as `session::PLAYER_DESTROY_TIMEOUT`, so a full queue used up
+    /// for room behind a burst of REST traffic: send's own SEND_TIMEOUT is
+    /// the same 5s as session::PLAYER_DESTROY_TIMEOUT, so a full queue used up
     /// the caller's entire budget before the reply was even sent. And it is held
-    /// only by `PlayerHandle`, which makes dropping the last handle end the
+    /// only by PlayerHandle, which makes dropping the last handle end the
     /// actor. That is what stops a timed-out destroy from stranding the actor
     /// task, its pump thread and its voice connection with nothing left pointing
     /// at them.
     destroy: mpsc::Sender<oneshot::Sender<()>>,
-    /// Epoch ms when the current unbroken `Playing` period started, or `0` when not
-    /// playing. Written only by the actor, in [`PlayerActor::sync_playing`]; read
+    /// Epoch ms when the current unbroken Playing period started, or 0 when not
+    /// playing. Written only by the actor, in PlayerActor::sync_playing; read
     /// here without a lock.
     playing_since_ms: Arc<AtomicI64>,
     frames: Arc<FrameCounters>,
 }
 
 impl PlayerHandle {
-    /// `0` if not currently playing. Used both for `/v4/stats`' `playingPlayers`
-    /// and, gated by how long ago this was, for `frameStats`' usability.
+    /// 0 if not currently playing. Used both for /v4/stats' playingPlayers
+    /// and, gated by how long ago this was, for frameStats' usability.
     pub fn playing_since_ms(&self) -> i64 {
         self.playing_since_ms.load(Ordering::Relaxed)
     }
@@ -160,10 +160,10 @@ impl PlayerHandle {
         self.commands.try_send(command).map_err(|_| PlayerGone)
     }
 
-    /// Reports a voice transition. Non-blocking, like `try_send`: this is the
-    /// same call `ActorNotifier` makes from songbird's own event dispatch,
+    /// Reports a voice transition. Non-blocking, like try_send: this is the
+    /// same call ActorNotifier makes from songbird's own event dispatch,
     /// which must not block — but on its own channel, so it cannot be starved
-    /// by whatever `commands` happens to be carrying at the same moment.
+    /// by whatever commands happens to be carrying at the same moment.
     pub fn send_voice(&self, update: VoiceUpdate) -> Result<(), PlayerGone> {
         self.voice_updates.try_send(update).map_err(|_| PlayerGone)
     }
@@ -182,7 +182,7 @@ impl PlayerHandle {
 
     /// Tears the player down and waits for the actor to acknowledge it.
     ///
-    /// `try_send` rather than an awaiting send: the channel is destroy-only with
+    /// try_send rather than an awaiting send: the channel is destroy-only with
     /// a slot of its own, so the only way it is full is a destroy already in
     /// flight, and waiting behind that one would just double the caller's
     /// timeout for the same teardown.
@@ -196,16 +196,16 @@ impl PlayerHandle {
 /// A slot holding the channel back to an actor, shared by everything that reports to
 /// it.
 ///
-/// The actor's sender only exists once [`PlayerActor::new`] has run, but the engine
+/// The actor's sender only exists once PlayerActor::new has run, but the engine
 /// and the voice connection have to be built first — the actor needs them. Rather
 /// than construct the graph in two phases or hand out a reference to the actor, both
-/// take this slot and it is filled in afterwards, exactly once — a `OnceLock`
-/// rather than a `Mutex` says so directly, instead of leaving it to the "called
-/// once, at construction" comment on [`Engine::attach`](crate::audio::Engine::attach).
+/// take this slot and it is filled in afterwards, exactly once — a OnceLock
+/// rather than a Mutex says so directly, instead of leaving it to the "called
+/// once, at construction" comment on Engine::attach.
 type DeferredSlot<T> = Arc<std::sync::OnceLock<mpsc::Sender<T>>>;
 
 pub type EventSlot = DeferredSlot<EngineEvent>;
-/// [`DeferredSlot`] for voice transitions — `VoiceConnection` is built before the
+/// DeferredSlot for voice transitions — VoiceConnection is built before the
 /// actor exists, same as the engine.
 pub type VoiceUpdateSlot = DeferredSlot<VoiceUpdate>;
 
@@ -219,55 +219,55 @@ pub struct PlayerActor {
     engine: Box<dyn Engine>,
     sink: Arc<Sink>,
     commands: mpsc::Receiver<Command>,
-    /// Kept off `commands` on purpose — see `PlayerHandle::voice_updates`'s
-    /// docs. `None` once the sender side is gone (a defunct `VoiceConnection`
-    /// does not end the player), so `run`'s select loop stops polling it
+    /// Kept off commands on purpose — see PlayerHandle::voice_updates's
+    /// docs. None once the sender side is gone (a defunct VoiceConnection
+    /// does not end the player), so run's select loop stops polling it
     /// instead of spinning on a channel that will only ever report closed.
     voice_updates: mpsc::Receiver<VoiceUpdate>,
     voice_updates_closed: bool,
-    /// Also kept off `commands`, and for a sharper reason than voice: a dropped
+    /// Also kept off commands, and for a sharper reason than voice: a dropped
     /// engine event is not a delayed one, it is a player wedged forever.
     ///
     /// The pump thread must not block on a busy actor, so every report is a
-    /// `try_send` whose error the engine discards (`engine.rs`). Sharing the
+    /// try_send whose error the engine discards (engine.rs). Sharing the
     /// 64-slot command queue with REST patches, snapshots and the global tick
-    /// meant a burst could take the slot `EngineEvent::Finished` needed — and
+    /// meant a burst could take the slot EngineEvent::Finished needed — and
     /// nothing else in the node notices a track ending. There is no
-    /// `TrackEvent::End` handler on the voice side, and `MAINTENANCE.md`'s
-    /// `TrackEndReason::Cleanup` entry records that stuck detection is
+    /// TrackEvent::End handler on the voice side, and MAINTENANCE.md's
+    /// TrackEndReason::Cleanup entry records that stuck detection is
     /// production-side only, so nothing polls for a player that stopped
-    /// producing. A dropped `Finished` meant no `TrackEndEvent`, `model.track`
-    /// left `Some` forever, and a client queue that never advances; a dropped
-    /// `Failed` meant no `TrackException` either.
+    /// producing. A dropped Finished meant no TrackEndEvent, model.track
+    /// left Some forever, and a client queue that never advances; a dropped
+    /// Failed meant no TrackException either.
     ///
-    /// `None` handled the same way `voice_updates` handles it, and for the same
+    /// None handled the same way voice_updates handles it, and for the same
     /// reason — the engine outlives nothing here, so this only closes if
-    /// `attach` was never called (`RecordingEngine` in a test that does not want
+    /// attach was never called (RecordingEngine in a test that does not want
     /// one).
     engine_events: mpsc::Receiver<EngineEvent>,
     engine_events_closed: bool,
-    /// See [`PlayerHandle::destroy`]'s field of the same name. Receiving `None`
+    /// See PlayerHandle::destroy's field of the same name. Receiving None
     /// here means every handle has been dropped, which is as final as an explicit
     /// destroy and is the only signal that survives a caller giving up mid-way.
     destroy: mpsc::Receiver<oneshot::Sender<()>>,
     position_ms: Arc<AtomicI64>,
     playing_since_ms: Arc<AtomicI64>,
     stuck_threshold: Duration,
-    /// Set while a `TrackStuckEvent` has been emitted for the current track, so we
+    /// Set while a TrackStuckEvent has been emitted for the current track, so we
     /// report it once rather than every tick.
     stuck_reported: bool,
-    /// `guild_id` as the wire wants it. Every event and every `playerUpdate` carries
+    /// guild_id as the wire wants it. Every event and every playerUpdate carries
     /// it as a string and the value never changes, so it is formatted once here
     /// rather than on each emit.
     guild_id_str: String,
 }
 
 impl PlayerActor {
-    /// Builds the actor and its handle. The caller spawns [`PlayerActor::run`].
+    /// Builds the actor and its handle. The caller spawns PlayerActor::run.
     ///
-    /// `voice_slot` is filled in here with the actor's own voice-update
-    /// sender, the same deferred-fill pattern [`EventSlot`] uses — the caller
-    /// builds `VoiceConnection` (which needs a sender) before it can build
+    /// voice_slot is filled in here with the actor's own voice-update
+    /// sender, the same deferred-fill pattern EventSlot uses — the caller
+    /// builds VoiceConnection (which needs a sender) before it can build
     /// the actor (which is what creates one).
     pub fn new(
         guild_id: u64,
@@ -361,7 +361,7 @@ impl PlayerActor {
                     match event {
                         Some(event) => {
                             self.apply_engine_event(event);
-                            // Same resync every arm of `handle` gets, for the
+                            // Same resync every arm of handle gets, for the
                             // same reason: apply_engine_event can end a track.
                             self.sync_playing();
                         }
@@ -386,7 +386,7 @@ impl PlayerActor {
     }
 
     /// No longer reports whether to stop: teardown has its own channel and its own
-    /// arm in `run`, so every command handled here is one the actor continues past.
+    /// arm in run, so every command handled here is one the actor continues past.
     fn handle(&mut self, command: Command) {
         match command {
             Command::Snapshot(reply) => {
@@ -404,10 +404,10 @@ impl PlayerActor {
         self.sync_playing();
     }
 
-    /// Keeps `playing_since_ms` in step with `self.model.playback`: stamped with
-    /// the current time on the transition into `Playing`, held steady for as long
+    /// Keeps playing_since_ms in step with self.model.playback: stamped with
+    /// the current time on the transition into Playing, held steady for as long
     /// as playback continues (so a burst of unrelated commands, e.g. repeated
-    /// `EmitUpdate` ticks, does not keep bumping it forward), and cleared to `0`
+    /// EmitUpdate ticks, does not keep bumping it forward), and cleared to 0
     /// the moment playback stops.
     fn sync_playing(&mut self) {
         if self.model.playback.is_playing() {
@@ -420,8 +420,8 @@ impl PlayerActor {
         }
     }
 
-    /// The order below is `PlayerRestHandler.kt:143-226` and is wire-visible: it
-    /// decides, for instance, whether `position` in a play request seeks the old
+    /// The order below is PlayerRestHandler.kt:143-226 and is wire-visible: it
+    /// decides, for instance, whether position in a play request seeks the old
     /// track or starts the new one at an offset.
     fn apply_patch(&mut self, request: PatchRequest) {
         let now = Instant::now();
@@ -506,7 +506,7 @@ impl PlayerActor {
                 // below, matching the original's single player.setPause(...)
                 // call that runs before it distinguishes play from stop. Note this
                 // ignores a paused: true sent alongside a track only in the
-                // sense that it is applied *after* play, not skipped.
+                // sense that it is applied after play, not skipped.
                 let paused = match request.paused {
                     Omissible::Present(paused) => paused,
                     Omissible::Omitted => false,
@@ -639,7 +639,7 @@ impl PlayerActor {
         });
     }
 
-    /// Ends the current track, emitting `TrackEndEvent` only if there was one.
+    /// Ends the current track, emitting TrackEndEvent only if there was one.
     fn stop_track(&mut self, reason: TrackEndReason) {
         self.engine.stop();
         let track = self.model.stop();
@@ -671,7 +671,7 @@ impl PlayerActor {
     }
 
     fn emit(&self, event: EmittedEvent) {
-        // A full sink means the client stopped reading; the websocket task notices
+        // A full sink means the client stopped reading; the WebSocket task notices
         // and closes the session (or, for a detached/resumable session, the next
         // sweep tick does). Nothing useful can be done from here beyond making the
         // loss observable, since it would otherwise be silent until then.
@@ -686,11 +686,11 @@ impl PlayerActor {
 }
 
 /// Clamps a negative start/seek position to 0, the way the original clamps rather
-/// than rejects one (`LocalAudioTrackExecutor.setPosition`: `timecode < 0` becomes
-/// 0). Must happen before the value reaches `engine.seek`/`engine.play`: `pump.rs`
+/// than rejects one (LocalAudioTrackExecutor.setPosition: timecode < 0 becomes
+/// 0). Must happen before the value reaches engine.seek/engine.play: pump.rs
 /// only clamps the value it hands the demuxer (seek) or only skips seeking on a
-/// non-positive value (play) — it does not clamp the value `drain_commands`
-/// separately hands `writer.reset` to rebase the ring's reported position, which
+/// non-positive value (play) — it does not clamp the value drain_commands
+/// separately hands writer.reset to rebase the ring's reported position, which
 /// would otherwise report negative for the next few seconds (seek) or for the life
 /// of the track (play).
 fn clamp_start_position(position: i64) -> i64 {
@@ -754,14 +754,14 @@ mod tests {
                 .collect()
         }
 
-        /// Retries `snapshot()` until `until` holds.
+        /// Retries snapshot() until until holds.
         ///
         /// Needed whenever a test wants to observe the effect of a
-        /// `send_voice` call: `voice_updates` and `commands` are separate
-        /// channels now (see `PlayerHandle::voice_updates`'s docs), so
+        /// send_voice call: voice_updates and commands are separate
+        /// channels now (see PlayerHandle::voice_updates's docs), so
         /// nothing guarantees a voice update sent moments earlier has
-        /// already been applied by the instant a specific `snapshot()`
-        /// call's reply is captured — `tokio::select!` may service either
+        /// already been applied by the instant a specific snapshot()
+        /// call's reply is captured — tokio::select! may service either
         /// channel first.
         async fn snapshot_until(&self, mut until: impl FnMut(&Player) -> bool) -> Player {
             for _ in 0..100 {
@@ -775,7 +775,7 @@ mod tests {
         }
 
         /// Reports an engine event the way the real pipeline does — through the
-        /// channel `attach` handed the engine, not through `commands`.
+        /// channel attach handed the engine, not through commands.
         async fn report(&self, event: EngineEvent) {
             self.engine.events().unwrap().send(event).await.unwrap();
         }
@@ -808,7 +808,7 @@ mod tests {
             .any(|call| matches!(call, EngineCall::Play { .. })));
     }
 
-    /// `PlayerRestHandler.kt:186`: a play request that says nothing about `paused`
+    /// PlayerRestHandler.kt:186: a play request that says nothing about paused
     /// forces the player unpaused, even if it was paused before.
     #[tokio::test]
     async fn a_new_track_clears_a_previous_pause() {
@@ -828,8 +828,8 @@ mod tests {
         assert!(!player.paused);
     }
 
-    /// A play request with `paused: true` must reach the engine, not just the
-    /// reported model — otherwise a client sees `"paused": true` while the track
+    /// A play request with paused: true must reach the engine, not just the
+    /// reported model — otherwise a client sees "paused": true while the track
     /// keeps playing audibly.
     #[tokio::test]
     async fn a_play_request_with_paused_pauses_the_engine() {
@@ -889,7 +889,7 @@ mod tests {
         assert_eq!(player.track.unwrap().info.title, "first");
     }
 
-    /// `filters` is the other field (alongside `volume`) that `noReplace`
+    /// filters is the other field (alongside volume) that noReplace
     /// never guards: the original applies it unconditionally, before the
     /// check that decides whether the track itself changes, so a dropped
     /// replacement request still carries its filters onto the currently
@@ -917,7 +917,7 @@ mod tests {
         assert_eq!(player.filters.volume.into_option(), Some(2.0));
     }
 
-    /// The three-state `Omissible` in action: an explicit null clears the track.
+    /// The three-state Omissible in action: an explicit null clears the track.
     #[tokio::test]
     async fn clearing_the_track_stops_and_emits_stopped() {
         let harness = Harness::start();
@@ -942,11 +942,11 @@ mod tests {
         )));
     }
 
-    /// `PlayerRestHandler.kt:186`: `player.setPause(...)` runs unconditionally
-    /// whenever `encodedTrack`/`identifier` is present at all, *before* the
+    /// PlayerRestHandler.kt:186: player.setPause(...) runs unconditionally
+    /// whenever encodedTrack/identifier is present at all, before the
     /// code decides whether the request means play or stop — so an explicit
-    /// stop (`encodedTrack: null`) forces `paused` exactly the way a play
-    /// request does (`false` when the field is absent), rather than leaving
+    /// stop (encodedTrack: null) forces paused exactly the way a play
+    /// request does (false when the field is absent), rather than leaving
     /// whatever it was.
     #[tokio::test]
     async fn clearing_the_track_forces_paused_the_same_way_a_play_request_does() {
@@ -978,7 +978,7 @@ mod tests {
     }
 
     /// As the previous test, but for the other direction: a stop that does
-    /// carry an explicit `paused: true` must apply it too, not just default
+    /// carry an explicit paused: true must apply it too, not just default
     /// unpaused.
     #[tokio::test]
     async fn clearing_the_track_with_an_explicit_paused_field_applies_it() {
@@ -998,12 +998,12 @@ mod tests {
         assert!(player.paused);
     }
 
-    /// `PlayerRestHandler.kt:182-185`: the `noReplace` check runs once, before
+    /// PlayerRestHandler.kt:182-185: the noReplace check runs once, before
     /// the code has even decided whether the request means play or stop — so
-    /// it guards an explicit stop (`encodedTrack: null`) too, not just a play
-    /// request naming a different track. A client sending `noReplace=true`
-    /// alongside `encodedTrack: null` while a track is already playing gets
-    /// that track left running, exactly as an unwanted *replacement* would be
+    /// it guards an explicit stop (encodedTrack: null) too, not just a play
+    /// request naming a different track. A client sending noReplace=true
+    /// alongside encodedTrack: null while a track is already playing gets
+    /// that track left running, exactly as an unwanted replacement would be
     /// dropped.
     #[tokio::test]
     async fn no_replace_also_drops_an_explicit_stop() {
@@ -1112,7 +1112,7 @@ mod tests {
     }
 
     /// Volume is applied even in a request that also sets a track — the one field
-    /// that is not deferred (`PlayerRestHandler.kt:156`).
+    /// that is not deferred (PlayerRestHandler.kt:156).
     #[tokio::test]
     async fn volume_applies_alongside_a_new_track() {
         let harness = Harness::start();
@@ -1133,7 +1133,7 @@ mod tests {
             .contains(&EngineCall::SetVolume { volume: 50 }));
     }
 
-    /// `position` in a play request is a start offset, not a seek on the old track.
+    /// position in a play request is a start offset, not a seek on the old track.
     #[tokio::test]
     async fn position_with_a_new_track_starts_it_at_that_offset() {
         let harness = Harness::start();
@@ -1333,9 +1333,9 @@ mod tests {
         assert_eq!(harness.handle.playing_since_ms(), 0);
     }
 
-    /// An unrelated command mid-playback (the tick-driven `EmitUpdate` is the real
-    /// example) must not push `playing_since_ms` forward — otherwise a busy player
-    /// would never look "usable" for `frameStats`.
+    /// An unrelated command mid-playback (the tick-driven EmitUpdate is the real
+    /// example) must not push playing_since_ms forward — otherwise a busy player
+    /// would never look "usable" for frameStats.
     #[tokio::test]
     async fn playing_since_does_not_advance_on_an_unrelated_command() {
         let harness = Harness::start();
@@ -1349,9 +1349,9 @@ mod tests {
         assert_eq!(harness.handle.playing_since_ms(), first);
     }
 
-    /// A full queue that never drains (a wedged actor) must not hang `send`
-    /// forever — `patch_player` maps `PlayerGone` to 503, which is only
-    /// reachable if `send` itself eventually gives up.
+    /// A full queue that never drains (a wedged actor) must not hang send
+    /// forever — patch_player maps PlayerGone to 503, which is only
+    /// reachable if send itself eventually gives up.
     #[tokio::test(start_paused = true)]
     async fn send_reports_the_player_gone_when_a_full_queue_never_drains() {
         let sink = Arc::new(Sink::new());
@@ -1376,11 +1376,11 @@ mod tests {
         assert_eq!(result, Err(PlayerGone));
     }
 
-    /// The bug: voice updates used to share the general `commands` queue
-    /// (`Command::Voice`), so `ActorNotifier`'s `try_send` could be dropped by
+    /// The bug: voice updates used to share the general commands queue
+    /// (Command::Voice), so ActorNotifier's try_send could be dropped by
     /// a burst of REST traffic that happened to fill it — misreporting
-    /// `connected: false` until some later, unrelated transition came along
-    /// to correct it. On its own channel, a full `commands` queue must have
+    /// connected: false until some later, unrelated transition came along
+    /// to correct it. On its own channel, a full commands queue must have
     /// no bearing on whether a voice update can still be delivered.
     #[tokio::test]
     async fn a_full_command_queue_does_not_block_a_voice_update() {
@@ -1413,12 +1413,12 @@ mod tests {
     }
 
     /// The same bug, one queue over and with worse consequences. Engine events
-    /// used to travel as `Command::Engine`, and the pump thread must not block
-    /// on a busy actor, so the engine reports with `try_send` and discards the
-    /// error. A burst of REST traffic filling `commands` at the moment a track
-    /// reached EOF therefore ate `EngineEvent::Finished` — and nothing else in
-    /// the node notices a track ending, so the player stayed `Some` forever with
-    /// no `TrackEndEvent` and a client queue that never advanced.
+    /// used to travel as Command::Engine, and the pump thread must not block
+    /// on a busy actor, so the engine reports with try_send and discards the
+    /// error. A burst of REST traffic filling commands at the moment a track
+    /// reached EOF therefore ate EngineEvent::Finished — and nothing else in
+    /// the node notices a track ending, so the player stayed Some forever with
+    /// no TrackEndEvent and a client queue that never advanced.
     #[tokio::test]
     async fn a_full_command_queue_does_not_block_an_engine_event() {
         let sink = Arc::new(Sink::new());
@@ -1466,8 +1466,8 @@ mod tests {
         assert_eq!(harness.handle.snapshot().await, Err(PlayerGone));
     }
 
-    /// The bug: `destroy` used to travel on `commands`, whose `SEND_TIMEOUT` is the
-    /// same 5s as `session::PLAYER_DESTROY_TIMEOUT` — so a full queue burned the
+    /// The bug: destroy used to travel on commands, whose SEND_TIMEOUT is the
+    /// same 5s as session::PLAYER_DESTROY_TIMEOUT — so a full queue burned the
     /// caller's entire budget before the actor could even reply. It has its own
     /// slot now, and a backed-up queue must have no bearing on tearing the player
     /// down.
@@ -1486,9 +1486,9 @@ mod tests {
         assert!(harness.engine.calls().contains(&EngineCall::Shutdown));
     }
 
-    /// The bug: nothing tore the player down when a caller gave up on `destroy`.
-    /// The engine holds a clone of the *commands* sender (`Engine::attach`), so
-    /// that channel can never report every sender gone — and `Session::shutdown`
+    /// The bug: nothing tore the player down when a caller gave up on destroy.
+    /// The engine holds a clone of the commands sender (Engine::attach), so
+    /// that channel can never report every sender gone — and Session::shutdown
     /// takes the guild out of the map before it waits, so a timed-out destroy
     /// dropped the last handle and left the actor task, its pump thread and its
     /// songbird driver alive and unreachable for the life of the process, still
@@ -1511,8 +1511,8 @@ mod tests {
         panic!("the actor must shut its engine down once its last handle is gone");
     }
 
-    /// `STUCK_CHECK_INTERVAL` is a real-time tick, not `tokio::time`, so these wait
-    /// on the wall clock rather than pausing it — same trade `stream.rs`'s
+    /// STUCK_CHECK_INTERVAL is a real-time tick, not tokio::time, so these wait
+    /// on the wall clock rather than pausing it — same trade stream.rs's
     /// reconnect test makes.
     fn past_one_check_interval() -> Duration {
         STUCK_CHECK_INTERVAL + Duration::from_millis(150)
@@ -1578,8 +1578,8 @@ mod tests {
     }
 
     /// One interval is enough: unlike the "only once" dedup test above, there is
-    /// no persisted state to prove survives multiple ticks here — `check_stuck`'s
-    /// `!is_playing()` guard (which `Paused` and `Idle` both fail identically) is
+    /// no persisted state to prove survives multiple ticks here — check_stuck's
+    /// !is_playing() guard (which Paused and Idle both fail identically) is
     /// re-evaluated fresh every tick, so if it failed to suppress the event once
     /// it would not suppress it on a second tick either.
     #[tokio::test]

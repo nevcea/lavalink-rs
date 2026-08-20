@@ -1,7 +1,7 @@
 //! Global periodic work.
 //!
-//! The original starts a scheduled executor *per session* plus a two-thread
-//! `player-update` pool per session (`SocketContext.kt:80,101`). Nothing about the
+//! The original starts a scheduled executor per session plus a two-thread
+//! player-update pool per session (SocketContext.kt:80,101). Nothing about the
 //! work needs that: the schedule is the same for every session, so there are three
 //! tasks here for the whole node regardless of how many clients connect.
 //!
@@ -17,7 +17,7 @@ use lavalink_protocol::stats::StatsEvent;
 use crate::player::Command;
 use crate::state::AppState;
 
-/// The original's stats interval (`SocketContext.kt:100`).
+/// The original's stats interval (SocketContext.kt:100).
 const STATS_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How often expired resume deadlines are collected. Fine-grained enough that a

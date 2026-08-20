@@ -1,4 +1,4 @@
-//! `loadtracks` and `decodetrack(s)`.
+//! loadtracks and decodetrack(s).
 
 use std::sync::Arc;
 
@@ -17,15 +17,15 @@ pub struct LoadQuery {
 }
 
 /// Always 200, even when loading fails — the failure travels in the body as
-/// `loadType: "error"`. Clients rely on this: a non-200 is treated as the node being
+/// loadType: "error". Clients rely on this: a non-200 is treated as the node being
 /// broken rather than the track being bad.
 pub async fn load_tracks(
     State(state): State<AppState>,
     ValidatedQuery(query): ValidatedQuery<LoadQuery>,
 ) -> Json<Arc<LoadResult>> {
     tracing::info!(identifier = %query.identifier, "loading");
-    // Serialized straight out of the `Arc` (serde's `rc` feature) rather than
-    // unwrapped into an owned `LoadResult`: unwrapping is exactly the deep copy
+    // Serialized straight out of the Arc (serde's rc feature) rather than
+    // unwrapped into an owned LoadResult: unwrapping is exactly the deep copy
     // the loader stopped making.
     Json(state.loader.load(&query.identifier).await)
 }

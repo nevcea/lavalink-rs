@@ -1,9 +1,9 @@
-//! Throughput of `audio::resample`'s three `resamplingQuality` tiers.
+//! Throughput of audio::resample's three resamplingQuality tiers.
 //!
-//! `Low` is the hand-rolled Catmull-Rom resampler — the one piece of the
+//! Low is the hand-rolled Catmull-Rom resampler — the one piece of the
 //! pipeline that trades a dependency for its own arithmetic (see
-//! `audio::resample`'s module docs) — worth watching for a regression a
-//! refactor could introduce silently. `Medium`/`High` are `rubato`'s
+//! audio::resample's module docs) — worth watching for a regression a
+//! refactor could introduce silently. Medium/High are rubato's
 //! windowed-sinc resampler, expected to cost more per the same trade
 //! lavaplayer itself makes at those tiers; benchmarked here so that cost is
 //! visible rather than assumed.
@@ -19,17 +19,17 @@ mod common;
 use common::interleaved;
 
 /// One symphonia decode buffer's worth of frames, roughly — big enough that the
-/// per-call overhead around `process` doesn't dominate the measurement.
+/// per-call overhead around process doesn't dominate the measurement.
 const FRAMES: usize = 4096;
 
-/// Times `process_into` with a reused output buffer, which is what the pump does
-/// (`pump.rs`'s decode loop hands it the same `pcm` every packet). The allocating
-/// `process` wrapper exists for tests, and timing it would fold a `Vec` growth
+/// Times process_into with a reused output buffer, which is what the pump does
+/// (pump.rs's decode loop hands it the same pcm every packet). The allocating
+/// process wrapper exists for tests, and timing it would fold a Vec growth
 /// sequence into a number that is supposed to be about interpolation.
 ///
-/// `reset()` runs once, before the timed loop, not inside it: an empty history is a
+/// reset() runs once, before the timed loop, not inside it: an empty history is a
 /// cold start and takes a different path than a call with three frames carried over
-/// from the previous buffer (see `resample.rs`'s module docs on chunking). A real
+/// from the previous buffer (see resample.rs's module docs on chunking). A real
 /// pump converts many buffers in a row without resetting between them, so measuring
 /// the reset path every iteration would report the one case that never recurs in
 /// steady-state playback.

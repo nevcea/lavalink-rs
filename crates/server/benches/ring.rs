@@ -1,6 +1,6 @@
-//! `RingReader::read` — the only piece of the pipeline with a hard deadline.
+//! RingReader::read — the only piece of the pipeline with a hard deadline.
 //!
-//! Everything else in `audio/` runs on the pump thread, which has no deadline and
+//! Everything else in audio/ runs on the pump thread, which has no deadline and
 //! only ever starves its own ring. This runs on the voice mixer's thread, once per
 //! 20ms per playing player, ahead of Opus encoding and packet send. Time spent here
 //! is time the mixer does not have, and it is multiplied by the number of players
@@ -24,8 +24,8 @@ use common::samples;
 const FRAME_SAMPLES: usize = 960 * CHANNELS;
 const FRAME_BYTES: usize = FRAME_SAMPLES * 4;
 
-/// A ring sized like a real one (the default `frameBufferDurationMs`), plus its two
-/// ends. `position` and the counters are kept alive by the returned pair.
+/// A ring sized like a real one (the default frameBufferDurationMs), plus its two
+/// ends. position and the counters are kept alive by the returned pair.
 fn ring_pair(buffer_ms: u32) -> (RingWriter, RingReader) {
     ring::channel(
         buffer_ms,
@@ -73,10 +73,10 @@ fn bench_ring_read(c: &mut Criterion) {
     // every 50 write/read cycles, which is too rare to land reliably inside a
     // benchmark sample. At 2*FRAME_SAMPLES the wrap recurs every other iteration
     // by construction: draining to half a frame short of the physical end (below)
-    // puts the head at `capacity - FRAME_SAMPLES/2`; the next write lands at the
-    // (wrapped) low end, so the read after it draws `FRAME_SAMPLES/2` from the
+    // puts the head at capacity - FRAME_SAMPLES/2; the next write lands at the
+    // (wrapped) low end, so the read after it draws FRAME_SAMPLES/2 from the
     // front segment and the rest from the back one — verified once, non-timed,
-    // right after setup rather than inside the closure, since neither `as_slices`
+    // right after setup rather than inside the closure, since neither as_slices
     // nor the deque's head are reachable from outside the crate to assert on
     // directly. The iteration after that lands contiguous again (the head has
     // moved past the wrap), then the cycle repeats.
@@ -105,9 +105,9 @@ fn bench_ring_read(c: &mut Criterion) {
 
     // The read alone, refill excluded from the measurement. Unlike the two benches
     // above, the ring is topped back up outside the timed region — in batches, not
-    // once per iteration, since a single top-up only buys `capacity` worth of
+    // once per iteration, since a single top-up only buys capacity worth of
     // reads (50 at the default 1000ms) and criterion samples run for far more
-    // iterations than that. `iter_custom` makes the batching explicit: refill,
+    // iterations than that. iter_custom makes the batching explicit: refill,
     // time a batch of reads straight out of the buffer, repeat.
     group.bench_function(BenchmarkId::new("read_only", "20ms_frame"), |b| {
         b.iter_custom(|iters| {

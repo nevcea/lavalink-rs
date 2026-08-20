@@ -1,14 +1,13 @@
-//! The lavaplayer `encodedTrack` binary format.
+//! The lavaplayer encodedTrack binary format.
 //!
 //! This is the single largest compatibility risk in the port: every client stores
 //! these strings and hands them back, so a byte we read differently is a track that
 //! will not play.
 //!
-//! # Layout
+//! Layout
 //!
 //! Base64 (standard alphabet, padded) of:
 //!
-//! ```text
 //! u32  header      size in the low 30 bits, flags in the top 2
 //! u8   version     only when flags & 1; absent means version 1
 //! utf  title
@@ -22,16 +21,15 @@
 //! utf  sourceName
 //! ..   source tail see SourceTail
 //! i64  position    milliseconds
-//! ```
 //!
-//! `isSeekable` is absent from the format — lavaplayer derives it from `isStream`,
+//! isSeekable is absent from the format — lavaplayer derives it from isStream,
 //! and so do we.
 //!
-//! # Round-trip guarantee for sources we do not manage
+//! Round-trip guarantee for sources we do not manage
 //!
 //! The tail is source-specific and we only know the shape of the three sources we
-//! support. Rather than reject everything else, an unrecognised source's tail is
-//! captured verbatim ([`SourceTail::Raw`]) — the position is always the last eight
+//! support. Rather than reject everything else, an unrecognized source's tail is
+//! captured verbatim (SourceTail::Raw) — the position is always the last eight
 //! bytes, so the tail's extent is unambiguous without parsing it. A YouTube track
 //! encoded by some other node therefore survives decode/encode byte-for-byte.
 
@@ -46,12 +44,12 @@ use crate::player::{Track, TrackInfo};
 const FLAG_VERSIONED: u32 = 1;
 /// The version lavaplayer 2.x writes, and therefore what we write.
 pub const TRACK_INFO_VERSION: u8 = 3;
-/// First version carrying `uri`.
+/// First version carrying uri.
 const VERSION_WITH_URI: u8 = 2;
-/// First version carrying `artworkUrl` and `isrc`.
+/// First version carrying artworkUrl and isrc.
 const VERSION_WITH_ARTWORK_AND_ISRC: u8 = 3;
 const SIZE_MASK: u32 = 0x3FFF_FFFF;
-/// The leading `i32` carrying the flags and the payload size.
+/// The leading i32 carrying the flags and the payload size.
 const HEADER_BYTES: usize = 4;
 
 #[derive(Debug, Error)]
@@ -72,13 +70,13 @@ pub enum CodecError {
 
 type Result<T> = std::result::Result<T, CodecError>;
 
-/// The source-specific bytes between `sourceName` and `position`.
+/// The source-specific bytes between sourceName and position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceTail {
-    /// Sources that write nothing, e.g. `youtube`.
+    /// Sources that write nothing, e.g. youtube.
     Empty,
-    /// Probing sources (`http`, `local`) write the container probe name, sometimes
-    /// with parameters appended — `"mp3"`, `"matroska/webm|opus"`.
+    /// Probing sources (http, local) write the container probe name, sometimes
+    /// with parameters appended — "mp3", "matroska/webm|opus".
     Probe(String),
     /// A source we do not model. Preserved so the track re-encodes unchanged.
     Raw(Vec<u8>),
@@ -110,13 +108,13 @@ impl DecodedTrack {
     }
 
     /// Pairs the decoded info with the string it came from, which is what the REST
-    /// `decodetrack(s)` endpoints return.
+    /// decodetrack(s) endpoints return.
     pub fn into_track(self, encoded: String) -> Track {
         Track::new(encoded, self.info)
     }
 }
 
-/// Decodes a base64 `encodedTrack`.
+/// Decodes a base64 encodedTrack.
 pub fn decode(encoded: &str) -> Result<DecodedTrack> {
     decode_bytes(&BASE64.decode(encoded)?)
 }
@@ -223,7 +221,7 @@ pub(crate) fn decode_bytes(bytes: &[u8]) -> Result<DecodedTrack> {
     })
 }
 
-/// Encodes a track, writing version [`TRACK_INFO_VERSION`].
+/// Encodes a track, writing version TRACK_INFO_VERSION.
 pub fn encode(info: &TrackInfo, tail: &SourceTail) -> Result<String> {
     encode_with_version(info, tail, TRACK_INFO_VERSION)
 }
@@ -292,7 +290,7 @@ mod tests {
     use super::*;
 
     /// Produced by the original server; lifted from the upstream protocol tests
-    /// (`PlayerSerializerTest.kt:16`). Version 2, so no artworkUrl/isrc.
+    /// (PlayerSerializerTest.kt:16). Version 2, so no artworkUrl/isrc.
     const RICK: &str = "QAAAjQIAJVJpY2sgQXN0bGV5IC0gTmV2ZXIgR29ubmEgR2l2ZSBZb3UgVXAADlJpY2tBc3RsZXlWRVZPAAAAAAADPCAAC2RRdzR3OVdnWGNRAAEAK2h0dHBzOi8vd3d3LnlvdXR1YmUuY29tL3dhdGNoP3Y9ZFF3NHc5V2dYY1EAB3lvdXR1YmUAAAAAAAAAAA==";
 
     fn sample(source_name: &str) -> TrackInfo {
@@ -342,8 +340,8 @@ mod tests {
         assert_eq!(re_encoded, RICK);
     }
 
-    /// The bug: `decode` bounded the version from above but not from below, while
-    /// `encode_to_bytes` rejects `0`. A token declaring version 0 therefore decoded
+    /// The bug: decode bounded the version from above but not from below, while
+    /// encode_to_bytes rejects 0. A token declaring version 0 therefore decoded
     /// happily — parsed with the v1 field layout — and then failed the round trip
     /// the test above establishes, on input this same crate had just accepted.
     #[test]
@@ -415,9 +413,9 @@ mod tests {
         }
     }
 
-    /// A genuine version-1 track has no `uri` bytes at all — `sourceName`'s length
-    /// prefix follows `isStream` directly. Reading `uri` unconditionally (as this
-    /// decoder used to) would consume a byte belonging to `sourceName` and desync
+    /// A genuine version-1 track has no uri bytes at all — sourceName's length
+    /// prefix follows isStream directly. Reading uri unconditionally (as this
+    /// decoder used to) would consume a byte belonging to sourceName and desync
     /// every field after it.
     #[test]
     fn version_1_track_has_no_uri_field() {
@@ -471,11 +469,11 @@ mod tests {
         assert!(matches!(decode("not base64!!"), Err(CodecError::Base64(_))));
     }
 
-    /// The tail used to be decided by source name for `youtube`, which threw the
+    /// The tail used to be decided by source name for youtube, which threw the
     /// bytes away whenever there were any — so the track re-encoded shorter than
     /// it decoded, breaking the byte-for-byte preservation this module promises.
     /// Deciding by what is actually there costs nothing for the ordinary case
-    /// (nothing left, so still `Empty`) and keeps the unusual one.
+    /// (nothing left, so still Empty) and keeps the unusual one.
     #[test]
     fn a_source_that_normally_writes_no_tail_still_keeps_one_it_did_write() {
         let info = sample("youtube");
@@ -497,11 +495,11 @@ mod tests {
 
     /// A length prefix that lies is the shape a hand-built token takes: the
     /// decoder must refuse it against the bytes it really has rather than
-    /// reserving what it was told. Claimed by `MAINTENANCE.md`, pinned here.
+    /// reserving what it was told. Claimed by MAINTENANCE.md, pinned here.
     #[test]
     fn a_lying_length_prefix_is_refused_instead_of_reserved() {
         let mut bytes = BASE64.decode(RICK).unwrap();
-        // The first field is `title`, whose u16 length prefix follows the 4-byte
+        // The first field is title, whose u16 length prefix follows the 4-byte
         // header and the 1-byte version.
         bytes[5] = 0xFF;
         bytes[6] = 0xFF;
@@ -512,7 +510,7 @@ mod tests {
         ));
     }
 
-    /// The payload carries `position` in its last eight bytes, so anything
+    /// The payload carries position in its last eight bytes, so anything
     /// shorter than that cannot be a track — and must be told apart from a
     /// payload that is merely shorter than its own declared size.
     #[test]
@@ -528,7 +526,7 @@ mod tests {
     }
 
     /// The declared size, not the buffer length, bounds the payload — trailing
-    /// bytes are ignored the way `MessageInput` ignores them. Asserted as
+    /// bytes are ignored the way MessageInput ignores them. Asserted as
     /// equality with the untrailed decode so this cannot pass by failing.
     #[test]
     fn trailing_bytes_past_the_declared_size_are_ignored() {

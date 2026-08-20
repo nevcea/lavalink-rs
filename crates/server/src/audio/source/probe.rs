@@ -1,8 +1,8 @@
 //! Container probing, shared by the local and HTTP sources.
 //!
-//! Produces the metadata `loadtracks` needs — title, author, duration, seekability —
+//! Produces the metadata loadtracks needs — title, author, duration, seekability —
 //! and the container name that goes into the encoded track's source tail
-//! ([`lavalink_protocol::SourceTail::Probe`]), which is what lavaplayer's probing
+//! (lavalink_protocol::SourceTail::Probe), which is what lavaplayer's probing
 //! sources write there.
 
 use symphonia::core::codecs::audio::{AudioCodecId, CODEC_ID_NULL_AUDIO};
@@ -17,19 +17,19 @@ use super::SourceError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probed {
-    /// Container short name, e.g. `"mp3"`. Goes into the encoded track's tail.
+    /// Container short name, e.g. "mp3". Goes into the encoded track's tail.
     pub container: String,
     pub title: Option<String>,
     pub author: Option<String>,
     pub isrc: Option<String>,
-    /// Milliseconds. `0` when the container does not say and we cannot infer it —
+    /// Milliseconds. 0 when the container does not say and we cannot infer it —
     /// which is what the original reports for the same inputs.
     pub duration_ms: i64,
 }
 
 /// Probes a media source.
 ///
-/// Blocking; call from a blocking thread. `extension` is a hint only — symphonia
+/// Blocking; call from a blocking thread. extension is a hint only — symphonia
 /// falls back to content sniffing, so a mislabelled file still works.
 pub fn probe(source: Box<dyn MediaSource>, extension: Option<&str>) -> Result<Probed, SourceError> {
     let stream = MediaSourceStream::new(source, Default::default());

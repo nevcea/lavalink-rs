@@ -1,14 +1,14 @@
 //! Track loading.
 //!
 //! The original resolves identifiers synchronously on the request thread
-//! (`util/loading.kt`), so N clients asking for the same URL at the same time means N
+//! (util/loading.kt), so N clients asking for the same URL at the same time means N
 //! probes of the same URL, each holding a thread. Three changes here:
 //!
-//! * **Off the async threads.** Probing is blocking work, so it runs on the blocking
+//! • Off the async threads. Probing is blocking work, so it runs on the blocking
 //!   pool. A slow remote cannot stall the runtime.
-//! * **Single-flight.** Concurrent requests for one identifier share a single load;
+//! • Single-flight. Concurrent requests for one identifier share a single load;
 //!   the rest wait on its result.
-//! * **A short TTL cache.** Sixty seconds, which is long enough to absorb a queue
+//! • A short TTL cache. Sixty seconds, which is long enough to absorb a queue
 //!   being filled and short enough that an expiring URL is not served stale.
 //!
 //! Only successful and empty results are cached. Caching failures would turn one
@@ -29,19 +29,19 @@ use crate::lock;
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
-/// Hard cap on distinct cached identifiers. `sweep_expired` only runs once per
+/// Hard cap on distinct cached identifiers. sweep_expired only runs once per
 /// tick, so a burst of distinct identifiers between ticks would otherwise grow
 /// the map without bound; this bounds it independently of how often the sweep
 /// runs. Past the cap a successful load still returns its result, it just is
 /// not cached — correctness is unaffected, the next request for it reloads.
 const MAX_CACHE_ENTRIES: usize = 10_000;
 
-/// How many loads may run at once. Bounded so a burst of `loadtracks` cannot
+/// How many loads may run at once. Bounded so a burst of loadtracks cannot
 /// saturate the blocking pool and starve everything else.
 const MAX_CONCURRENT_LOADS: usize = 16;
 
 pub struct Loader {
-    /// `Arc` rather than `Box` so a manager can be moved onto a blocking thread
+    /// Arc rather than Box so a manager can be moved onto a blocking thread
     /// without borrowing the loader.
     managers: Vec<Arc<dyn SourceManager>>,
     cache: Mutex<HashMap<Arc<str>, CacheEntry>>,
@@ -49,11 +49,11 @@ pub struct Loader {
     permits: Arc<Semaphore>,
 }
 
-/// Behind an `Arc` because a result is handed out up to three times — into the
+/// Behind an Arc because a result is handed out up to three times — into the
 /// cache, to every follower waiting on the single flight, and to the caller — and
-/// a `LoadResult` is not a cheap thing to copy: one playlist is a whole
-/// `Vec<Track>`, each track carrying its base64 blob, its `TrackInfo` strings and
-/// two `serde_json::Map`s. Nothing mutates a result after it is built, so sharing
+/// a LoadResult is not a cheap thing to copy: one playlist is a whole
+/// Vec<Track>, each track carrying its base64 blob, its TrackInfo strings and
+/// two serde_json::Maps. Nothing mutates a result after it is built, so sharing
 /// one is the same value to every reader.
 #[derive(Debug, Clone)]
 struct CacheEntry {
@@ -61,13 +61,13 @@ struct CacheEntry {
     expires_at: Instant,
 }
 
-/// Clears a leader's `in_flight` entry on drop, cancellation included.
+/// Clears a leader's in_flight entry on drop, cancellation included.
 ///
 /// Holds the sender this leader itself registered, so a removal — here or in
-/// [`Loader::load`]'s normal-completion path — only ever clears the entry it
+/// Loader::load's normal-completion path — only ever clears the entry it
 /// actually owns. A plain remove-by-key would also work most of the time, but
 /// not once a new leader has already replaced this one's entry under the same
-/// identifier: `HashMap::remove` cannot distinguish "my entry" from "a
+/// identifier: HashMap::remove cannot distinguish "my entry" from "a
 /// different generation's entry that happens to share this key", so it would
 /// delete a fresh leader's live sender before it ever sends, forcing its
 /// followers to retry as new leaders of their own.
@@ -105,7 +105,7 @@ impl Loader {
         }
     }
 
-    /// The `sourceManagers` list for `/v4/info`.
+    /// The sourceManagers list for /v4/info.
     pub fn source_names(&self) -> Vec<String> {
         self.managers
             .iter()
@@ -114,7 +114,7 @@ impl Loader {
     }
 
     /// Resolves an identifier. Never fails: loading problems are carried in the
-    /// [`LoadResult`], because `loadtracks` answers 200 even for failures.
+    /// LoadResult, because loadtracks answers 200 even for failures.
     pub async fn load(&self, identifier: &str) -> Arc<LoadResult> {
         if let Some(cached) = self.cached(identifier) {
             return cached;
@@ -213,7 +213,7 @@ impl Loader {
 
         let identifier = identifier.to_owned();
         // Cloned, not borrowed, because the thread below outlives this future
-        // (see the permit comment). A `Vec` of `Arc`s, so this is a pointer copy
+        // (see the permit comment). A Vec of Arcs, so this is a pointer copy
         // per registered manager.
         let managers = self.managers.clone();
 
@@ -224,7 +224,7 @@ impl Loader {
         // inherit that context, so the HTTP source works there.
         //
         // The permit moves into the thread instead of staying local: this
-        // function is cancelled by dropping its own future (a client-side request
+        // function is canceled by dropping its own future (a client-side request
         // cancellation), which would otherwise free the permit while the OS
         // thread — already started, nothing left to cancel it — keeps running the
         // real load. A client that cancels and retries in a loop would then
@@ -238,21 +238,21 @@ impl Loader {
             .spawn(move || {
                 let _permit = permit;
                 // Choosing the manager happens here too, not on the caller's
-                // runtime thread. `matches` looks pure, and for every other
-                // source it is — but `LocalSource::matches` ends in
-                // `Path::is_file()`, a stat syscall, and it is reached for any
-                // identifier without a `://` that no earlier manager claimed
-                // (`ytsearch:`-style prefixes for a disabled source, bare
+                // runtime thread. matches looks pure, and for every other
+                // source it is — but LocalSource::matches ends in
+                // Path::is_file(), a stat syscall, and it is reached for any
+                // identifier without a :// that no earlier manager claimed
+                // (ytsearch:-style prefixes for a disabled source, bare
                 // filenames). On a slow or unresponsive mount that stalls a
                 // runtime worker, which is the whole reason the load itself was
                 // moved off the runtime in the first place.
                 //
-                // First match wins, as `main.rs::source_managers` orders them.
+                // First match wins, as main.rs::source_managers orders them.
                 let result = managers
                     .iter()
                     .find(|manager| manager.matches(&identifier))
                     .map(|manager| manager.load(&identifier));
-                // The receiver is gone if the caller was cancelled; nothing to do.
+                // The receiver is gone if the caller was canceled; nothing to do.
                 let _ = tx.send(result);
             });
 
@@ -318,15 +318,15 @@ impl Loader {
 
     /// Drops every cache entry whose TTL has passed.
     ///
-    /// [`Self::cached`] evicts too, but only the one identifier it was asked about,
+    /// Self::cached evicts too, but only the one identifier it was asked about,
     /// so an entry nobody looks up a second time is never reached by it. Identifiers
     /// come from the client and most are asked for exactly once — a queue is filled,
     /// played, and never resolved again — so without this the map grows for the life
-    /// of the process, holding a full [`LoadResult`] (a playlist's whole `Vec<Track>`,
-    /// for a `loadtracks` of one) per identifier ever seen.
+    /// of the process, holding a full LoadResult (a playlist's whole Vec<Track>,
+    /// for a loadtracks of one) per identifier ever seen.
     ///
-    /// `in_flight` is deliberately left alone. Those entries belong to their leader's
-    /// [`LeaderGuard`], which removes them by generation rather than by key; a sweep
+    /// in_flight is deliberately left alone. Those entries belong to their leader's
+    /// LeaderGuard, which removes them by generation rather than by key; a sweep
     /// clearing that map would drop a live leader's sender out from under the
     /// followers waiting on it.
     pub fn sweep_expired(&self) {
@@ -344,17 +344,17 @@ impl Loader {
         Some(Arc::clone(&entry.result))
     }
 
-    /// Decodes an `encodedTrack` for `decodetrack(s)` and for `PATCH` requests that
+    /// Decodes an encodedTrack for decodetrack(s) and for PATCH requests that
     /// carry one.
     ///
     /// A track naming a source manager this node did not register is refused, the
-    /// way the original's `decodeTrack` refuses it: it resolves `sourceName`
-    /// against its registered `sourceManagers` and hands back null when the name
+    /// way the original's decodeTrack refuses it: it resolves sourceName
+    /// against its registered sourceManagers and hands back null when the name
     /// is absent, which the handler turns into a 400. Without that lookup
-    /// `sourceName` is nothing but a string the client chose, and
-    /// `StreamOpener::open` dispatches straight off it — so a hand-built
-    /// `encodedTrack` naming a source the operator left switched off would still
-    /// play, `local` (which opens an arbitrary path off the filesystem) included.
+    /// sourceName is nothing but a string the client chose, and
+    /// StreamOpener::open dispatches straight off it — so a hand-built
+    /// encodedTrack naming a source the operator left switched off would still
+    /// play, local (which opens an arbitrary path off the filesystem) included.
     /// This is the only place a track can enter the node without a source manager
     /// having produced it, so it is the only place the check is needed.
     pub fn decode(&self, encoded: &str) -> Result<Track, Exception> {
@@ -610,7 +610,7 @@ mod tests {
         assert_eq!(loads.load(Ordering::SeqCst), 2);
     }
 
-    /// The leak `sweep_expired` exists for: `cached` only evicts the identifier it
+    /// The leak sweep_expired exists for: cached only evicts the identifier it
     /// was asked about, so an entry that is never looked up again — the normal fate
     /// of a queue's worth of identifiers — stayed in the map forever.
     #[tokio::test]
@@ -632,7 +632,7 @@ mod tests {
         assert!(cache.contains_key("https://example.invalid/b.mp3"));
     }
 
-    /// Distinct identifiers past `MAX_CACHE_ENTRIES` must not grow the cache
+    /// Distinct identifiers past MAX_CACHE_ENTRIES must not grow the cache
     /// without bound, even between sweep ticks.
     #[tokio::test]
     async fn the_cache_does_not_grow_past_its_cap() {
@@ -670,11 +670,11 @@ mod tests {
         assert_eq!(loader.decode(&encoded).unwrap().info.source_name, "http");
     }
 
-    /// The bug: nothing checked `sourceName` against the registered managers, so a
-    /// hand-built `encodedTrack` naming a source the operator switched off was
-    /// still handed to `StreamOpener::open`, which dispatches on that name alone.
-    /// With `local` that reads any path on the filesystem — on a node whose config
-    /// says `sources.local: false`.
+    /// The bug: nothing checked sourceName against the registered managers, so a
+    /// hand-built encodedTrack naming a source the operator switched off was
+    /// still handed to StreamOpener::open, which dispatches on that name alone.
+    /// With local that reads any path on the filesystem — on a node whose config
+    /// says sources.local: false.
     #[test]
     fn an_unregistered_source_is_refused_however_well_formed() {
         let (loader, _) = loader(ok_track);
@@ -688,10 +688,10 @@ mod tests {
         assert!(error.cause.contains("local"), "cause was {:?}", error.cause);
     }
 
-    /// The bug: `LeaderGuard::drop` used to remove `in_flight[identifier]` by key
+    /// The bug: LeaderGuard::drop used to remove in_flight[identifier] by key
     /// alone. If a new leader had already registered its own sender under the
-    /// same identifier — the timing a cancelled leader's guard can race — that
-    /// unconditional removal would delete the *new* leader's live sender before
+    /// same identifier — the timing a canceled leader's guard can race — that
+    /// unconditional removal would delete the new leader's live sender before
     /// it ever sends, forcing its followers to retry as leaders of their own
     /// instead of getting the result that was already on its way.
     #[test]
@@ -724,7 +724,7 @@ mod tests {
     }
 
     /// A manager whose loader thread blocks until released — lets a test cancel
-    /// the *leader's* awaiting task while the underlying OS thread (which nothing
+    /// the leader's awaiting task while the underlying OS thread (which nothing
     /// can cancel) is still running, the way a client-side request timeout would.
     struct Blocking {
         gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
@@ -788,7 +788,7 @@ mod tests {
         assert!(matches!(*result, LoadResult::Track(_)));
     }
 
-    /// A manager like [`Blocking`], but counting invocations too — so a follower
+    /// A manager like Blocking, but counting invocations too — so a follower
     /// that wrongly falls through to its own independent load (defeating
     /// single-flight) is distinguishable from one that correctly waits for a new
     /// leader.
@@ -817,9 +817,9 @@ mod tests {
         }
     }
 
-    /// The scenario `a_cancelled_leader_frees_its_identifier_for_the_next_caller`
-    /// doesn't cover: followers already *subscribed* to a leader that then gets
-    /// cancelled. They must not each fall through to their own independent load —
+    /// The scenario a_cancelled_leader_frees_its_identifier_for_the_next_caller
+    /// doesn't cover: followers already subscribed to a leader that then gets
+    /// canceled. They must not each fall through to their own independent load —
     /// exactly one of them should become the new leader, and the result they all
     /// receive must still be the one that gets cached.
     #[tokio::test]
@@ -879,7 +879,7 @@ mod tests {
         assert!(matches!(*b.unwrap(), LoadResult::Track(_)));
 
         // One load for the aborted leader (its OS thread was already running and
-        // can't be cancelled) plus exactly one for the new leader the followers
+        // can't be canceled) plus exactly one for the new leader the followers
         // elected — never three.
         //
         // The orphaned leader's fetch_add races this assertion: spawn returning
@@ -905,7 +905,7 @@ mod tests {
         assert_eq!(loads.load(Ordering::SeqCst), 2, "the third call must be served from cache");
     }
 
-    /// A manager like [`Blocking`], but signaling when its `load` has actually
+    /// A manager like Blocking, but signaling when its load has actually
     /// started — so a test can wait for the OS thread to be running (and the
     /// permit to be taken) before acting, instead of racing the leader's own
     /// task scheduling.
@@ -934,7 +934,7 @@ mod tests {
         }
     }
 
-    /// The bug: the semaphore permit used to live in `load_uncached`'s own async
+    /// The bug: the semaphore permit used to live in load_uncached's own async
     /// stack frame, so cancelling the caller (dropping its future) freed the
     /// permit immediately even though the OS thread doing the real load — which
     /// nothing can cancel — kept running. A client that cancels and retries in a

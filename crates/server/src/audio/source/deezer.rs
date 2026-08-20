@@ -1,20 +1,20 @@
 //! Deezer.
 //!
-//! Deezer's public API (`api.deezer.com`, no key required) hands back rich track
+//! Deezer's public API (api.deezer.com, no key required) hands back rich track
 //! metadata — including an ISRC, which the platform's own search does not offer —
 //! but only ever a 30-second preview clip as audio; the full track needs a paid
 //! session this node does not have. So the metadata is Deezer's and the audio is
 //! not: playback substitutes the best YouTube match at play time, the same
-//! `sourceName`-keeps-its-identity approach the wider Lavalink ecosystem's LavaSrc
-//! plugin uses for the same reason. See [`YtDlp::find_youtube_match`](super::ytdlp::YtDlp::find_youtube_match)
-//! for the other half, run by `StreamOpener` at playback time rather than here at
+//! sourceName-keeps-its-identity approach the wider Lavalink ecosystem's LavaSrc
+//! plugin uses for the same reason. See YtDlp::find_youtube_match
+//! for the other half, run by StreamOpener at playback time rather than here at
 //! load time, so the substitute is chosen fresh rather than going stale like a
 //! stored stream URL would.
 //!
 //! Only artist- and track-level metadata is one HTTP call away. An album's or a
 //! playlist's own listing endpoint reports each entry without its ISRC (Deezer
 //! nests that per-track only on the dedicated track endpoint), so those come back
-//! without one — the same trade `--flat-playlist` makes for yt-dlp, for the same
+//! without one — the same trade --flat-playlist makes for yt-dlp, for the same
 //! reason: fetching every entry individually would turn a playlist load into
 //! dozens of requests.
 
@@ -32,7 +32,7 @@ use super::{
 const API_BASE: &str = "https://api.deezer.com";
 
 /// Deezer's code for "that id does not exist" — the one case worth telling apart
-/// from a broken request, since it is what turns a load into `loadType: "empty"`
+/// from a broken request, since it is what turns a load into loadType: "empty"
 /// rather than an error.
 const NO_DATA_ERROR_CODE: i64 = 800;
 
@@ -155,12 +155,12 @@ enum Resource {
     Playlist,
 }
 
-/// Extracts the resource kind and numeric id from a `deezer.com` URL.
+/// Extracts the resource kind and numeric id from a deezer.com URL.
 ///
-/// Deezer pages optionally carry a locale segment (`/en/track/123`) ahead of the
-/// kind; both forms are accepted. Dynamic share links (`deezer.page.link/...`) are
+/// Deezer pages optionally carry a locale segment (/en/track/123) ahead of the
+/// kind; both forms are accepted. Dynamic share links (deezer.page.link/...) are
 /// not — resolving one needs following a redirect first, which is unclaimed here
-/// the same way `on.soundcloud.com` would be if this source did not special-case
+/// the same way on.soundcloud.com would be if this source did not special-case
 /// it.
 fn resource_of(identifier: &str) -> Option<(Resource, String)> {
     let rest = strip_scheme(identifier)?;
@@ -192,8 +192,8 @@ fn resource_of(identifier: &str) -> Option<(Resource, String)> {
 /// per-track there — from the parent's.
 ///
 /// There is no entry point within a Deezer album or playlist the way a YouTube
-/// `watch?v=…&list=…` names one, so the selection is always "none", which is what
-/// `-1` on the wire means.
+/// watch?v=…&list=… names one, so the selection is always "none", which is what
+/// -1 on the wire means.
 fn into_playlist(
     name: Option<String>,
     entries: Vec<DeezerTrack>,
@@ -279,7 +279,7 @@ struct SearchResults {
 }
 
 impl DeezerTrack {
-    /// `fallback_cover` is the parent album's or playlist's own cover, used when
+    /// fallback_cover is the parent album's or playlist's own cover, used when
     /// this entry carries none of its own — always the case for an album listing.
     fn into_track(self, fallback_cover: Option<&str>) -> SourceTrack {
         let id = self.id.to_string();
@@ -377,7 +377,7 @@ mod tests {
         ));
     }
 
-    /// `load` is only ever called after `matches`, but a mismatch must not become
+    /// load is only ever called after matches, but a mismatch must not become
     /// an HTTP request against an arbitrary string.
     #[test]
     fn an_unclaimed_identifier_is_not_found_rather_than_fetched() {

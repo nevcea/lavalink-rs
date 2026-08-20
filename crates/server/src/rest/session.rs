@@ -1,4 +1,4 @@
-//! `PATCH /v4/sessions/{sessionId}`.
+//! PATCH /v4/sessions/{sessionId}.
 
 use axum::extract::State;
 use axum::Json;

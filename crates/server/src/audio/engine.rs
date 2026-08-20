@@ -1,23 +1,21 @@
 //! The pipeline, assembled.
 //!
-//! ```text
 //! pump thread                          ring                songbird mixer
 //! ───────────                          ────                ──────────────
 //! decode → resample → filter ──write──▶ ... ──RawAdapter──▶ pull every 20ms
 //!                                                           → Opus → Discord
-//! ```
 //!
 //! Two things about the right-hand side are not choices we get to make:
 //!
-//! * **The mixer pulls.** There is no API for handing it finished frames; it reads
-//!   from a `MediaSource` on its own clock. So the ring's read end is what we expose.
-//! * **The mixer encodes.** Opus passthrough — forwarding a pre-encoded stream
-//!   untouched — requires track volume to be exactly 1.0, and `volume` is a filter
+//! • The mixer pulls. There is no API for handing it finished frames; it reads
+//!   from a MediaSource on its own clock. So the ring's read end is what we expose.
+//! • The mixer encodes. Opus passthrough — forwarding a pre-encoded stream
+//!   untouched — requires track volume to be exactly 1.0, and volume is a filter
 //!   we have to support. So passthrough is off and encoding is songbird's.
 //!
-//! Which leaves seeking as ours to implement, which is [`pump`]'s job.
+//! Which leaves seeking as ours to implement, which is pump's job.
 //!
-//! # Where the boundaries are
+//! Where the boundaries are
 //!
 //! The actor calls into here and never blocks: every method below either flips an
 //! atomic, sends on a channel, or spawns. The pump runs on a
@@ -45,7 +43,7 @@ use crate::player::EventSlot;
 use crate::voice::SharedVoice;
 
 /// How often the pump reports that it is still producing. Throttled hard: this only
-/// has to beat `trackStuckThresholdMs`, and the actor's queue is small.
+/// has to beat trackStuckThresholdMs, and the actor's queue is small.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct PipelineEngine {
@@ -57,18 +55,18 @@ pub struct PipelineEngine {
     opener: Arc<StreamOpener>,
     runtime: tokio::runtime::Handle,
     /// Filled in once the actor exists. Its own queue, not the actor's general
-    /// command queue — see `Engine::attach`.
+    /// command queue — see Engine::attach.
     events: EventSlot,
     /// Shared so the task that hands the input to the mixer can store the resulting
-    /// handle back, which is what `pause` later needs.
+    /// handle back, which is what pause later needs.
     active: Arc<Mutex<Option<Active>>>,
-    /// One per player, not one per track: see [`ring::FrameCounters`]'s docs.
+    /// One per player, not one per track: see ring::FrameCounters's docs.
     frames: Arc<ring::FrameCounters>,
     /// The next generation to hand out. Lives on the engine, not derived from
-    /// whatever `stop_active` tears down — a full stop clears `active` to `None`,
+    /// whatever stop_active tears down — a full stop clears active to None,
     /// so deriving the next generation from the outgoing one would restart the
     /// count at 1 after every stop, letting a pump parked on a stalled source
-    /// (still holding the old generation) pass `is_current` for a later,
+    /// (still holding the old generation) pass is_current for a later,
     /// unrelated track that happens to reuse it.
     next_generation: AtomicU64,
 }
@@ -77,24 +75,24 @@ pub struct PipelineEngine {
 struct Active {
     /// Commands to the pump thread. Dropping it stops the pump.
     commands: Sender<PumpCommand>,
-    /// Set alongside every send on `commands`, so a pump stuck retrying a
-    /// stalled HTTP source (`stream.rs`'s `interrupt`) notices a command is
+    /// Set alongside every send on commands, so a pump stuck retrying a
+    /// stalled HTTP source (stream.rs's interrupt) notices a command is
     /// waiting and gives up its remaining retry budget instead of making the
     /// command wait out the whole thing.
     interrupt: Arc<AtomicBool>,
     /// The songbird side, so pause and stop reach the mixer.
     track: Option<TrackHandle>,
-    /// A clone of the pump's ring writer, kept only so `stop_active` can revoke
+    /// A clone of the pump's ring writer, kept only so stop_active can revoke
     /// this ring's claim on the shared position counter — see
-    /// [`ring::RingWriter::detach_position`].
+    /// ring::RingWriter::detach_position.
     ring: ring::RingWriter,
     /// Bumped on every new track; checked by both the handle-storing task and the
-    /// terminal-outcome dispatch (`play`, below) via [`is_current`] so a late
+    /// terminal-outcome dispatch (play, below) via is_current so a late
     /// outcome from a superseded pump is ignored rather than applied to whatever
     /// track replaced it.
     generation: u64,
-    /// Desired pause state. Source of truth for both `play`'s spawned task (once
-    /// `track` is filled in) and `set_paused` (whenever it runs) — whichever of the
+    /// Desired pause state. Source of truth for both play's spawned task (once
+    /// track is filled in) and set_paused (whenever it runs) — whichever of the
     /// two runs last is what actually gets applied to the handle, instead of a
     /// value snapshotted before the handle existed.
     paused: bool,
@@ -102,12 +100,12 @@ struct Active {
 
 /// Sends a command to the pump and marks it interrupted, in that order.
 ///
-/// The order is load-bearing, not cosmetic: `drain_commands`'s `Empty` branch
-/// clears `interrupt` once it finds nothing to act on, and a channel `send` is
-/// visible to any `try_recv` that follows it. Setting the flag first would leave
-/// a window where `drain_commands` observes `Empty`, clears the flag, and only
+/// The order is load-bearing, not cosmetic: drain_commands's Empty branch
+/// clears interrupt once it finds nothing to act on, and a channel send is
+/// visible to any try_recv that follows it. Setting the flag first would leave
+/// a window where drain_commands observes Empty, clears the flag, and only
 /// then receives this command — reinstating whatever stall the flag exists to
-/// cut short (a full reconnect wait for `Stop`, up to `COMMAND_POLL` for others).
+/// cut short (a full reconnect wait for Stop, up to COMMAND_POLL for others).
 /// Centralized here so both call sites share one place that gets the order right,
 /// rather than each re-implementing it.
 fn signal_pump(commands: &Sender<PumpCommand>, interrupt: &AtomicBool, command: PumpCommand) {
@@ -115,9 +113,9 @@ fn signal_pump(commands: &Sender<PumpCommand>, interrupt: &AtomicBool, command: 
     interrupt.store(true, Ordering::Relaxed);
 }
 
-/// Whether `generation` is still the one `active` currently holds. `Active`'s
-/// pump-thread `commands` sender is dropped to signal a stop, but the pump can be
-/// mid-`next_packet()` at that moment and reach a terminal outcome (a natural EOF,
+/// Whether generation is still the one active currently holds. Active's
+/// pump-thread commands sender is dropped to signal a stop, but the pump can be
+/// mid-next_packet() at that moment and reach a terminal outcome (a natural EOF,
 /// a decode error) without ever observing it — so a stale outcome from a
 /// superseded pump can still arrive after a new one has taken over.
 fn is_current(active: &Mutex<Option<Active>>, generation: u64) -> bool {
@@ -126,9 +124,9 @@ fn is_current(active: &Mutex<Option<Active>>, generation: u64) -> bool {
         .is_some_and(|current| current.generation == generation)
 }
 
-/// Whether a `stop` whose `voice.stop()` has not run yet has already been
-/// superseded by a `play`. See [`Engine::stop`] for why that matters and why
-/// `active` being filled in is the signal: `play` clears and reinstalls it
+/// Whether a stop whose voice.stop() has not run yet has already been
+/// superseded by a play. See Engine::stop for why that matters and why
+/// active being filled in is the signal: play clears and reinstalls it
 /// synchronously, before it spawns anything.
 fn superseded_by_a_replacement(active: &Mutex<Option<Active>>) -> bool {
     lock(active).is_some()
@@ -325,7 +323,7 @@ impl Engine for PipelineEngine {
                     // observes Stop, and the actor treats Progress as "the
                     // current track is alive" — it restamps last_progress and
                     // clears stuck_reported (actor.rs's apply_engine_event). An
-                    // ungated one therefore resets the *replacement* track's
+                    // ungated one therefore resets the replacement track's
                     // stuck clock, suppressing or delaying a TrackStuckEvent the
                     // new track had genuinely earned. Checked after the throttle,
                     // so this takes the lock once per PROGRESS_INTERVAL rather
@@ -432,7 +430,7 @@ impl Engine for PipelineEngine {
 
     /// Pausing is the mixer's job.
     ///
-    /// Stopping the pump instead would only stop *decoding*; the ring would keep
+    /// Stopping the pump instead would only stop decoding; the ring would keep
     /// feeding buffered audio for another few seconds. Pausing the mixer stops the
     /// pull, which stalls the pump on a full ring and freezes the position counter,
     /// because the counter advances on consumption. All three follow from the one
@@ -503,9 +501,9 @@ mod tests {
 
     /// The bug: a pump superseded by a track replace can still race a natural
     /// EOF or decode error and report its outcome after a new pump has already
-    /// taken over `active`. `is_current` is what `play`'s terminal-outcome
+    /// taken over active. is_current is what play's terminal-outcome
     /// dispatch checks before sending that outcome on — this must reject a
-    /// generation that is no longer the one `active` holds.
+    /// generation that is no longer the one active holds.
     #[test]
     fn a_superseded_generation_is_not_current() {
         let active = Mutex::new(Some(dummy_active(2)));
@@ -519,12 +517,12 @@ mod tests {
         assert!(!is_current(&active, 1));
     }
 
-    /// The bug: a track replace is `stop` then `play`, each spawning a task onto
+    /// The bug: a track replace is stop then play, each spawning a task onto
     /// the same voice mutex with nothing ordering them. songbird turns both into
-    /// `SetTrack`, so a `stop` that lands after the `play` — the order tokio's
+    /// SetTrack, so a stop that lands after the play — the order tokio's
     /// LIFO slot makes usual — leaves the mixer with no track and the player
-    /// silently `Playing`. A stop that finds `active` filled in has been
-    /// superseded and must not reach the mixer; a plain stop leaves `active`
+    /// silently Playing. A stop that finds active filled in has been
+    /// superseded and must not reach the mixer; a plain stop leaves active
     /// cleared and must.
     #[test]
     fn a_stop_superseded_by_a_replacement_does_not_reach_the_mixer() {
@@ -537,10 +535,10 @@ mod tests {
     }
 
     /// The bug this guards: deriving the next generation from the one being torn
-    /// down (`stop_active().wrapping_add(1)`) returns 0 once `active` is already
-    /// `None` — a full stop before the replacement track starts — so the next
-    /// `play` reused generation 1. A pump still parked on a stalled source from
-    /// the *first* generation-1 track would then pass `is_current` for whatever
+    /// down (stop_active().wrapping_add(1)) returns 0 once active is already
+    /// None — a full stop before the replacement track starts — so the next
+    /// play reused generation 1. A pump still parked on a stalled source from
+    /// the first generation-1 track would then pass is_current for whatever
     /// later track happened to land on generation 1 again.
     #[test]
     fn a_generation_survives_a_full_stop_and_does_not_restart_at_one() {
@@ -586,7 +584,7 @@ mod tests {
     }
 
     /// The bug this guards: the panic-recovery arm used to leave the ring open
-    /// with neither `finish()` nor the terminal event delivered (simulated here
+    /// with neither finish() nor the terminal event delivered (simulated here
     /// by never sending one), so the reader would starve forever instead of
     /// ever reaching EOF. A clone of the writer taken before the panicking call
     /// must still be able to close it out afterwards.

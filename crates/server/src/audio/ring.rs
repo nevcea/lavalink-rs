@@ -5,22 +5,20 @@
 //! and does nothing but copy. Neither can make the other late, because they only
 //! meet here.
 //!
-//! ```text
 //! [pump: CPU-bound, no deadline]                 [send: O(1), 20ms deadline]
 //! source → decode → filter → f32 PCM ──▶ ring ──▶ mixer pulls via Read
-//! ```
 //!
 //! Two consequences worth stating, because they are what the design buys:
 //!
-//! * A pump that falls behind starves **its own** ring. The reader gets silence and
+//! • A pump that falls behind starves its own ring. The reader gets silence and
 //!   counts a nulled frame — the same accounting as the original's
-//!   `AudioLossCounter`. Other players are untouched.
-//! * A pump that runs ahead blocks on a full ring, so it can never be more than
-//!   `frameBufferDurationMs` ahead of playback.
+//!   AudioLossCounter. Other players are untouched.
+//! • A pump that runs ahead blocks on a full ring, so it can never be more than
+//!   frameBufferDurationMs ahead of playback.
 //!
-//! # Position
+//! Position
 //!
-//! The position counter is advanced **here, on the read side**, not by the pump.
+//! The position counter is advanced here, on the read side, not by the pump.
 //! The pump is up to a whole buffer ahead of what anyone can hear, so its
 //! progress is not a playback position. There is exactly one reader, so the counter
 //! has one writer and needs no coordination.
@@ -41,40 +39,40 @@ pub const CHANNELS: usize = 2;
 pub const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize / 50) * CHANNELS;
 
 /// How long a producer waits for space before re-checking whether it was stopped.
-/// Only [`RingWriter::write`] uses it; the pump polls on its own `COMMAND_POLL`.
+/// Only RingWriter::write uses it; the pump polls on its own COMMAND_POLL.
 #[cfg(test)]
 const PRODUCER_POLL: Duration = Duration::from_millis(100);
 
-/// Frames sent and frames nulled, for `/v4/stats`' `frameStats`.
+/// Frames sent and frames nulled, for /v4/stats' frameStats.
 ///
-/// Lives outside [`Shared`] and is handed in from the caller rather than created
+/// Lives outside Shared and is handed in from the caller rather than created
 /// per ring, because a ring is rebuilt on every new track
-/// (`PipelineEngine::play`) but the original's `AudioLossCounter` is a per-player
+/// (PipelineEngine::play) but the original's AudioLossCounter is a per-player
 /// counter that survives a track change — a quick switch between tracks does not
-/// reset it. Sharing one `Arc` across every ring a player creates reproduces that.
+/// reset it. Sharing one Arc across every ring a player creates reproduces that.
 #[derive(Debug, Default)]
 pub struct FrameCounters {
     sent: AtomicU32,
     nulled: AtomicU32,
-    /// Samples handed to `record_sent`/`record_nulled` that did not complete a
-    /// whole [`FRAME_SAMPLES`]-sized frame by themselves — carried into the next
-    /// call rather than truncated away, the same shape as [`Shared`]'s own
-    /// `remainder_samples`. Without this, a `read()` counts as one frame
+    /// Samples handed to record_sent/record_nulled that did not complete a
+    /// whole FRAME_SAMPLES-sized frame by themselves — carried into the next
+    /// call rather than truncated away, the same shape as Shared's own
+    /// remainder_samples. Without this, a read() counts as one frame
     /// whatever its actual size: a ring drained in many small partial reads (a
-    /// starved buffer nearly caught up, or `out.len() < FRAME_SAMPLES * 4`)
+    /// starved buffer nearly caught up, or out.len() < FRAME_SAMPLES * 4)
     /// would report far more frames than the 20ms of audio it actually moved.
     sent_remainder: AtomicUsize,
     nulled_remainder: AtomicUsize,
 }
 
 impl FrameCounters {
-    /// Counts `samples` toward `sent`, in units of whole [`FRAME_SAMPLES`] frames,
+    /// Counts samples toward sent, in units of whole FRAME_SAMPLES frames,
     /// carrying any leftover forward.
     fn record_sent(&self, samples: usize) {
         Self::record(&self.sent, &self.sent_remainder, samples);
     }
 
-    /// As [`Self::record_sent`], for silence handed back on a starved read.
+    /// As Self::record_sent, for silence handed back on a starved read.
     fn record_nulled(&self, samples: usize) {
         Self::record(&self.nulled, &self.nulled_remainder, samples);
     }
@@ -87,7 +85,7 @@ impl FrameCounters {
         remainder.store(total % FRAME_SAMPLES, Ordering::Relaxed);
     }
 
-    /// Reads and resets both counters. `/v4/stats` ticks drain every player's
+    /// Reads and resets both counters. /v4/stats ticks drain every player's
     /// counters every tick regardless of whether that player's data ends up
     /// "usable" for the aggregate — matching the original, which resets on
     /// its own minute boundary independent of whether it was queried.
@@ -101,7 +99,7 @@ impl FrameCounters {
 
 #[derive(Debug)]
 struct Shared {
-    /// Interleaved stereo samples. A deque rather than a `Vec` because the reader
+    /// Interleaved stereo samples. A deque rather than a Vec because the reader
     /// takes from the front every 20ms, and shifting a multi-second buffer down on
     /// each frame would cost more than the decoding does.
     buffer: Mutex<VecDeque<f32>>,
@@ -115,47 +113,47 @@ struct Shared {
     /// Frames (not samples) handed to the reader since the last seek.
     consumed_frames: AtomicI64,
     /// A sample handed to the reader that did not complete a stereo frame by
-    /// itself (0 or 1, since `CHANNELS` is 2) — carried into the next call to
-    /// [`Shared::advance_frames`] instead of being silently dropped by that
-    /// call's own truncating division. Reset alongside `consumed_frames`,
+    /// itself (0 or 1, since CHANNELS is 2) — carried into the next call to
+    /// Shared::advance_frames instead of being silently dropped by that
+    /// call's own truncating division. Reset alongside consumed_frames,
     /// since a seek discards whatever it was counting toward.
     remainder_samples: AtomicI64,
     /// Playback position at the last seek, in milliseconds.
     base_position_ms: AtomicI64,
     /// Shared with the actor — and, because the engine hands the same handle to
-    /// every ring it builds for a player, with every *other* ring that player has
-    /// ever had. See `owns_position`.
+    /// every ring it builds for a player, with every other ring that player has
+    /// ever had. See owns_position.
     position_ms: Arc<AtomicI64>,
-    /// Whether this ring is still the one entitled to write `position_ms`.
+    /// Whether this ring is still the one entitled to write position_ms.
     ///
-    /// Cleared by [`RingWriter::detach_position`] when the engine supersedes this
-    /// ring. A superseded `RingReader` stays alive inside songbird's `Input` until
+    /// Cleared by RingWriter::detach_position when the engine supersedes this
+    /// ring. A superseded RingReader stays alive inside songbird's Input until
     /// the mixer gets round to dropping it, and any read it services meanwhile —
     /// including a starved one, which refreshes the position too — would otherwise
-    /// write *this* track's base and consumed frames over the live one's.
+    /// write this track's base and consumed frames over the live one's.
     ///
-    /// A `Mutex`, not an `AtomicBool`: `refresh_position` holds it across its whole
-    /// check-then-store, and `detach_position` takes it too, so the two can never
-    /// interleave. Two independent atomics let a `refresh_position` pass the check
-    /// a moment before `detach_position` flipped it, then get preempted before its
+    /// A Mutex, not an AtomicBool: refresh_position holds it across its whole
+    /// check-then-store, and detach_position takes it too, so the two can never
+    /// interleave. Two independent atomics let a refresh_position pass the check
+    /// a moment before detach_position flipped it, then get preempted before its
     /// store — long enough for the engine to build the replacement ring and write
     /// the new track's position, which this call's now-stale store would then
     /// overwrite.
     owns_position: Mutex<bool>,
     frames: Arc<FrameCounters>,
-    /// The position a seek in flight will land on, or `-1` while none is
-    /// pending. Ports lavaplayer's own `LocalAudioTrackExecutor.queuedSeek`:
-    /// its `getPosition()` reports this unconditionally while it is set,
+    /// The position a seek in flight will land on, or -1 while none is
+    /// pending. Ports lavaplayer's own LocalAudioTrackExecutor.queuedSeek:
+    /// its getPosition() reports this unconditionally while it is set,
     /// falling back to the last real frame's timecode only once the seek has
-    /// actually been applied (`queuedSeek.set(-1)` in `applySeekState`, run
+    /// actually been applied (queuedSeek.set(-1) in applySeekState, run
     /// on the playback thread) — not before.
     ///
-    /// Set synchronously by [`RingWriter::begin_seek`] the moment the engine
+    /// Set synchronously by RingWriter::begin_seek the moment the engine
     /// accepts a seek, ahead of the pump ever seeing the command. Without
-    /// this, `refresh_position` below kept computing from the *old* base for
-    /// as long as the pump took to notice the command (up to `COMMAND_POLL`
+    /// this, refresh_position below kept computing from the old base for
+    /// as long as the pump took to notice the command (up to COMMAND_POLL
     /// on a full ring) and buffered pre-seek audio kept draining — so a
-    /// client watching `playerUpdate` saw the position it was just told to
+    /// client watching playerUpdate saw the position it was just told to
     /// expect regress toward wherever the stale audio happened to be, then
     /// jump forward again once the seek landed.
     pending_seek_ms: AtomicI64,
@@ -178,9 +176,9 @@ impl Shared {
         self.position_ms.store(base + elapsed_ms, Ordering::Relaxed);
     }
 
-    /// Retires the announcement for `position_ms`, leaving a newer one alone.
+    /// Retires the announcement for position_ms, leaving a newer one alone.
     ///
-    /// Both callers ([`RingWriter::reset`] and [`RingWriter::cancel_seek`]) are
+    /// Both callers (RingWriter::reset and RingWriter::cancel_seek) are
     /// finishing one specific seek, and both run on the pump thread long after
     /// the engine announced it — so the value they are retiring is only theirs
     /// if it is still the one they were given.
@@ -193,10 +191,10 @@ impl Shared {
         );
     }
 
-    /// Advances `consumed_frames` by however many whole frames `samples` (plus
+    /// Advances consumed_frames by however many whole frames samples (plus
     /// any sample left over from the previous call) makes up, carrying a new
-    /// leftover forward rather than truncating it away — `samples` is not
-    /// guaranteed to be a multiple of `CHANNELS` on its own, since a partial
+    /// leftover forward rather than truncating it away — samples is not
+    /// guaranteed to be a multiple of CHANNELS on its own, since a partial
     /// drain near a starved or nearly-empty buffer can hand over an odd count.
     fn advance_frames(&self, samples: i64) {
         let total = self.remainder_samples.load(Ordering::Relaxed) + samples;
@@ -207,9 +205,9 @@ impl Shared {
     }
 }
 
-/// Creates a ring holding `buffer_ms` of audio, and its two ends.
+/// Creates a ring holding buffer_ms of audio, and its two ends.
 ///
-/// `frames` is owned by the caller (see [`FrameCounters`]'s docs for why) rather
+/// frames is owned by the caller (see FrameCounters's docs for why) rather
 /// than created here.
 pub fn channel(
     buffer_ms: u32,
@@ -253,8 +251,8 @@ impl RingWriter {
     /// Appends samples, blocking while the ring is full.
     ///
     /// Test-only. The pump cannot park on a full ring — it has commands to drain —
-    /// so it drives [`Self::try_write`] and [`Self::wait_for_space`] itself
-    /// (`pump::write_interruptibly`). This is the same loop without the interruption,
+    /// so it drives Self::try_write and Self::wait_for_space itself
+    /// (pump::write_interruptibly). This is the same loop without the interruption,
     /// which is all a test that just wants the samples in there needs.
     #[cfg(test)]
     pub fn write(&self, mut samples: &[f32]) -> bool {
@@ -274,11 +272,11 @@ impl RingWriter {
         true
     }
 
-    /// Appends as many of `samples` as currently fit, without blocking.
+    /// Appends as many of samples as currently fit, without blocking.
     ///
     /// Returns how many samples were written and whether the ring is closed.
-    /// Pairs with [`Self::wait_for_space`]: a caller that needs to check for
-    /// other work between attempts (rather than parking the way [`Self::write`]
+    /// Pairs with Self::wait_for_space: a caller that needs to check for
+    /// other work between attempts (rather than parking the way Self::write
     /// does) calls this first, and only waits when it comes back short.
     pub fn try_write(&self, samples: &[f32]) -> (usize, bool) {
         if self.shared.closed.load(Ordering::Relaxed) {
@@ -287,8 +285,8 @@ impl RingWriter {
         let mut buffer = lock(&self.shared.buffer);
         let room = self.shared.capacity.saturating_sub(buffer.len());
         let take = room.min(samples.len());
-        // extend(&[f32]) and not extend(iter().copied()): only `Extend<&T> where
-        // T: Copy specialises to a slice copy, and the f32`-yielding form falls
+        // extend(&[f32]) and not extend(iter().copied()): only Extend<&T> where
+        // T: Copy specialises to a slice copy, and the f32-yielding form falls
         // back to appending one element at a time with a wraparound check each. This
         // runs with the lock held and the reader is on a 20ms deadline behind it, so
         // the shape of this copy is the reader's problem too, not just the pump's.
@@ -296,9 +294,9 @@ impl RingWriter {
         (take, false)
     }
 
-    /// Waits up to `timeout` for room in the ring or for it to close, whichever
-    /// comes first. Returns whether the ring is still open — `false` means stop,
-    /// same as [`Self::write`]'s return value.
+    /// Waits up to timeout for room in the ring or for it to close, whichever
+    /// comes first. Returns whether the ring is still open — false means stop,
+    /// same as Self::write's return value.
     pub fn wait_for_space(&self, timeout: Duration) -> bool {
         if self.shared.closed.load(Ordering::Relaxed) {
             return false;
@@ -326,30 +324,30 @@ impl RingWriter {
     /// Called by the engine the moment it supersedes this ring, which it does
     /// synchronously — before the replacement ring exists. Everything after that
     /// point is the next track's to report, even though this ring's reader is
-    /// still alive inside songbird's `Input` until the mixer drops it. See
-    /// [`Shared::owns_position`].
+    /// still alive inside songbird's Input until the mixer drops it. See
+    /// Shared::owns_position.
     pub fn detach_position(&self) {
         *lock(&self.shared.owns_position) = false;
     }
 
-    /// Discards buffered audio and restarts the position counter at `position_ms`.
+    /// Discards buffered audio and restarts the position counter at position_ms.
     ///
     /// Called by the pump after it has seeked the decoder: the buffer holds audio
-    /// from *before* the seek, which must not be played. Also the point where a
-    /// seek that [`Self::begin_seek`] announced has actually landed: `base` is
-    /// rebased to the same target `pending_seek_ms` was already reporting, so
-    /// clearing it here (after the rebase, before `refresh_position` runs) hands
+    /// from before the seek, which must not be played. Also the point where a
+    /// seek that Self::begin_seek announced has actually landed: base is
+    /// rebased to the same target pending_seek_ms was already reporting, so
+    /// clearing it here (after the rebase, before refresh_position runs) hands
     /// position reporting back to the normal frame-tracked path without the
     /// value it reports ever changing.
     ///
     /// Clears only the announcement this call is landing, hence the
     /// compare-exchange: the engine announces on its own thread, so a second seek
     /// can be accepted between the pump seeking the decoder and arriving here.
-    /// An unconditional clear would drop that newer target and report `base +
-    /// elapsed` until the pump worked through the second seek's own I/O — the
+    /// An unconditional clear would drop that newer target and report base +
+    /// elapsed until the pump worked through the second seek's own I/O — the
     /// regress-then-jump this field exists to prevent. A failed exchange means
-    /// the pending value belongs to a later seek (or is already `-1`, as on
-    /// `open`'s initial reset), and either way is not ours to clear.
+    /// the pending value belongs to a later seek (or is already -1, as on
+    /// open's initial reset), and either way is not ours to clear.
     pub fn reset(&self, position_ms: i64) {
         let mut buffer = lock(&self.shared.buffer);
         buffer.clear();
@@ -365,7 +363,7 @@ impl RingWriter {
     }
 
     /// Announces a seek that is about to be handed to the pump, before it has
-    /// been applied — see [`Shared::pending_seek_ms`]. Called by the engine
+    /// been applied — see Shared::pending_seek_ms. Called by the engine
     /// synchronously, in the same call that queues the command, so there is no
     /// window where the command is in flight but nothing yet reflects it.
     pub fn begin_seek(&self, position_ms: i64) {
@@ -374,16 +372,16 @@ impl RingWriter {
             .store(position_ms, Ordering::Relaxed);
     }
 
-    /// Cancels a seek [`Self::begin_seek`] announced but that never landed —
+    /// Cancels a seek Self::begin_seek announced but that never landed —
     /// the pump found the target unseekable and the decoder kept going from
-    /// wherever it actually was, the same outcome the pump's own `seek` falls
-    /// back to on failure (`pump.rs`'s `State::seek`). Position reporting
+    /// wherever it actually was, the same outcome the pump's own seek falls
+    /// back to on failure (pump.rs's State::seek). Position reporting
     /// must return to that real, unmoved position instead of holding at a
     /// target that is never going to arrive.
     ///
-    /// Takes the target it is cancelling for the same reason [`Self::reset`]
+    /// Takes the target it is cancelling for the same reason Self::reset
     /// does: a seek accepted while this one was failing is still going to land,
-    /// and cancelling *it* would report a position the client was never told to
+    /// and cancelling it would report a position the client was never told to
     /// expect.
     pub fn cancel_seek(&self, position_ms: i64) {
         self.shared.clear_pending_seek(position_ms);
@@ -393,22 +391,22 @@ impl RingWriter {
         self.shared.closed.load(Ordering::Relaxed)
     }
 
-    /// Wakes a pump parked in [`Self::wait_for_space`], without changing
+    /// Wakes a pump parked in Self::wait_for_space, without changing
     /// anything it is waiting for.
     ///
-    /// Called by the engine alongside a command send (`Seek`, `SetVolume`,
-    /// `SetFilters`, `SetEndTime`) so a pump that is currently blocked on a
+    /// Called by the engine alongside a command send (Seek, SetVolume,
+    /// SetFilters, SetEndTime) so a pump that is currently blocked on a
     /// full ring — the common case in steady playback, since decode outruns
     /// real time — checks its command queue immediately instead of only at
-    /// the next `COMMAND_POLL` tick, up to 100ms later. Reuses the same
-    /// `space` condvar `reset` already notifies on, so this does not add a
+    /// the next COMMAND_POLL tick, up to 100ms later. Reuses the same
+    /// space condvar reset already notifies on, so this does not add a
     /// second wakeup mechanism to the ring.
     pub fn wake(&self) {
         self.shared.space.notify_all();
     }
 }
 
-/// The send path's end: a byte stream of little-endian `f32` samples, which is the
+/// The send path's end: a byte stream of little-endian f32 samples, which is the
 /// format the voice mixer's raw adapter expects.
 #[derive(Debug)]
 pub struct RingReader {
@@ -419,7 +417,7 @@ pub struct RingReader {
 }
 
 impl RingReader {
-    /// Frames delivered and frames missed since the last call, for `/v4/stats`.
+    /// Frames delivered and frames missed since the last call, for /v4/stats.
     pub fn take_frame_stats(&self) -> (u32, u32) {
         self.shared.frames.take()
     }
@@ -554,7 +552,7 @@ impl Read for RingReader {
 
 impl Seek for RingReader {
     /// The ring is a live stream. Seeking is the pump's job — it rebuilds its
-    /// decoder and calls [`RingWriter::reset`] — so the mixer must never try.
+    /// decoder and calls RingWriter::reset — so the mixer must never try.
     fn seek(&mut self, _from: SeekFrom) -> io::Result<u64> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -708,8 +706,8 @@ mod tests {
     }
 
     /// The bug: a partial drain whose sample count isn't a multiple of
-    /// `CHANNELS` used to silently drop the odd leftover from
-    /// `consumed_frames` via truncating division — individually tiny (half a
+    /// CHANNELS used to silently drop the odd leftover from
+    /// consumed_frames via truncating division — individually tiny (half a
     /// frame, a fraction of a millisecond) but one-directional and never
     /// corrected, so it compounds over a long-running stream into an
     /// observable amount of drift.
@@ -734,8 +732,8 @@ mod tests {
         assert_eq!(position.load(Ordering::Relaxed), 20);
     }
 
-    /// The bug this guards: before the fix, `frameStats.sent` counted one frame
-    /// per `read()` call regardless of its size, so draining the same audio
+    /// The bug this guards: before the fix, frameStats.sent counted one frame
+    /// per read() call regardless of its size, so draining the same audio
     /// across many small reads (a short read near the ring's own capacity, or a
     /// consumer that just doesn't ask for a whole frame at once) inflated the
     /// count far past what was actually delivered.
@@ -850,10 +848,10 @@ mod tests {
         assert_eq!(position.load(Ordering::Relaxed), 10_250);
     }
 
-    /// Ports lavaplayer's own `LocalAudioTrackExecutor.getPosition()`, which
-    /// reports `queuedSeek` unconditionally while a seek is pending, not the
-    /// last real frame's timecode. Without `begin_seek`, a read landing after
-    /// the announcement but before `reset` actually rebases the ring reports
+    /// Ports lavaplayer's own LocalAudioTrackExecutor.getPosition(), which
+    /// reports queuedSeek unconditionally while a seek is pending, not the
+    /// last real frame's timecode. Without begin_seek, a read landing after
+    /// the announcement but before reset actually rebases the ring reports
     /// whatever the still-buffered pre-seek audio's trajectory says instead —
     /// the position-regresses-then-jumps bug this pins.
     #[test]
@@ -887,7 +885,7 @@ mod tests {
         assert!(position.load(Ordering::Relaxed) > 90_000);
     }
 
-    /// The pump finds the source unseekable and never calls `reset`; position
+    /// The pump finds the source unseekable and never calls reset; position
     /// reporting must give up on the target and go back to reality instead of
     /// holding at a seek that is never going to land.
     #[test]
@@ -912,10 +910,10 @@ mod tests {
 
     /// Scrubbing a seek bar sends seeks faster than the pump lands them. The
     /// engine announces the second one while the pump is still finishing the
-    /// first, so the first's `reset` used to clear the second's announcement and
-    /// report `base + elapsed` for however long the second seek's own I/O took —
-    /// an HTTP `Range` re-request, so hundreds of ms of the very regress-then-jump
-    /// `pending_seek_ms` exists to prevent.
+    /// first, so the first's reset used to clear the second's announcement and
+    /// report base + elapsed for however long the second seek's own I/O took —
+    /// an HTTP Range re-request, so hundreds of ms of the very regress-then-jump
+    /// pending_seek_ms exists to prevent.
     #[test]
     fn landing_a_seek_does_not_retire_a_newer_one_announced_behind_it() {
         let (writer, mut reader, position) = ring(1000);
@@ -927,7 +925,7 @@ mod tests {
         // first — both announcements happen on its thread, not the pump's.
         writer.begin_seek(90_000);
 
-        // The pump now lands the *first* seek.
+        // The pump now lands the first seek.
         writer.reset(30_000);
 
         assert_eq!(
@@ -1024,10 +1022,10 @@ mod tests {
         assert_eq!(delivered, written, "every sample must survive the trip");
     }
 
-    /// `wake` is what cuts a command's latency on a full ring down from
-    /// `COMMAND_POLL` to near-immediate — see `PipelineEngine::send_to_pump`.
+    /// wake is what cuts a command's latency on a full ring down from
+    /// COMMAND_POLL to near-immediate — see PipelineEngine::send_to_pump.
     /// This pins the mechanism it relies on: a producer parked in
-    /// `wait_for_space` returns as soon as `wake` is called, well before the
+    /// wait_for_space returns as soon as wake is called, well before the
     /// timeout it was given.
     #[test]
     fn wake_returns_a_parked_producer_before_its_timeout() {
@@ -1058,11 +1056,11 @@ mod tests {
         );
     }
 
-    /// The bug: the engine hands the same `position_ms` handle to every ring it
+    /// The bug: the engine hands the same position_ms handle to every ring it
     /// builds for a player, so a superseded ring shares the live one's counter. Its
-    /// reader stays alive inside songbird's `Input` until the mixer drops it, and
+    /// reader stays alive inside songbird's Input until the mixer drops it, and
     /// any read it services in that window — a starved one included, since that
-    /// refreshes the position too — wrote the *old* track's base and consumed
+    /// refreshes the position too — wrote the old track's base and consumed
     /// frames over the new track's. Once the engine has moved on, the old ring must
     /// not touch the counter again.
     #[test]
@@ -1089,16 +1087,16 @@ mod tests {
         );
     }
 
-    /// `detach_position` (the engine, synchronously, before the replacement ring
-    /// exists) must never lose a race against a `refresh_position` already in
-    /// flight on this ring's reader: by the time `detach_position` returns, no
-    /// read still in flight when it was called may write `position_ms` afterward.
+    /// detach_position (the engine, synchronously, before the replacement ring
+    /// exists) must never lose a race against a refresh_position already in
+    /// flight on this ring's reader: by the time detach_position returns, no
+    /// read still in flight when it was called may write position_ms afterward.
     /// Regression test for the race where the two were separate atomics with no
-    /// lock tying the check in `refresh_position` to its own store, letting a
-    /// `detach_position` land in the gap between them and get overwritten by a
-    /// read that read `true` a moment before.
+    /// lock tying the check in refresh_position to its own store, letting a
+    /// detach_position land in the gap between them and get overwritten by a
+    /// read that read true a moment before.
     ///
-    /// Mirrors how the real caller uses these two: `detach_position` returns
+    /// Mirrors how the real caller uses these two: detach_position returns
     /// before the replacement ring is even created, so nothing the old ring's
     /// reader does is allowed to land after that point.
     #[test]
@@ -1137,12 +1135,12 @@ mod tests {
         }
     }
 
-    /// A concurrent `reset` (the pump, after a seek) must never have its rebase
-    /// clobbered by a `read` (the mixer) that was already in flight, and vice
+    /// A concurrent reset (the pump, after a seek) must never have its rebase
+    /// clobbered by a read (the mixer) that was already in flight, and vice
     /// versa: whichever one runs must see a consistent, non-interleaved
-    /// `consumed_frames`/`base_position_ms` pair. Regression test for the race
-    /// where `read` wrote its bookkeeping after releasing the buffer lock,
-    /// letting a `reset` land in between and get partially overwritten.
+    /// consumed_frames/base_position_ms pair. Regression test for the race
+    /// where read wrote its bookkeeping after releasing the buffer lock,
+    /// letting a reset land in between and get partially overwritten.
     #[test]
     fn a_racing_reset_and_read_never_corrupt_the_position() {
         for _ in 0..2_000 {
@@ -1168,10 +1166,10 @@ mod tests {
         }
     }
 
-    /// What `PipelineEngine::play()` actually relies on for `frameStats` to survive
-    /// a skip/replace: `frames` is handed in by the caller and `channel()` never
-    /// makes its own, so the same `Arc<FrameCounters>` can be threaded through a
-    /// fresh ring for every new track (`ring::FrameCounters`'s docs). This is that
+    /// What PipelineEngine::play() actually relies on for frameStats to survive
+    /// a skip/replace: frames is handed in by the caller and channel() never
+    /// makes its own, so the same Arc<FrameCounters> can be threaded through a
+    /// fresh ring for every new track (ring::FrameCounters's docs). This is that
     /// mechanism in isolation, without a real engine or songbird.
     #[test]
     fn frame_counters_survive_a_new_ring_for_a_replaced_track() {
@@ -1197,7 +1195,7 @@ mod tests {
         assert_eq!(nulled, 0);
     }
 
-    /// A starved read on the *second* ring must still add to the same counter as a
+    /// A starved read on the second ring must still add to the same counter as a
     /// healthy read on the first — nothing about switching rings should reset which
     /// counter a starvation is charged to.
     #[test]
@@ -1222,19 +1220,19 @@ mod tests {
     }
 
     /// The bug this guards (#9): songbird builds its codec registry with
-    /// `symphonia::default::register_enabled_codecs`, and its own `symphonia`
-    /// dependency enables **no features at all** — by design, so the downstream
+    /// symphonia::default::register_enabled_codecs, and its own symphonia
+    /// dependency enables no features at all — by design, so the downstream
     /// crate picks the codec set. Which means the PCM decoder that songbird's
-    /// `RawAdapter` path needs (`RawReader` declares `CODEC_TYPE_PCM_F32LE`) only
-    /// exists in that registry if *we* enable `pcm` on the same symphonia version
+    /// RawAdapter path needs (RawReader declares CODEC_TYPE_PCM_F32LE) only
+    /// exists in that registry if we enable pcm on the same symphonia version
     /// songbird resolved. That happened by accident for as long as our own
     /// symphonia was 0.5.x too, and stopped the instant we moved to 0.6: two
     /// versions are two unrelated crates, so nothing unified any more.
     ///
-    /// Nothing about it fails loudly. `LiveInput::promote` just finds no decoder
+    /// Nothing about it fails loudly. LiveInput::promote just finds no decoder
     /// for the track, the mixer never pulls a frame, the ring fills, the pump
     /// parks on a full ring — and because the position counter is advanced on the
-    /// *read* side, `position` sits at 0 until `TrackStuckEvent` fires. That is
+    /// read side, position sits at 0 until TrackStuckEvent fires. That is
     /// the whole of #9, and it is invisible to every test that stops at the ring.
     ///
     /// So this asserts the one thing that actually matters at the boundary: the

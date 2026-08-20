@@ -2,12 +2,12 @@
 //!
 //! The original resolves SoundCloud through lavaplayer's own API client, which needs
 //! a client id scraped from the site and re-scraped whenever it rotates. Here it goes
-//! through the same yt-dlp binary [`youtube`](super::youtube) already depends on:
+//! through the same yt-dlp binary youtube already depends on:
 //! there is no second failure mode to operate, and yt-dlp tracks the site's changes
 //! for us.
 //!
-//! What a client observes is unaffected — `sourceName` is `"soundcloud"` and
-//! `scsearch:` behaves as it does on the original.
+//! What a client observes is unaffected — sourceName is "soundcloud" and
+//! scsearch: behaves as it does on the original.
 
 use std::sync::Arc;
 
@@ -16,8 +16,8 @@ use super::{strip_scheme, SourceError, SourceLoad, SourceManager};
 
 pub struct SoundCloudSource {
     backend: Arc<YtDlp>,
-    /// `soundcloudSearchEnabled`. `false` leaves direct URLs (including sets)
-    /// claimed — only `scsearch:` stops being claimed.
+    /// soundcloudSearchEnabled. false leaves direct URLs (including sets)
+    /// claimed — only scsearch: stops being claimed.
     search_enabled: bool,
 }
 
@@ -71,8 +71,8 @@ impl SourceManager for SoundCloudSource {
 
 /// Whether this is a SoundCloud page URL.
 ///
-/// `on.soundcloud.com` is the share shortener, which yt-dlp follows; it is claimed
-/// here so a shared link does not come back `empty`.
+/// on.soundcloud.com is the share shortener, which yt-dlp follows; it is claimed
+/// here so a shared link does not come back empty.
 fn is_soundcloud_url(identifier: &str) -> bool {
     let Some(rest) = strip_scheme(identifier) else {
         return false;
@@ -89,7 +89,7 @@ fn is_soundcloud_url(identifier: &str) -> bool {
             .is_some_and(|(_, path)| !path.trim().is_empty())
 }
 
-/// SoundCloud spells a playlist `/sets/`.
+/// SoundCloud spells a playlist /sets/.
 fn is_set_url(identifier: &str) -> bool {
     identifier.contains("/sets/")
 }
@@ -149,7 +149,7 @@ mod tests {
         ));
     }
 
-    /// `soundcloudSearchEnabled: false` stops `scsearch:` from being claimed, but
+    /// soundcloudSearchEnabled: false stops scsearch: from being claimed, but
     /// direct URLs (including sets) are unaffected.
     #[test]
     fn disabling_search_leaves_direct_urls_claimed() {
@@ -164,7 +164,7 @@ mod tests {
         ));
     }
 
-    /// `load` is only ever called after `matches`, but a mismatch must not become a
+    /// load is only ever called after matches, but a mismatch must not become a
     /// subprocess launch against an arbitrary string.
     #[test]
     fn an_unclaimed_identifier_is_not_found_rather_than_extracted() {

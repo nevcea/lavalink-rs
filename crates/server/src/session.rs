@@ -1,23 +1,21 @@
 //! The session registry.
 //!
-//! The original keeps two maps: `sessions` (a `ConcurrentHashMap`) and
-//! `resumableSessions` (a plain `mutableMapOf`), touched from websocket callbacks,
-//! a scheduler and the handshake thread (`SocketServer.kt:54,150,158,176,180`).
+//! The original keeps two maps: sessions (a ConcurrentHashMap) and
+//! resumableSessions (a plain mutableMapOf), touched from WebSocket callbacks,
+//! a scheduler and the handshake thread (SocketServer.kt:54,150,158,176,180).
 //! Only one of them is thread-safe, and a session's identity is spread across both.
 //!
 //! Here there is one map, and a session's lifecycle is one enum guarded by one lock:
 //!
-//! ```text
 //! Open ──disconnect, resuming enabled──▶ Resumable{deadline} ──claim──▶ Open
 //!   │                                          │
 //!   └──disconnect, resuming disabled──▶ gone ◀──┴──deadline passes──
-//! ```
 //!
-//! The second fix is [`SessionRegistry::claim_for_resume`]. The original's
-//! `canResume` is a predicate that cancels the resume timeout as a side effect
-//! (`SocketServer.kt:180`), so a handshake that then fails to complete leaves the
+//! The second fix is SessionRegistry::claim_for_resume. The original's
+//! canResume is a predicate that cancels the resume timeout as a side effect
+//! (SocketServer.kt:180), so a handshake that then fails to complete leaves the
 //! session with no timeout and no owner — a permanent leak. Here nothing is
-//! cancelled by looking: ownership moves in a single compare-and-swap at the moment
+//! canceled by looking: ownership moves in a single compare-and-swap at the moment
 //! the connection is established, and until that happens the deadline stands.
 
 use std::collections::HashMap;
@@ -31,23 +29,23 @@ use crate::player::PlayerHandle;
 use crate::sink::{SendError, Sink};
 use crate::voice::VoiceConnection;
 
-/// The original's default, and what a session gets before any `PATCH /v4/sessions`.
+/// The original's default, and what a session gets before any PATCH /v4/sessions.
 const DEFAULT_RESUME_TIMEOUT_SECS: i64 = 60;
 
-/// Above this, a client-supplied `timeout` in `PATCH /v4/sessions` is treated as
+/// Above this, a client-supplied timeout in PATCH /v4/sessions is treated as
 /// already expired rather than turned into a real deadline — see
-/// `SessionRegistry::on_disconnect`'s comment for why this can't just be handed
-/// to `Instant::checked_add` instead. 100 years, in seconds.
+/// SessionRegistry::on_disconnect's comment for why this can't just be handed
+/// to Instant::checked_add instead. 100 years, in seconds.
 const MAX_SANE_RESUME_TIMEOUT_SECS: i64 = 100 * 365 * 24 * 60 * 60;
 
 /// How long a caller waits on a single player's destroy before giving up on it and
-/// moving on. `PlayerActor`'s own contract is that its loop never awaits I/O, so a
+/// moving on. PlayerActor's own contract is that its loop never awaits I/O, so a
 /// healthy destroy finishes near-instantly — this exists only to cap the cost of an
 /// actor that never will.
 ///
-/// Shared with `rest::player::delete_player`, which waits on the same call for the
+/// Shared with rest::player::delete_player, which waits on the same call for the
 /// same courtesy and needs the same cap: an unbounded wait there hangs an HTTP
-/// request instead of a shutdown, and a client retrying `DELETE` stacks them up.
+/// request instead of a shutdown, and a client retrying DELETE stacks them up.
 pub(crate) const PLAYER_DESTROY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,26 +61,26 @@ pub struct Session {
     pub sink: Arc<Sink>,
     resuming: AtomicBool,
     /// Stored exactly as the client set it — including negative, which the
-    /// original never rejects or clamps (`SessionRestHandler.kt`'s handler is
-    /// a bare assignment). Only [`SessionRegistry::on_disconnect`]'s deadline
+    /// original never rejects or clamps (SessionRestHandler.kt's handler is
+    /// a bare assignment). Only SessionRegistry::on_disconnect's deadline
     /// math needs a non-negative value, and clamps at that one use site
     /// instead, so a negative value still round-trips unchanged through
-    /// `PATCH /v4/sessions/{id}`'s response.
+    /// PATCH /v4/sessions/{id}'s response.
     resume_timeout_secs: AtomicI64,
     /// One entry per guild: the player and the voice connection its engine was
     /// actually built with, inserted together in a single step (see
-    /// [`Session::get_or_create_player`]) rather than as two independent maps.
-    /// Two maps updated by two separate `entry().or_insert()` calls let two
+    /// Session::get_or_create_player) rather than as two independent maps.
+    /// Two maps updated by two separate entry().or_insert() calls let two
     /// concurrent first-time requests for the same guild disagree about which of
     /// them won — the registered player's engine could end up holding a voice
-    /// connection that was never the one `PATCH`'s `voice` field gets connected
+    /// connection that was never the one PATCH's voice field gets connected
     /// against, and the loser's actor (kept alive forever by its own engine's
     /// self-referencing event-channel sender) would leak permanently. One map
     /// filled in one step makes "who won" a single decision instead of two.
     guilds: Mutex<HashMap<u64, GuildPlayer>>,
-    /// Flipped to `false` by [`Session::take_players`], under the same lock as
-    /// `guilds`. Without it, a `get_or_create_player` racing a sweep-driven
-    /// `take_players` on this same (still-`Arc`-alive) `Session` cannot tell "no
+    /// Flipped to false by Session::take_players, under the same lock as
+    /// guilds. Without it, a get_or_create_player racing a sweep-driven
+    /// take_players on this same (still-Arc-alive) Session cannot tell "no
     /// players yet" from "just torn down" — an empty map looks the same either
     /// way — and would happily build a fresh player that nothing can ever reach
     /// again, because the session id that led here has already left the
@@ -140,8 +138,8 @@ impl Session {
         self.sink.send(message)
     }
 
-    /// As [`Session::send`], but ahead of anything already queued — see
-    /// [`Sink::send_first`].
+    /// As Session::send, but ahead of anything already queued — see
+    /// Sink::send_first.
     pub fn send_first(&self, message: Message) -> Result<(), SendError> {
         self.sink.send_first(message)
     }
@@ -152,7 +150,7 @@ impl Session {
 
     /// The voice connection currently registered for a guild, if any — for
     /// comparing identity against a connection a caller already holds (see
-    /// `rest::player::patch_player`'s post-connect re-check), not for building on.
+    /// rest::player::patch_player's post-connect re-check), not for building on.
     pub fn voice(&self, guild_id: u64) -> Option<Arc<VoiceConnection>> {
         self.lock_guilds().get(&guild_id).map(|guild| Arc::clone(&guild.voice))
     }
@@ -166,10 +164,10 @@ impl Session {
 
     /// This session's player count, and of those the ones actually playing.
     ///
-    /// Reads both under the guild lock instead of going through [`Self::players`]:
-    /// a handle is three mpsc senders and two `Arc`s, and `GET /v4/stats` is
+    /// Reads both under the guild lock instead of going through Self::players:
+    /// a handle is three mpsc senders and two Arcs, and GET /v4/stats is
     /// client-driven at whatever rate it likes — cloning one per player per
-    /// request to compute two integers is work with no reader. The stats *tick*
+    /// request to compute two integers is work with no reader. The stats tick
     /// still takes a real roster, because it needs the handles themselves to
     /// drain frame counters.
     pub fn counts(&self) -> (usize, usize) {
@@ -182,25 +180,25 @@ impl Session {
     }
 
     /// Returns the guild's (player, voice) pair, building and inserting it with
-    /// `build` if there is none yet.
+    /// build if there is none yet.
     ///
-    /// `build` runs at most once per guild, under the same lock that checks for
+    /// build runs at most once per guild, under the same lock that checks for
     /// and inserts the entry: a race between two first-time callers for the same
-    /// guild is resolved as a single winner for *both* the player and the voice
+    /// guild is resolved as a single winner for both the player and the voice
     /// connection together, rather than as two independent decisions that could
-    /// disagree about who won (see [`GuildPlayer`]'s docs for what that used to
-    /// cost). The original builds the player *inside* `computeIfAbsent` and fires
-    /// `onNewPlayer` from the mapping function (`SocketContext.kt:109-113`), which
+    /// disagree about who won (see GuildPlayer's docs for what that used to
+    /// cost). The original builds the player inside computeIfAbsent and fires
+    /// onNewPlayer from the mapping function (SocketContext.kt:109-113), which
     /// runs arbitrary listener code while holding the map's bin lock — reentrancy
-    /// there is undefined behaviour for `ConcurrentHashMap`. Here construction is
-    /// cheap and side-effect free (spawning the actor task is all `build` does
+    /// there is undefined behavior for ConcurrentHashMap. Here construction is
+    /// cheap and side-effect free (spawning the actor task is all build does
     /// beyond constructing values), so nothing unbounded runs under the lock.
     ///
-    /// Returns `None` without calling `build` if the session has already been
-    /// torn down by [`Session::take_players`] — otherwise a `PATCH` that is slow
+    /// Returns None without calling build if the session has already been
+    /// torn down by Session::take_players — otherwise a PATCH that is slow
     /// to reach this call (e.g. stuck resolving an identifier) could race a
     /// resume-deadline sweep and build a player into a session nothing can find
-    /// again, since only the registry's session id, not this `Arc`, is what a
+    /// again, since only the registry's session id, not this Arc, is what a
     /// later request can look sessions up by.
     pub fn get_or_create_player(
         &self,
@@ -223,7 +221,7 @@ impl Session {
     }
 
     /// Empties the guild map and marks the session dead to
-    /// [`Session::get_or_create_player`], both under the same lock so the two
+    /// Session::get_or_create_player, both under the same lock so the two
     /// can't race into a player neither state can see.
     pub fn take_players(&self) -> Vec<PlayerHandle> {
         let mut guilds = self.lock_guilds();
@@ -235,18 +233,18 @@ impl Session {
     }
 
     /// Destroys every player the session holds, then closes its sink. The one
-    /// teardown routine, shared by an explicit close (`SessionRegistry::destroy`)
-    /// and a resume-deadline sweep (`ticker::sweep_tick`) — both need every
+    /// teardown routine, shared by an explicit close (SessionRegistry::destroy)
+    /// and a resume-deadline sweep (ticker::sweep_tick) — both need every
     /// actor, voice connection and pump thread gone, not just the session's own
     /// bookkeeping removed.
     ///
     /// Each player's destroy runs concurrently with the rest and is bounded by
-    /// `PLAYER_DESTROY_TIMEOUT`, so one wedged actor can only ever cost this
+    /// PLAYER_DESTROY_TIMEOUT, so one wedged actor can only ever cost this
     /// session that much time — not stall its own siblings, and not stall
-    /// `ticker::sweep_tick`'s loop, which calls this once per expired session with
+    /// ticker::sweep_tick's loop, which calls this once per expired session with
     /// nothing else bounding how long any single call may run.
     ///
-    /// Giving up on the wait is not giving up on the teardown: `take_players` has
+    /// Giving up on the wait is not giving up on the teardown: take_players has
     /// already emptied the map, so the handle dropped at the end of each of these
     /// futures is the last one, and that drop closes the actor's destroy channel
     /// and ends it. Before the channel existed, a timeout here stranded the actor
@@ -302,11 +300,11 @@ impl SessionRegistry {
         session
     }
 
-    /// Whether `id` is currently resumable, without claiming it — for the
-    /// `Session-Resumed` handshake response header
-    /// (`HandshakeInterceptorImpl.kt`'s `canResume` check), which is read-only
+    /// Whether id is currently resumable, without claiming it — for the
+    /// Session-Resumed handshake response header
+    /// (HandshakeInterceptorImpl.kt's canResume check), which is read-only
     /// and happens before the socket the real claim needs even exists. Shares
-    /// [`Self::claim_for_resume`]'s deadline condition exactly, so the header
+    /// Self::claim_for_resume's deadline condition exactly, so the header
     /// never promises a resume that the claim moments later would refuse.
     pub fn can_resume(&self, id: &str, now: Instant) -> bool {
         matches!(
@@ -317,14 +315,14 @@ impl SessionRegistry {
 
     /// Takes ownership of a resumable session, in one atomic step.
     ///
-    /// Returns `None` when the id is unknown, the session is currently open, or
+    /// Returns None when the id is unknown, the session is currently open, or
     /// its deadline has already passed — in the first two cases its resume
     /// deadline, if any, is left running untouched; in the last, the entry is
-    /// left for `sweep_expired` to remove rather than raced against it here.
+    /// left for sweep_expired to remove rather than raced against it here.
     /// Without this check, a resume landing between two sweep ticks (up to
-    /// `ticker::SWEEP_INTERVAL` late) could succeed after the deadline the client
-    /// was promised — `sweep_expired` only runs once a second, so it is not a
-    /// substitute for checking `now` at the moment of the claim itself.
+    /// ticker::SWEEP_INTERVAL late) could succeed after the deadline the client
+    /// was promised — sweep_expired only runs once a second, so it is not a
+    /// substitute for checking now at the moment of the claim itself.
     pub fn claim_for_resume(&self, id: &str, now: Instant) -> Option<Arc<Session>> {
         let mut sessions = self.lock();
         let entry = sessions.get_mut(id)?;
@@ -341,7 +339,7 @@ impl SessionRegistry {
     /// Any registered session, open or awaiting resume.
     ///
     /// REST requests are served in either state: the session is alive, only its
-    /// websocket is gone.
+    /// WebSocket is gone.
     pub fn get(&self, id: &str) -> Option<Arc<Session>> {
         self.lock().get(id).map(|entry| Arc::clone(&entry.session))
     }
@@ -357,9 +355,9 @@ impl SessionRegistry {
             .collect()
     }
 
-    /// Handles a websocket closing.
+    /// Handles a WebSocket closing.
     ///
-    /// Returns the session to shut down, or `None` if it went to `Resumable` and
+    /// Returns the session to shut down, or None if it went to Resumable and
     /// should be left alone until it is claimed or expires.
     pub fn on_disconnect(&self, id: &str, now: Instant) -> Option<Arc<Session>> {
         let mut sessions = self.lock();
@@ -376,8 +374,8 @@ impl SessionRegistry {
             // through), so a huge one is clamped the same way instead of being
             // handed to Duration/Instant arithmetic: Instant::checked_add's
             // overflow behavior isn't portable enough to rely on here — on
-            // Windows, `Instant::now().checked_add(Duration::from_secs(i64::MAX
-            // as u64))` succeeds instead of overflowing, which would have left
+            // Windows, Instant::now().checked_add(Duration::from_secs(i64::MAX
+            // as u64)) succeeds instead of overflowing, which would have left
             // this entry "resumable" for billions of years instead of already
             // expired. MAX_SANE_RESUME_TIMEOUT_SECS is far beyond anything a
             // legitimate deployment configures (Lavalink's own default is 60s)
@@ -401,25 +399,25 @@ impl SessionRegistry {
     /// queue has overflowed while waiting to be resumed. Called from the global
     /// tick, which replaces the original's per-session scheduled executor.
     ///
-    /// A connected session that stops draining essentials is caught by `ws.rs`'s
-    /// `pump`, which closes it with 1008 the moment its sink overflows. A
-    /// `Resumable` session has no websocket for anything to notice that on, so
+    /// A connected session that stops draining essentials is caught by ws.rs's
+    /// pump, which closes it with 1008 the moment its sink overflows. A
+    /// Resumable session has no WebSocket for anything to notice that on, so
     /// without this it would just keep silently dropping essential messages
-    /// (`Sink::send`'s `SendError::Overflow`) for the rest of the resume window
+    /// (Sink::send's SendError::Overflow) for the rest of the resume window
     /// — defeating the reason resume exists. Treating an overflowing sink the
     /// same as an expired deadline here gives it the same fate a connected
     /// session gets, instead of a silent, unbounded event gap.
     ///
     /// Scans and removes as two separate critical sections rather than one held
     /// across the whole pass — every other session lookup on the node (every REST
-    /// request, every websocket handshake) shares this same registry lock, so
+    /// request, every WebSocket handshake) shares this same registry lock, so
     /// holding it for an uninterrupted O(sessions) scan plus O(expired) removal
     /// once a second stalls all of them for that whole span. Splitting leaves a
     /// gap between deciding a session is expired and removing it, so
-    /// [`Self::remove_if_still_expired`] re-checks the same condition under its
+    /// Self::remove_if_still_expired re-checks the same condition under its
     /// own lock before removing — otherwise a resume that legitimately claims a
-    /// session in that gap (turning it `Open`) would be undone by a removal
-    /// decided against the stale, no-longer-true `Resumable` state.
+    /// session in that gap (turning it Open) would be undone by a removal
+    /// decided against the stale, no-longer-true Resumable state.
     pub fn sweep_expired(&self, now: Instant) -> Vec<Arc<Session>> {
         let expired: Vec<String> = {
             let sessions = self.lock();
@@ -436,8 +434,8 @@ impl SessionRegistry {
             .collect()
     }
 
-    /// Removes `id` only if it is still expired under `now` at the moment of
-    /// removal — see [`Self::sweep_expired`]'s docs for why a stale decision from
+    /// Removes id only if it is still expired under now at the moment of
+    /// removal — see Self::sweep_expired's docs for why a stale decision from
     /// an earlier scan cannot be trusted on its own.
     fn remove_if_still_expired(&self, id: &str, now: Instant) -> Option<Arc<Session>> {
         let mut sessions = self.lock();
@@ -449,12 +447,12 @@ impl SessionRegistry {
         }
     }
 
-    /// Called from both passes of [`Self::sweep_expired`] with the registry lock
-    /// held, and `is_overflowing` takes that session's sink lock — so this nests
-    /// sink inside registry. [`Self::claim_for_resume`]'s `sink.resume()` and
-    /// [`Self::on_disconnect`]'s `sink.pause()` do the same nesting, all under
+    /// Called from both passes of Self::sweep_expired with the registry lock
+    /// held, and is_overflowing takes that session's sink lock — so this nests
+    /// sink inside registry. Self::claim_for_resume's sink.resume() and
+    /// Self::on_disconnect's sink.pause() do the same nesting, all under
     /// this same order: nothing may take the registry lock while holding a sink
-    /// lock. `Sink`'s own methods never reach for the registry, which is what keeps
+    /// lock. Sink's own methods never reach for the registry, which is what keeps
     /// the rule easy to hold to.
     fn is_expired(entry: &Entry, now: Instant) -> bool {
         match entry.state {
@@ -468,7 +466,7 @@ impl SessionRegistry {
     /// Unconditional removal, for an explicit close or shutdown.
     ///
     /// Tears down every player the session holds before returning: this is the
-    /// only teardown path a still-connected websocket has (`ws.rs`'s overflow
+    /// only teardown path a still-connected WebSocket has (ws.rs's overflow
     /// close), so it must do the full job a resume-deadline sweep does —
     /// otherwise a session's actors, voice connections and pump threads outlive
     /// the session id that was the only way to reach them.
@@ -483,8 +481,8 @@ impl SessionRegistry {
     }
 }
 
-/// 16 characters from `[a-z0-9]`, as the original generates
-/// (`SocketServer.kt:57,88`). Clients treat it as opaque, but keeping the alphabet
+/// 16 characters from [a-z0-9], as the original generates
+/// (SocketServer.kt:57,88). Clients treat it as opaque, but keeping the alphabet
 /// avoids surprising anything that validates it.
 fn generate_session_id() -> String {
     use rand::RngExt as _;
@@ -509,11 +507,11 @@ mod tests {
         crate::testing::dummy_pair(guild_id, Arc::new(crate::sink::Sink::new()))
     }
 
-    /// The race `AppState::player` used to be exposed to: two first-time callers
+    /// The race AppState::player used to be exposed to: two first-time callers
     /// for the same guild each building their own (player, voice) pair, with the
     /// registered player possibly ending up paired with a voice connection built
-    /// by the *other* caller. `get_or_create_player` closes this by making "who
-    /// won" one decision instead of two — `build` runs at most once per guild, and
+    /// by the other caller. get_or_create_player closes this by making "who
+    /// won" one decision instead of two — build runs at most once per guild, and
     /// every caller gets back the exact pair that was inserted.
     #[tokio::test]
     async fn get_or_create_player_builds_at_most_once_and_returns_one_pair() {
@@ -546,9 +544,9 @@ mod tests {
         assert_eq!(handle_1.guild_id, handle_2.guild_id);
     }
 
-    /// The race a slow `PATCH` could hit: `take_players` (a resume sweep or an
+    /// The race a slow PATCH could hit: take_players (a resume sweep or an
     /// overflow close) runs while the request is still resolving a track, then
-    /// the request reaches `get_or_create_player`. It must not build a player
+    /// the request reaches get_or_create_player. It must not build a player
     /// into a session nothing can look up again instead of reporting failure.
     #[tokio::test]
     async fn get_or_create_player_refuses_after_take_players() {
@@ -568,11 +566,11 @@ mod tests {
         assert_eq!(build_calls.load(Ordering::SeqCst), 0, "build must not run either");
     }
 
-    /// The identity `rest::player::patch_player` needs after its `connect` await:
-    /// a `DELETE` followed by a fresh `get_or_create_player` for the same guild
-    /// must leave `Session::voice` pointing at the *new* connection, distinguishable
-    /// by pointer from the one a racing `PATCH` is still holding — presence alone
-    /// (`session.player(guild_id).is_some()`) cannot tell the two apart.
+    /// The identity rest::player::patch_player needs after its connect await:
+    /// a DELETE followed by a fresh get_or_create_player for the same guild
+    /// must leave Session::voice pointing at the new connection, distinguishable
+    /// by pointer from the one a racing PATCH is still holding — presence alone
+    /// (session.player(guild_id).is_some()) cannot tell the two apart.
     #[tokio::test]
     async fn voice_reflects_a_replaced_player_not_just_presence() {
         let session = Session::new("s".into(), 1, None);
@@ -635,8 +633,8 @@ mod tests {
         assert!(!session.sink.is_paused());
     }
 
-    /// `can_resume` backs the `Session-Resumed` handshake header — it must
-    /// answer the same way `claim_for_resume` would decide, without actually
+    /// can_resume backs the Session-Resumed handshake header — it must
+    /// answer the same way claim_for_resume would decide, without actually
     /// claiming, so the header never promises a resume the claim moments
     /// later refuses.
     #[test]
@@ -670,8 +668,8 @@ mod tests {
     }
 
     /// A resume arriving after its deadline must be rejected even if the
-    /// per-second `sweep_expired` tick hasn't gotten to it yet — otherwise a
-    /// client could resume up to `ticker::SWEEP_INTERVAL` late.
+    /// per-second sweep_expired tick hasn't gotten to it yet — otherwise a
+    /// client could resume up to ticker::SWEEP_INTERVAL late.
     #[test]
     fn a_claim_past_its_own_deadline_is_rejected_even_if_unswept() {
         let registry = SessionRegistry::new();
@@ -754,8 +752,8 @@ mod tests {
         assert!(registry.get(&waiting.id).is_some());
     }
 
-    /// While `Resumable`, nothing has a websocket to notice an overflowing sink
-    /// the way `ws.rs`'s `pump` does for a connected one — without this, an
+    /// While Resumable, nothing has a WebSocket to notice an overflowing sink
+    /// the way ws.rs's pump does for a connected one — without this, an
     /// overflowing resumable session would just keep dropping essential messages
     /// silently until its deadline, however far off that still is.
     #[test]
@@ -784,12 +782,12 @@ mod tests {
         assert!(registry.get(&session.id).is_none());
     }
 
-    /// The race `sweep_expired`'s two-phase split opens up: an overflowing
-    /// session (deadline still far off, so `claim_for_resume` has no reason of
+    /// The race sweep_expired's two-phase split opens up: an overflowing
+    /// session (deadline still far off, so claim_for_resume has no reason of
     /// its own to reject it) is decided expired by the scan phase, then
-    /// successfully claimed for resume — turning it `Open` — before the
+    /// successfully claimed for resume — turning it Open — before the
     /// matching removal runs. Unlike a deadline-expired session (whose claim
-    /// would fail on `claim_for_resume`'s own deadline check), nothing else
+    /// would fail on claim_for_resume's own deadline check), nothing else
     /// protects an overflow-expired one, so the removal must re-check expiry
     /// itself rather than trust the scan's now-stale verdict.
     #[test]
@@ -864,11 +862,11 @@ mod tests {
         ));
     }
 
-    /// The bug this fix targets: `shutdown` used to await each player's
-    /// `destroy()` in sequence with nothing bounding either call, so one wedged
+    /// The bug this fix targets: shutdown used to await each player's
+    /// destroy() in sequence with nothing bounding either call, so one wedged
     /// actor (here, one whose run loop is never spawned, so its command channel
     /// is never drained) blocked every sibling's destroy too — and, since
-    /// `ticker::sweep_tick` calls this once per expired session with nothing else
+    /// ticker::sweep_tick calls this once per expired session with nothing else
     /// bounding it, would have stalled sweeping for the whole node forever.
     #[tokio::test(start_paused = true)]
     async fn shutdown_does_not_let_one_wedged_player_block_its_siblings() {

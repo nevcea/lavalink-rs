@@ -1,11 +1,11 @@
 //! Node statistics.
 //!
-//! Note the asymmetry in how `frameStats` is reported, which is load-bearing for
-//! clients and was itself a breaking change once (`docs/changelog/v3.md:65`):
+//! Note the asymmetry in how frameStats is reported, which is load-bearing for
+//! clients and was itself a breaking change once (docs/changelog/v3.md:65):
 //!
-//! * `GET /v4/stats` ([`StatsData`]) — the key is **omitted** entirely
-//!   (`docs/api/rest.md:989`).
-//! * WebSocket `stats` op ([`StatsEvent`]) — the key is **always present**, `null`
+//! • GET /v4/stats (StatsData) — the key is omitted entirely
+//!   (docs/api/rest.md:989).
+//! • WebSocket stats op (StatsEvent) — the key is always present, null
 //!   when the session has no usable frame data.
 //!
 //! Two types rather than one flag, so the difference cannot be lost at a call site.
@@ -24,8 +24,8 @@ pub struct StatsData {
     pub cpu: Cpu,
 }
 
-/// The `stats` websocket payload. Identical to [`StatsData`] except that
-/// `frameStats` is never dropped.
+/// The stats WebSocket payload. Identical to StatsData except that
+/// frameStats is never dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatsEvent {
@@ -41,7 +41,7 @@ impl StatsEvent {
     /// Attaches per-session frame stats to the node-wide snapshot.
     ///
     /// The node-wide half is computed once per tick and broadcast; only
-    /// `frame_stats` differs per session.
+    /// frame_stats differs per session.
     pub fn from_node(stats: StatsData, frame_stats: Option<FrameStats>) -> Self {
         Self {
             frame_stats,

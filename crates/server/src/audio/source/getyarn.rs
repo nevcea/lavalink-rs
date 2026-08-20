@@ -1,19 +1,19 @@
 //! getyarn.io — short movie/TV soundbite clips.
 //!
-//! Unlike the sites `MAINTENANCE.md` documents refusing (Twitch, Vimeo, Nico),
+//! Unlike the sites MAINTENANCE.md documents refusing (Twitch, Vimeo, Nico),
 //! getyarn.io's own pages embed a direct, non-HLS video URL in an Open Graph
-//! meta tag (`og:video:secure_url`). Upstream's own
-//! `GetyarnAudioSourceManager` does not run yt-dlp or scrape the page with a
+//! meta tag (og:video:secure_url). Upstream's own
+//! GetyarnAudioSourceManager does not run yt-dlp or scrape the page with a
 //! full HTML parser either — it is a single GET plus two Open Graph reads —
-//! so this mirrors that shape exactly rather than routing through `ytdlp`.
+//! so this mirrors that shape exactly rather than routing through ytdlp.
 //!
-//! # A deliberately reproduced quirk
+//! A deliberately reproduced quirk
 //!
-//! Upstream never probes the clip's real duration: `AudioTrackInfoBuilder`
-//! leaves `length` unset, which becomes `Long.MAX_VALUE` at build time, and
-//! `author` is hardcoded to `"Unknown"`. Both are wire-visible fields, so both
+//! Upstream never probes the clip's real duration: AudioTrackInfoBuilder
+//! leaves length unset, which becomes Long.MAX_VALUE at build time, and
+//! author is hardcoded to "Unknown". Both are wire-visible fields, so both
 //! are kept exactly rather than "improved" with a real container probe — the
-//! same governing rule `crates/server/src/lib.rs` states for the rest of this
+//! same governing rule crates/server/src/lib.rs states for the rest of this
 //! node.
 
 use lavalink_protocol::encoded_track::SourceTail;
@@ -92,9 +92,9 @@ impl SourceManager for GetyarnSource {
     }
 }
 
-/// Normalizes a `getyarn.io/yarn-clip/...` identifier to a full `https://` URL,
-/// or `None` if it isn't one. Matches upstream's
-/// `https?://(?:www\.)?getyarn\.io/yarn-clip/(.*)`.
+/// Normalizes a getyarn.io/yarn-clip/... identifier to a full https:// URL,
+/// or None if it isn't one. Matches upstream's
+/// https?://(?:www\.)?getyarn\.io/yarn-clip/(.*).
 fn clip_url(identifier: &str) -> Option<String> {
     let rest = strip_scheme(identifier)?;
     let rest = rest.strip_prefix("www.").unwrap_or(rest);
@@ -102,7 +102,7 @@ fn clip_url(identifier: &str) -> Option<String> {
     Some(format!("https://{rest}"))
 }
 
-/// Extracts a `<meta property="{property}" content="...">` tag's `content`,
+/// Extracts a <meta property="{property}" content="..."> tag's content,
 /// tolerant of attribute order. This is a fixed site's own markup for two known
 /// tags, not third-party HTML in general, so a hand-rolled scan is enough and
 /// avoids pulling in a full scraping crate for it.
@@ -123,14 +123,14 @@ fn meta_content(html: &str, property: &str) -> Option<String> {
     None
 }
 
-/// The value of a `name="..."` attribute within a single already-isolated tag.
+/// The value of a name="..." attribute within a single already-isolated tag.
 fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let marker = format!("{name}=\"");
     let start = tag.find(&marker)? + marker.len();
     tag[start..].find('"').map(|end| &tag[start..start + end])
 }
 
-/// The handful of entities an `og:title` is plausibly seen carrying. Anything
+/// The handful of entities an og:title is plausibly seen carrying. Anything
 /// else passes through unchanged — this is not a general HTML decoder.
 fn unescape_entities(value: &str) -> String {
     value

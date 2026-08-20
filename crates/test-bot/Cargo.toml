@@ -26,10 +26,10 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = [
 ] }
 futures-util.workspace = true
 
-# `client`/`gateway` only. The bot never touches audio: it tells Discord which voice
+# client/gateway only. The bot never touches audio: it tells Discord which voice
 # channel to put us in and hands the resulting credentials to the node, which owns
-# the actual voice connection. `framework` is left out — commands are slash commands
-# registered directly through `builder`'s `CreateCommand`, which is all `framework`'s
+# the actual voice connection. framework is left out — commands are slash commands
+# registered directly through builder's CreateCommand, which is all framework's
 # prefix-command machinery would buy on top of that.
 serenity = { version = "0.12", default-features = false, features = [
     "builder",
@@ -42,10 +42,10 @@ serenity = { version = "0.12", default-features = false, features = [
     "rustls_backend",
 ] }
 
-# Driverless songbird: `gateway` without `driver`. It exists for exactly this — the
+# Driverless songbird: gateway without driver. It exists for exactly this — the
 # op4 handshake and the voice state/server update correlation are fiddly enough to be
-# worth buying, and `join_gateway` hands back the token/endpoint/sessionId triple the
-# node's `voice` field wants.
+# worth buying, and join_gateway hands back the token/endpoint/sessionId triple the
+# node's voice field wants.
 songbird = { version = "0.6", default-features = false, features = [
     "serenity",
     "gateway",

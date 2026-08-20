@@ -1,14 +1,14 @@
-//! Player endpoints, and in particular `PATCH`, which is where most of the v4
+//! Player endpoints, and in particular PATCH, which is where most of the v4
 //! surface lives.
 //!
-//! Validation order and error wording follow `PlayerRestHandler.kt` literally.
+//! Validation order and error wording follow PlayerRestHandler.kt literally.
 //! Clients match on some of these strings, and the order decides which of two
 //! simultaneous mistakes gets reported.
 //!
-//! Everything slow happens *here*, not in the actor: resolving an identifier and
+//! Everything slow happens here, not in the actor: resolving an identifier and
 //! decoding an encoded track are done first, and the actor receives a finished
-//! [`PatchRequest`]. That is also what removes the original's worst lock —
-//! `synchronized(player)` wrapped around a blocking voice connect.
+//! PatchRequest. That is also what removes the original's worst lock —
+//! synchronized(player) wrapped around a blocking voice connect.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -67,13 +67,13 @@ pub struct PatchQuery {
     no_replace: bool,
 }
 
-/// `path`, `query` and `body` are wrapped in `Result` and resolved in that
+/// path, query and body are wrapped in Result and resolved in that
 /// order inside the body, rather than let axum short-circuit on whichever
 /// fails first in declaration order. axum requires the body-consuming
-/// extractor to be declared last, but the original resolves `@RequestBody`
-/// first (`PlayerRestHandler.kt`'s parameter order) — this module's own docs
+/// extractor to be declared last, but the original resolves @RequestBody
+/// first (PlayerRestHandler.kt's parameter order) — this module's own docs
 /// on why that order is wire-visible. Declaring them plainly would report a
-/// bad guild id even when the body is *also* malformed, which is not what a
+/// bad guild id even when the body is also malformed, which is not what a
 /// client of the original sees.
 pub async fn patch_player(
     State(state): State<AppState>,
@@ -122,8 +122,8 @@ pub async fn patch_player(
     let wants_track_change = track_fields.encoded.is_present() || track_fields.identifier.is_present();
 
     // noReplace with something already playing drops the request before a
-    // resolution is even attempted (`PlayerRestHandler.kt`: the check runs
-    // before `decodeTrack`/`loadAudioItem` are called), not merely after
+    // resolution is even attempted (PlayerRestHandler.kt: the check runs
+    // before decodeTrack/loadAudioItem are called), not merely after
     // resolving succeeds or fails. A snapshot is a cheap round trip through
     // the actor's own queue, not a blocking wait, so this does not reintroduce
     // the slow-source-blocks-the-guild problem resolving-before-touching-the-
@@ -206,8 +206,8 @@ pub async fn patch_player(
         .map_err(|_| player_gone())
 }
 
-/// Whether `connection` is still the one registered for `guild_id` — pulled
-/// out of `patch_player`'s post-connect re-check so the race it guards
+/// Whether connection is still the one registered for guild_id — pulled
+/// out of patch_player's post-connect re-check so the race it guards
 /// against (see the comment at its call site) is directly testable without a
 /// live voice connection or HTTP round trip.
 fn is_current_connection(
@@ -222,9 +222,9 @@ fn player_gone() -> ApiError {
     ApiError::unavailable("The player is not accepting commands")
 }
 
-/// 204, and this one really is 204 — unlike `PATCH`, whose `@ResponseStatus`
+/// 204, and this one really is 204 — unlike PATCH, whose @ResponseStatus
 /// annotation on the original is dead code because the method returns a
-/// `ResponseEntity.ok()`. We follow the observed behaviour of each, not the
+/// ResponseEntity.ok(). We follow the observed behavior of each, not the
 /// annotations.
 pub async fn delete_player(
     State(state): State<AppState>,
@@ -318,7 +318,7 @@ fn validate_voice(voice: &VoiceState) -> Result<(), ApiError> {
 }
 
 /// Resolves an identifier to exactly one track, with the original's messages for
-/// each way that can fail (`PlayerRestHandler.kt:196-203`).
+/// each way that can fail (PlayerRestHandler.kt:196-203).
 async fn load_one(state: &AppState, identifier: &str) -> Result<Track, ApiError> {
     // Matched by reference and cloned per arm: the result is shared with the cache
     // and with anyone else waiting on the same load, and the two arms that need
@@ -428,20 +428,20 @@ mod tests {
         crate::testing::dummy_pair(guild_id, std::sync::Arc::new(crate::sink::Sink::new()))
     }
 
-    /// `patch_player`'s post-connect re-check exists for exactly this: a `DELETE`
-    /// racing a slow `PATCH` builds a fresh player (and voice connection) for the
-    /// guild before the slow `PATCH`'s own `connect().await` returns. Presence
-    /// alone (`session.player(guild_id).is_some()`) can't tell "still ours" apart
+    /// patch_player's post-connect re-check exists for exactly this: a DELETE
+    /// racing a slow PATCH builds a fresh player (and voice connection) for the
+    /// guild before the slow PATCH's own connect().await returns. Presence
+    /// alone (session.player(guild_id).is_some()) can't tell "still ours" apart
     /// from "replaced", which is why the check compares by pointer instead — this
-    /// exercises `is_current_connection` the same way `patch_player` does, without
+    /// exercises is_current_connection the same way patch_player does, without
     /// a live voice connection or HTTP round trip.
-    /// `noReplace` must stop a resolution attempt from ever starting, not just
-    /// discard its result: `PlayerRestHandler.kt` checks `noReplace &&
-    /// player.track != null` before calling `decodeTrack`/`loadAudioItem` at
-    /// all, so a client sending `noReplace=true` against a player that's
-    /// already playing gets `200` with the unchanged player even when the
-    /// `identifier` it sent would fail to resolve. `test_state()`'s loader has
-    /// no source managers registered, so any `load_one` call here would fail —
+    /// noReplace must stop a resolution attempt from ever starting, not just
+    /// discard its result: PlayerRestHandler.kt checks noReplace &&
+    /// player.track != null before calling decodeTrack/loadAudioItem at
+    /// all, so a client sending noReplace=true against a player that's
+    /// already playing gets 200 with the unchanged player even when the
+    /// identifier it sent would fail to resolve. test_state()'s loader has
+    /// no source managers registered, so any load_one call here would fail —
     /// this only passes if resolution is skipped outright.
     #[tokio::test]
     async fn no_replace_skips_resolution_entirely_when_already_playing() {

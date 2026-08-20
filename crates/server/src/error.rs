@@ -1,9 +1,9 @@
 //! REST error responses.
 //!
-//! Clients parse the body, so it has to be the original's shape — including `path`,
+//! Clients parse the body, so it has to be the original's shape — including path,
 //! which a handler does not naturally know. Rather than thread the request URI
-//! through every handler, a handler raises an [`ApiError`] and a middleware
-//! ([`fill_error_path`]) renders it once, where the path is in scope.
+//! through every handler, a handler raises an ApiError and a middleware
+//! (fill_error_path) renders it once, where the path is in scope.
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request};
@@ -38,21 +38,21 @@ impl ApiError {
 
     /// A load failure as a 400, preferring the exception's own message and
     /// falling back to its cause — the original never surfaces an empty one.
-    /// This is for `loadAudioItem`'s `FriendlyException`, which
-    /// `PlayerRestHandler.kt`/`AudioLoaderRestHandler.kt` explicitly catch and
-    /// turn into a 400 — not for `decodeTrack`, which throws a plain
-    /// `IllegalStateException`/`IllegalArgumentException` neither handler
+    /// This is for loadAudioItem's FriendlyException, which
+    /// PlayerRestHandler.kt/AudioLoaderRestHandler.kt explicitly catch and
+    /// turn into a 400 — not for decodeTrack, which throws a plain
+    /// IllegalStateException/IllegalArgumentException neither handler
     /// catches, so it falls through to Spring's uncaught-exception 500 (see
-    /// [`Self::decode_failed`]).
+    /// Self::decode_failed).
     pub fn from_exception(exception: lavalink_protocol::Exception) -> Self {
         Self::bad_request(exception.message.unwrap_or(exception.cause))
     }
 
-    /// A `decodeTrack` failure (bad base64, mismatched track version, missing
-    /// source manager) as a 500 — `util.kt`'s `decodeTrack` throws a plain
-    /// `IllegalStateException`/`IllegalArgumentException`, which no upstream
+    /// A decodeTrack failure (bad base64, mismatched track version, missing
+    /// source manager) as a 500 — util.kt's decodeTrack throws a plain
+    /// IllegalStateException/IllegalArgumentException, which no upstream
     /// handler catches, so it falls through to Spring's uncaught-exception
-    /// path rather than the `FriendlyException`-only 400 [`Self::from_exception`]
+    /// path rather than the FriendlyException-only 400 Self::from_exception
     /// models.
     pub fn decode_failed(exception: lavalink_protocol::Exception) -> Self {
         Self::new(
@@ -62,17 +62,17 @@ impl ApiError {
     }
 
     /// The original's wording, which some clients match on
-    /// (`util.kt:126`).
+    /// (util.kt:126).
     pub fn session_not_found() -> Self {
         Self::new(StatusCode::NOT_FOUND, "Session not found")
     }
 
-    /// `util.kt:129`.
+    /// util.kt:129.
     pub fn player_not_found() -> Self {
         Self::new(StatusCode::NOT_FOUND, "Player not found")
     }
 
-    /// A path that matches no route at all, so a client sees the same `Error`
+    /// A path that matches no route at all, so a client sees the same Error
     /// shape it gets from a stale session or player id, rather than axum's
     /// built-in empty-body 404.
     pub fn no_such_route(path: &str) -> Self {
@@ -81,8 +81,8 @@ impl ApiError {
 
     /// A path that matches a route, but not with this HTTP method.
     ///
-    /// This replaces axum's built-in 405 with the same `Error` shape, at the cost
-    /// of the `Allow` header axum's default would have set (Spring sets one too,
+    /// This replaces axum's built-in 405 with the same Error shape, at the cost
+    /// of the Allow header axum's default would have set (Spring sets one too,
     /// but nothing here reads it back out to reconstruct it from route
     /// registration).
     pub fn method_not_allowed(method: &axum::http::Method, path: &str) -> Self {
@@ -97,10 +97,10 @@ impl ApiError {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
     }
 
-    /// `trace` is `Some` only when the request asked for `?trace=true`
-    /// (`wants_trace`) — a stack trace is a JVM artefact this port has none of,
-    /// so the message stands in for it. What `trace=true` actually toggles on
-    /// the wire is the *field's presence*, and that much is reproduced exactly.
+    /// trace is Some only when the request asked for ?trace=true
+    /// (wants_trace) — a stack trace is a JVM artefact this port has none of,
+    /// so the message stands in for it. What trace=true actually toggles on
+    /// the wire is the field's presence, and that much is reproduced exactly.
     fn body(&self, path: &str, trace: Option<String>) -> ErrorBody {
         ErrorBody {
             timestamp: now_epoch_ms(),
@@ -127,8 +127,8 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// Whether the request asked for a trace via `?trace=true`, matching the
-/// original's `@RequestParam` boolean parsing closely enough for the only
+/// Whether the request asked for a trace via ?trace=true, matching the
+/// original's @RequestParam boolean parsing closely enough for the only
 /// value any real client sends.
 fn wants_trace(query: Option<&str>) -> bool {
     query
@@ -140,12 +140,12 @@ fn wants_trace(query: Option<&str>) -> bool {
 
 /// Renders error responses, with the request path filled in.
 ///
-/// [`ApiError`]'s own `IntoResponse` leaves the body empty for this to fill, so this
+/// ApiError's own IntoResponse leaves the body empty for this to fill, so this
 /// is where an error response actually gets its JSON — not a second rendering of one.
 pub async fn fill_error_path(request: Request, next: Next) -> Response {
     // The Uri, not the path: this runs on every request and only the error branch
     // below ever reads it, so allocating the path here spent a String per request
-    // to serve the responses that don't have one. `http::Uri` is Bytes-backed, so
+    // to serve the responses that don't have one. http::Uri is Bytes-backed, so
     // keeping the whole thing is a refcount bump.
     let uri = request.uri().clone();
     let trace_requested = wants_trace(uri.query());
@@ -161,15 +161,15 @@ pub async fn fill_error_path(request: Request, next: Next) -> Response {
     (error.status, Json(error.body(uri.path(), trace))).into_response()
 }
 
-/// `axum::Json`, but a malformed or wrongly-typed body becomes an [`ApiError`]
+/// axum::Json, but a malformed or wrongly-typed body becomes an ApiError
 /// instead of axum's own plain-text rejection.
 ///
-/// Without this, a request body that fails to deserialize skips `ApiError`
-/// entirely — `fill_error_path` only rewrites a response that carries one
-/// (`response.extensions().get::<ApiError>()`), so the client would see a
-/// completely different shape (no `path`, no `timestamp`) from every other
+/// Without this, a request body that fails to deserialize skips ApiError
+/// entirely — fill_error_path only rewrites a response that carries one
+/// (response.extensions().get::<ApiError>()), so the client would see a
+/// completely different shape (no path, no timestamp) from every other
 /// error this API returns. The status is flattened to 400 for everything
-/// except a missing `Content-Type`, which stays 415 — axum's own default for
+/// except a missing Content-Type, which stays 415 — axum's own default for
 /// that case, and the one the rest of this API's status codes don't override.
 pub struct ValidatedJson<T>(pub T);
 
@@ -193,9 +193,9 @@ where
     }
 }
 
-/// `axum::extract::Query`, but a missing required field or an unparsable value
-/// becomes an [`ApiError`] instead of axum's own plain-text rejection — see
-/// [`ValidatedJson`], which exists for the same reason on the body side.
+/// axum::extract::Query, but a missing required field or an unparsable value
+/// becomes an ApiError instead of axum's own plain-text rejection — see
+/// ValidatedJson, which exists for the same reason on the body side.
 pub struct ValidatedQuery<T>(pub T);
 
 impl<S, T> FromRequestParts<S> for ValidatedQuery<T>
@@ -213,9 +213,9 @@ where
     }
 }
 
-/// `axum::extract::Path`, but a rejection (a non-UTF8 segment, a type mismatch)
-/// becomes an [`ApiError`] instead of axum's own plain-text rejection — see
-/// [`ValidatedJson`], which exists for the same reason on the body side.
+/// axum::extract::Path, but a rejection (a non-UTF8 segment, a type mismatch)
+/// becomes an ApiError instead of axum's own plain-text rejection — see
+/// ValidatedJson, which exists for the same reason on the body side.
 pub struct ValidatedPath<T>(pub T);
 
 impl<S, T> FromRequestParts<S> for ValidatedPath<T>

@@ -1,9 +1,9 @@
 //! Node statistics.
 //!
-//! The original builds a `StatsCollector` task per session and each one samples the
-//! CPU independently (`SocketContext.kt:99-100`, `StatsCollector.kt`). The node-wide
+//! The original builds a StatsCollector task per session and each one samples the
+//! CPU independently (SocketContext.kt:99-100, StatsCollector.kt). The node-wide
 //! numbers are the same for everyone, so this computes them once per tick and every
-//! session gets the same snapshot; only `frameStats` is per-session.
+//! session gets the same snapshot; only frameStats is per-session.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,31 +15,31 @@ use crate::player::PlayerHandle;
 use crate::session::Session;
 
 /// Frames expected in one stats tick from a continuously-playing player: 50 fps
-/// (one `FRAME_SAMPLES` buffer is 20ms) times a 60s tick. Named for lavaplayer's
-/// own `AudioLossCounter.EXPECTED_PACKET_COUNT_PER_MIN`, which this equals because
-/// our tick interval (`ticker::STATS_INTERVAL`) is also 60s.
+/// (one FRAME_SAMPLES buffer is 20ms) times a 60s tick. Named for lavaplayer's
+/// own AudioLossCounter.EXPECTED_PACKET_COUNT_PER_MIN, which this equals because
+/// our tick interval (ticker::STATS_INTERVAL) is also 60s.
 const EXPECTED_FRAMES_PER_TICK: u64 = 3_000;
 
 /// How long a player must have been playing continuously before its frame counts
 /// are trusted for the aggregate — otherwise a track that started seconds before
 /// this tick reports a deficit that looks like near-total loss.
 ///
-/// The original's `AudioLossCounter.isDataUsable` is more elaborate (a rolling
+/// The original's AudioLossCounter.isDataUsable is more elaborate (a rolling
 /// per-minute window, plus a 100ms grace period across a track switch); this is
-/// the coarser equivalent that follows from tracking one `playing_since`
+/// the coarser equivalent that follows from tracking one playing_since
 /// timestamp per player rather than a minute-bucketed history. Both answer the
 /// same question: has this player been producing frames for the whole window the
 /// stats claim to cover?
 pub const FRAME_STATS_USABLE_AFTER_MS: i64 = 60_000;
 
-/// Averages `frameStats` over every "usable" player, the same way
-/// `StatsCollector.retrieveStats` does: usable players' sent/nulled counts are
-/// summed and divided by the usable player count, and `deficit` is how many of
+/// Averages frameStats over every "usable" player, the same way
+/// StatsCollector.retrieveStats does: usable players' sent/nulled counts are
+/// summed and divided by the usable player count, and deficit is how many of
 /// the expected frames per player never arrived, also averaged. Unusable players
 /// are excluded from the average entirely, but the caller must still have drained
-/// their counters (see [`crate::audio::ring::FrameCounters::take`]).
+/// their counters (see crate::audio::ring::FrameCounters::take).
 ///
-/// `None` when there are no usable players — the original does not divide by
+/// None when there are no usable players — the original does not divide by
 /// zero either, and a session with nothing playing has no frame data to report.
 pub fn frame_stats(samples: impl Iterator<Item = (u32, u32, bool)>) -> Option<FrameStats> {
     let (sent, nulled, usable_players) = samples.filter(|(_, _, usable)| *usable).fold(
@@ -65,14 +65,14 @@ pub fn frame_stats(samples: impl Iterator<Item = (u32, u32, bool)>) -> Option<Fr
 
 /// How long a machine sample is reused before it is taken again.
 ///
-/// Refreshing reads `/proc`, and it happens under a lock on a runtime worker
-/// thread — fine on the 60s stats tick, but `GET /v4/stats` shares the same path and
+/// Refreshing reads /proc, and it happens under a lock on a runtime worker
+/// thread — fine on the 60s stats tick, but GET /v4/stats shares the same path and
 /// a client may poll it as fast as it likes. Without this, a busy poller blocks a
 /// worker on file I/O and serializes against the tick.
 ///
 /// A second is well under the tick interval, so the tick always takes a fresh
 /// sample and its numbers are unchanged. It is also above sysinfo's minimum useful
-/// interval between CPU refreshes: `cpu_usage` is a delta between the last two
+/// interval between CPU refreshes: cpu_usage is a delta between the last two
 /// refreshes, so a client polling every 10ms was previously driving that delta into
 /// a window too short to mean anything. Capping the refresh rate makes those numbers
 /// better, not staler.
@@ -106,16 +106,16 @@ impl StatsCollector {
         }
     }
 
-    /// Samples the node. Called from the stats tick and from `GET /v4/stats`.
+    /// Samples the node. Called from the stats tick and from GET /v4/stats.
     ///
     /// The player counts and the uptime are always live; only the machine half is
-    /// rate-limited (see [`SAMPLE_TTL`]).
+    /// rate-limited (see SAMPLE_TTL).
     pub fn sample(&self, players: i32, playing_players: i32) -> StatsData {
         let (memory, cpu) = self.machine();
 
         StatsData {
             // Always None here: GET /v4/stats omits the key entirely, and the
-            // websocket event attaches the per-session value itself.
+            // WebSocket event attaches the per-session value itself.
             frame_stats: None,
             players,
             playing_players,
@@ -176,23 +176,23 @@ impl StatsCollector {
     }
 }
 
-/// Every session's player roster, in the same order as `sessions`.
+/// Every session's player roster, in the same order as sessions.
 ///
-/// Taking a roster is not free — [`Session::players`] locks that session's guild map
+/// Taking a roster is not free — Session::players locks that session's guild map
 /// and clones a handle per player — so callers that need more than one number out of
 /// the same set of players collect once and pass the result around. The stats tick
-/// needs three (`players`, `playingPlayers`, and each session's frame samples) and
+/// needs three (players, playingPlayers, and each session's frame samples) and
 /// used to walk for each of them.
 pub fn rosters(sessions: &[Arc<Session>]) -> Vec<Vec<PlayerHandle>> {
     sessions.iter().map(|session| session.players()).collect()
 }
 
-/// The original's `player.isPlaying`, which `playingPlayers` filters on with no
-/// minute-window gate (unlike `frameStats`' usability check).
+/// The original's player.isPlaying, which playingPlayers filters on with no
+/// minute-window gate (unlike frameStats' usability check).
 ///
 /// One definition, because two callers count playing players from different
-/// starting points — [`count`] from a roster the stats tick already had to build,
-/// and [`crate::session::Session::counts`] from the guild map directly — and the
+/// starting points — count from a roster the stats tick already had to build,
+/// and crate::session::Session::counts from the guild map directly — and the
 /// two must never disagree about what the node is running.
 pub fn is_playing(player: &PlayerHandle) -> bool {
     player.playing_since_ms() != 0
@@ -201,9 +201,9 @@ pub fn is_playing(player: &PlayerHandle) -> bool {
 /// Total players, and of those the ones actually playing, from rosters the caller
 /// already holds.
 ///
-/// For the stats tick, which needs the handles anyway. `GET /v4/stats` wants the
+/// For the stats tick, which needs the handles anyway. GET /v4/stats wants the
 /// same two numbers without the handles and goes through
-/// [`crate::session::Session::counts`] instead — see its docs for why cloning a
+/// crate::session::Session::counts instead — see its docs for why cloning a
 /// roster per request is worth avoiding.
 pub fn count(rosters: &[Vec<PlayerHandle>]) -> (i32, i32) {
     let players = rosters.iter().map(Vec::len).sum::<usize>() as i32;
@@ -231,9 +231,9 @@ mod tests {
         assert_eq!(count(&[]), (0, 0));
     }
 
-    /// `GET /v4/stats` is client-driven at an unbounded rate and shares this path
+    /// GET /v4/stats is client-driven at an unbounded rate and shares this path
     /// with the 60s tick, so a second call in quick succession must not go back to
-    /// `/proc` — that read happens under a lock, on a runtime worker thread.
+    /// /proc — that read happens under a lock, on a runtime worker thread.
     ///
     /// Checks the recorded sample time rather than the reported numbers: two
     /// uncached refreshes taken microseconds apart would very likely report the same

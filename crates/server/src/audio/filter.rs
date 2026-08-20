@@ -1,81 +1,81 @@
 //! The DSP chain.
 //!
 //! Nine of the original's ten filters, in its relative order. Order is part of the
-//! sound, so it comes from [`lavalink_protocol::filters::FILTER_ORDER`] rather than
+//! sound, so it comes from lavalink_protocol::filters::FILTER_ORDER rather than
 //! from the order fields happen to appear in a request.
 //!
-//! Everything here operates on planar `f32` samples, one slice per channel, which is
+//! Everything here operates on planar f32 samples, one slice per channel, which is
 //! what the decode stage produces and what the send stage wants.
 //!
-//! # Fidelity
+//! Fidelity
 //!
 //! "Implemented the same filter" is not the same as "sounds the same". These are
-//! ports of specific implementations — lavaplayer's `Equalizer` and `PcmVolumeProcessor`,
+//! ports of specific implementations — lavaplayer's Equalizer and PcmVolumeProcessor,
 //! and lavadsp's converters — where the coefficients and the shape of the update loop
 //! matter as much as the algorithm does. Each filter below names the upstream file it
 //! came from, and the arithmetic follows it including where that arithmetic is odd:
 //! tremolo's depth is halved on the way in, the equalizer attenuates by 0.25 and
 //! restores by 4.0, player volume quantises through an integer multiplier.
 //!
-//! # `timescale` is not a port
+//! timescale is not a port
 //!
 //! Every other filter here is a port of a specific lavaplayer/lavadsp
-//! implementation, coefficients and update-loop shape included. `timescale` cannot
-//! be: lavadsp's `TimescalePcmAudioFilter` is a JNI wrapper around **SoundTouch**, a
+//! implementation, coefficients and update-loop shape included. timescale cannot
+//! be: lavadsp's TimescalePcmAudioFilter is a JNI wrapper around SoundTouch, a
 //! large C++ WSOLA time-stretcher with no Rust port to diff against, and
 //! hand-rolling WSOLA from scratch (period detection, overlap-add, the works) is
 //! exactly the kind of "approximation that's easy to ship and hard to notice as
 //! wrong" this module's own history already has one example of.
 //!
-//! [`TimescaleFilter`] instead wraps `signalsmith-stretch`, a Rust binding (`cc` +
-//! `bindgen`, so it needs a C++ toolchain and `libclang` beyond this crate's other
+//! TimescaleFilter instead wraps signalsmith-stretch, a Rust binding (cc +
+//! bindgen, so it needs a C++ toolchain and libclang beyond this crate's other
 //! requirements) around Signalsmith's phase-vocoder stretcher — a different
 //! algorithm family than SoundTouch, not a port of it, chosen because it is the
 //! only actively-maintained Rust time/pitch stretcher available rather than because
 //! phase vocoders and WSOLA sound identical. Two things this trade leans on:
 //!
-//! - It is the one filter whose `process` changes the number of frames per channel
-//!   rather than transforming them in place — `speed`/`rate` above 1.0 shrink the
-//!   buffer, below 1.0 grow it. Nothing in [`AudioFilter`]'s signature prevents
-//!   this (each `Vec<f32>` can already be resized), but `pump::filter_interleaved`
+//! • It is the one filter whose process changes the number of frames per channel
+//!   rather than transforming them in place — speed/rate above 1.0 shrink the
+//!   buffer, below 1.0 grow it. Nothing in AudioFilter's signature prevents
+//!   this (each Vec<f32> can already be resized), but pump::filter_interleaved
 //!   is the one caller that has to stop assuming post-chain length equals
 //!   pre-chain length.
-//! - `speed`/`pitch`/`rate` combine the way SoundTouch's three independent knobs
+//! • speed/pitch/rate combine the way SoundTouch's three independent knobs
 //!   do, since that is the wire contract regardless of which stretcher sits behind
-//!   it: `rate` scales both tempo and pitch together (as if the track were played
-//!   on a turntable at a different speed), `speed` changes tempo alone, `pitch`
-//!   changes pitch alone. `combined_speed = speed * rate` drives the output/input
-//!   frame ratio; `combined_pitch = pitch * rate` drives `set_transpose_factor`.
+//!   it: rate scales both tempo and pitch together (as if the track were played
+//!   on a turntable at a different speed), speed changes tempo alone, pitch
+//!   changes pitch alone. combined_speed = speed * rate drives the output/input
+//!   frame ratio; combined_pitch = pitch * rate drives set_transpose_factor.
 //!
-//! # `sin`/`cos` per sample, left alone
+//! sin/cos per sample, left alone
 //!
-//! Tremolo, vibrato and rotation each call `sin`/`cos` once per sample rather than
+//! Tremolo, vibrato and rotation each call sin/cos once per sample rather than
 //! advancing the LFO with an angle-addition recurrence
-//! (`sin(a+b) = sin(a)cos(b) + cos(a)sin(b)`, which turns a transcendental call into
-//! a couple of multiplies). That trade was measured and rejected: an `f32`
+//! (sin(a+b) = sin(a)cos(b) + cos(a)sin(b), which turns a transcendental call into
+//! a couple of multiplies). That trade was measured and rejected: an f32
 //! recurrence loses magnitude at roughly 3e-3 per second and compounds over a long
-//! track, and `rotation_pans_across_the_stereo_image` (below) asserts
-//! `left_max > 0.99 && left_min < 0.01` across a full 48 000-sample revolution —
+//! track, and rotation_pans_across_the_stereo_image (below) asserts
+//! left_max > 0.99 && left_min < 0.01 across a full 48 000-sample revolution —
 //! exactly the invariant drift breaks first. Renormalising the recurrence each
-//! sample would fix that at the cost of a `sqrt`, which gives back most of what the
+//! sample would fix that at the cost of a sqrt, which gives back most of what the
 //! recurrence was for. Against a filter chain that already costs well under 1% of
-//! one core per player (see `crates/server/benches/filter.rs`), this is the worst
-//! risk-per-microsecond change available here, so it stays as `sin`/`cos`.
+//! one core per player (see crates/server/benches/filter.rs), this is the worst
+//! risk-per-microsecond change available here, so it stays as sin/cos.
 //!
-//! # Not verified: end-to-end equalizer output against the original
+//! Not verified: end-to-end equalizer output against the original
 //!
-//! The constants are not in question — `COEFFICIENTS_48000`, the 0.25/4.0 pair and
-//! both volume curves have been diffed against lavaplayer's `Equalizer.java` and
-//! `PcmVolumeProcessor.java` and lavadsp's converters, and that diff found two wrong
+//! The constants are not in question — COEFFICIENTS_48000, the 0.25/4.0 pair and
+//! both volume curves have been diffed against lavaplayer's Equalizer.java and
+//! PcmVolumeProcessor.java and lavadsp's converters, and that diff found two wrong
 //! digits and a missing output stage. What is still missing is confirmation over a
-//! real buffer, including the accumulated `f32` error a constant-by-constant reading
+//! real buffer, including the accumulated f32 error a constant-by-constant reading
 //! cannot show.
 //!
 //! It stays missing because the corpus has to come from the original node — vectors
 //! written here would only test this code against itself. To capture it: run a real
-//! Lavalink v4 node with a single `equalizer` filter at known band gains over a
+//! Lavalink v4 node with a single equalizer filter at known band gains over a
 //! fixed-content local file, and capture its RTP/Opus output — or, more directly,
-//! patch lavaplayer's `Equalizer.java` to dump its pre- and post-filter PCM buffers.
+//! patch lavaplayer's Equalizer.java to dump its pre- and post-filter PCM buffers.
 
 use lavalink_protocol::filters::{
     Band, ChannelMix, Distortion, Filters, Karaoke, LowPass, Rotation, Timescale, Tremolo,
@@ -83,9 +83,9 @@ use lavalink_protocol::filters::{
 };
 use lavalink_protocol::Omissible;
 
-/// What `/v4/info` advertises and what `PATCH` accepts.
+/// What /v4/info advertises and what PATCH accepts.
 ///
-/// All ten of the original's, `timescale` included — see the module docs for what
+/// All ten of the original's, timescale included — see the module docs for what
 /// implementing it here actually means.
 pub const IMPLEMENTED_FILTERS: [&str; 10] = [
     "volume",
@@ -113,12 +113,12 @@ struct Coefficients {
 /// The sample rate everything downstream of the resampler runs at.
 ///
 /// The equalizer's coefficients are derived for exactly this rate — lavaplayer
-/// refuses to build one at any other (`Equalizer.isCompatible`) — and the LFO filters
+/// refuses to build one at any other (Equalizer.isCompatible) — and the LFO filters
 /// need it to turn a frequency in Hz into a per-sample phase step.
 const SAMPLE_RATE: f32 = super::ring::SAMPLE_RATE as f32;
 
-/// lavaplayer `Equalizer.coefficients48000`, diffed against
-/// `lavaplayer/main/src/main/java/…/filter/equalizer/Equalizer.java`.
+/// lavaplayer Equalizer.coefficients48000, diffed against
+/// lavaplayer/main/src/main/java/…/filter/equalizer/Equalizer.java.
 // Kept at the precision upstream prints them at, even though f32 cannot hold all
 // of it. Truncating to what f32 represents would make a future diff against
 // lavaplayer's source harder to read for no numerical gain.
@@ -149,23 +149,23 @@ trait AudioFilter: std::fmt::Debug {
 
     fn process(&mut self, channels: &mut [Vec<f32>]);
 
-    /// Called after a seek lands, mirroring lavaplayer's `AudioFilter.seekPerformed`
+    /// Called after a seek lands, mirroring lavaplayer's AudioFilter.seekPerformed
     /// — the original does not rebuild its filter chain on seek either, it notifies
     /// each filter so it can discard whatever internal state assumed continuous
     /// playback. A no-op default: most filters here (the biquads, the LFOs) carry
     /// at most a sample or two of history, cheap enough to leave stale across a
-    /// seek exactly like the original does. [`TimescaleFilter`] is the one
-    /// override, because its internal buffering is `output_latency` deep (tens of
+    /// seek exactly like the original does. TimescaleFilter is the one
+    /// override, because its internal buffering is output_latency deep (tens of
     /// milliseconds), not one sample — left stale, a seek would audibly blend
     /// pre-seek audio into the first stretch of post-seek playback.
     fn reset(&mut self) {}
 }
 
-/// The chain built from a `Filters` request.
+/// The chain built from a Filters request.
 ///
 /// Constructed once per filter change and then driven per buffer; the per-filter
 /// history lives inside, so replacing the chain resets it — same as the original,
-/// which builds a fresh `FilterChain` on every `PATCH`.
+/// which builds a fresh FilterChain on every PATCH.
 #[derive(Debug)]
 pub struct FilterChain {
     /// In the original's application order, which is part of how the audio sounds.
@@ -180,10 +180,10 @@ impl FilterChain {
         let mut stages: Vec<Box<dyn AudioFilter>> = Vec::new();
 
         if let Omissible::Present(volume) = filters.volume {
-            // 1.0 is unity, which `is_enabled` then reports as disabled. Worth
-            // spelling out why the clamp in `process` is not enough on its own:
-            // `f32::clamp` returns NaN unchanged, and `volume: 1e39` turns every
-            // sample that is exactly 0.0 into `0.0 * inf` = NaN.
+            // 1.0 is unity, which is_enabled then reports as disabled. Worth
+            // spelling out why the clamp in process is not enough on its own:
+            // f32::clamp returns NaN unchanged, and volume: 1e39 turns every
+            // sample that is exactly 0.0 into 0.0 * inf = NaN.
             stages.push(Box::new(VolumeFilter {
                 volume: finite(volume, 1.0),
             }));
@@ -222,7 +222,7 @@ impl FilterChain {
     /// Whether any filter would actually change the audio.
     ///
     /// The original uses this to skip building a pipeline at all
-    /// (`FilterChain.kt:93`).
+    /// (FilterChain.kt:93).
     pub fn is_enabled(&self) -> bool {
         self.stages.iter().any(|stage| stage.is_enabled())
     }
@@ -236,7 +236,7 @@ impl FilterChain {
         }
     }
 
-    /// Forwards a landed seek to every stage — see [`AudioFilter::reset`].
+    /// Forwards a landed seek to every stage — see AudioFilter::reset.
     pub fn reset(&mut self) {
         for stage in &mut self.stages {
             stage.reset();
@@ -246,7 +246,7 @@ impl FilterChain {
 
 /// A filter that is both present and non-null.
 ///
-/// `Present(None)` is how a client clears one filter without touching the rest, so
+/// Present(None) is how a client clears one filter without touching the rest, so
 /// it has to mean "no stage" rather than "a stage with default settings" — the
 /// defaults for several of these are audible.
 fn present<T: Copy>(field: &Omissible<Option<T>>) -> Option<T> {
@@ -262,16 +262,16 @@ struct VolumeFilter {
 }
 
 impl AudioFilter for VolumeFilter {
-    /// `VolumeConfig.isEnabled` is `volume != 1.0f`, so the chain includes this
-    /// stage for anything else — even a value [`process`] then treats as unity.
+    /// VolumeConfig.isEnabled is volume != 1.0f, so the chain includes this
+    /// stage for anything else — even a value process then treats as unity.
     fn is_enabled(&self) -> bool {
         self.volume != 1.0
     }
 
-    /// lavadsp `VolumePcmAudioFilter` + `VectorSupport.volume`.
+    /// lavadsp VolumePcmAudioFilter + VectorSupport.volume.
     ///
-    /// Not a multiply: the curve is `tan(v * 0.79)` up to 1.5 and linear above,
-    /// scaled through an integer-shaped `/ 10000`, and the result is clamped. The
+    /// Not a multiply: the curve is tan(v * 0.79) up to 1.5 and linear above,
+    /// scaled through an integer-shaped / 10000, and the result is clamped. The
     /// dead zone is upstream's too — within 0.02 of unity the samples are passed
     /// through untouched rather than run through a curve that does not return
     /// exactly 1.0 at 1.0.
@@ -294,16 +294,16 @@ impl AudioFilter for VolumeFilter {
     }
 }
 
-/// The player's own `volume` field (0..=1000), which is separate from the `volume`
-/// *filter* and is applied by the engine rather than by the chain.
+/// The player's own volume field (0..=1000), which is separate from the volume
+/// filter and is applied by the engine rather than by the chain.
 ///
-/// lavaplayer `PcmVolumeProcessor.setupMultipliers`, which is a tangent curve below
+/// lavaplayer PcmVolumeProcessor.setupMultipliers, which is a tangent curve below
 /// 150 and linear above it. The integer truncation is upstream's — it works on
-/// `short` samples with an integer multiplier — and is reproduced because the
+/// short samples with an integer multiplier — and is reproduced because the
 /// quantisation is what the numbers actually are, not an artefact of the port.
 ///
 /// 100 is unity by a short-circuit rather than by the curve, which returns 1.0099
-/// there (`applyCurrentVolume` returns early when the volume is 100).
+/// there (applyCurrentVolume returns early when the volume is 100).
 pub fn player_volume_multiplier(volume: i32) -> f32 {
     let volume = volume.clamp(0, 1000);
     if volume == 100 {
@@ -325,18 +325,18 @@ struct Equalizer {
     /// coefficients and its gain, both copied out at construction.
     ///
     /// Flat bands are left out entirely. A zero-gain band's biquad output is
-    /// multiplied by `0.0` regardless of its internal state, and gains never change
+    /// multiplied by 0.0 regardless of its internal state, and gains never change
     /// after construction (the chain is rebuilt wholesale on any filter change —
-    /// `pump.rs`'s `PumpCommand::SetFilters`), so dropping one is bit-exact rather
+    /// pump.rs's PumpCommand::SetFilters), so dropping one is bit-exact rather
     /// than an approximation.
     ///
     /// Carrying the coefficients and the gain here, rather than band indices into
-    /// `COEFFICIENTS_48000` and a `[f32; 15]`, is what makes the inner loop
-    /// sequential: `process` runs per sample per band, so a layout that costs three
+    /// COEFFICIENTS_48000 and a [f32; 15], is what makes the inner loop
+    /// sequential: process runs per sample per band, so a layout that costs three
     /// scattered indexed loads per band is paying for them 48 000 times a second per
     /// channel.
     active: Vec<(Coefficients, f32)>,
-    /// Per channel, one `[x0, x1, x2, y0, y1, y2]` per entry of `active` — parallel
+    /// Per channel, one [x0, x1, x2, y0, y1, y2] per entry of active — parallel
     /// to it, so the two iterate together.
     history: Vec<Vec<[f32; 6]>>,
 }
@@ -429,7 +429,7 @@ impl AudioFilter for Equalizer {
     }
 }
 
-/// lavadsp `LowPassPcmAudioFilter`: a one-pole smoother.
+/// lavadsp LowPassPcmAudioFilter: a one-pole smoother.
 #[derive(Debug)]
 struct LowPassFilter {
     smoothing: f32,
@@ -463,7 +463,7 @@ impl AudioFilter for LowPassFilter {
     }
 }
 
-/// lavadsp `KaraokeConverter`.
+/// lavadsp KaraokeConverter.
 ///
 /// Stereo only: the original builds no converter for other channel counts and passes
 /// the audio through, so a mono track is unaffected rather than silenced.
@@ -471,7 +471,7 @@ impl AudioFilter for LowPassFilter {
 struct KaraokeFilter {
     level: f32,
     mono_level: f32,
-    /// Bandpass coefficients, derived once from `filterBand`/`filterWidth`.
+    /// Bandpass coefficients, derived once from filterBand/filterWidth.
     a: f32,
     b: f32,
     c: f32,
@@ -504,7 +504,7 @@ impl KaraokeFilter {
         let a = (1.0 - b * b / (4.0 * c)).sqrt() * (1.0 - c);
 
         Self {
-            // Neither is state, but `process` below is the one place that does
+            // Neither is state, but process below is the one place that does
             // not clamp its output, so a non-finite level reaches the encoder
             // unattenuated. 1.0 is the protocol default for both.
             level: finite(config.level, 1.0),
@@ -519,7 +519,7 @@ impl KaraokeFilter {
 }
 
 impl AudioFilter for KaraokeFilter {
-    /// `KaraokeConfig.isEnabled` is unconditionally true — asking for karaoke at all
+    /// KaraokeConfig.isEnabled is unconditionally true — asking for karaoke at all
     /// is the switch, and there is no neutral setting.
     fn is_enabled(&self) -> bool {
         true
@@ -537,7 +537,7 @@ impl AudioFilter for KaraokeFilter {
             self.y2 = self.y1;
             self.y1 = y;
 
-            // The centre channel, extracted by the bandpass, added back to both
+            // The center channel, extracted by the bandpass, added back to both
             // sides after the sides have been subtracted from each other.
             let o = y * self.mono_level * self.level;
             *l = dry_left - (dry_right * self.level) + o;
@@ -546,18 +546,18 @@ impl AudioFilter for KaraokeFilter {
     }
 }
 
-/// Wraps `signalsmith_stretch::Stretch` — see the module docs for why this is not a
-/// SoundTouch/WSOLA port, and for the `speed`/`pitch`/`rate` combination rule.
+/// Wraps signalsmith_stretch::Stretch — see the module docs for why this is not a
+/// SoundTouch/WSOLA port, and for the speed/pitch/rate combination rule.
 ///
-/// The one filter whose `process` changes frame count instead of transforming
+/// The one filter whose process changes frame count instead of transforming
 /// samples in place.
 struct TimescaleFilter {
     stretch: signalsmith_stretch::Stretch,
-    /// `speed * rate`: input frames divided by this is output frames.
+    /// speed * rate: input frames divided by this is output frames.
     speed_factor: f32,
     enabled: bool,
     /// Scratch buffers reused across calls so a warmed-up pump allocates nothing
-    /// here — the same pattern `Resampler`'s `frames` buffer uses.
+    /// here — the same pattern Resampler's frames buffer uses.
     interleaved_in: Vec<f32>,
     interleaved_out: Vec<f32>,
 }
@@ -573,15 +573,15 @@ impl std::fmt::Debug for TimescaleFilter {
     }
 }
 
-/// Neither `Filters::validate` nor `Timescale` itself bounds `speed`/`pitch`/
-/// `rate` — they are unclamped `f64`s straight off the wire. `speed_factor` is a
-/// divisor of the per-call frame count below (`in_frames / speed_factor`), so a
-/// client-supplied `speed`/`rate` at or below zero would divide by zero or go
-/// negative, and anything just above zero still asks `Stretch` for an output
-/// buffer many minutes long from one ~20ms chunk. `Vec::resize` on that scale
+/// Neither Filters::validate nor Timescale itself bounds speed/pitch/
+/// rate — they are unclamped f64s straight off the wire. speed_factor is a
+/// divisor of the per-call frame count below (in_frames / speed_factor), so a
+/// client-supplied speed/rate at or below zero would divide by zero or go
+/// negative, and anything just above zero still asks Stretch for an output
+/// buffer many minutes long from one ~20ms chunk. Vec::resize on that scale
 /// doesn't panic, it aborts the whole node on allocation failure — a class of
-/// crash `engine.rs`'s `catch_unwind` cannot contain, unlike an ordinary panic.
-/// This is the same runaway-allocation risk `pump.rs`'s `SANE_SAMPLE_RATE_HZ`
+/// crash engine.rs's catch_unwind cannot contain, unlike an ordinary panic.
+/// This is the same runaway-allocation risk pump.rs's SANE_SAMPLE_RATE_HZ
 /// guards against, from a filter request instead of a degenerate container.
 /// 1e-3 caps one call's stretch at 1000x — already an extreme slowdown, and far
 /// short of overflowing anything.
@@ -626,8 +626,8 @@ impl TimescaleFilter {
 }
 
 impl AudioFilter for TimescaleFilter {
-    /// `speed`/`pitch`/`rate` all default to `1.0` (a no-op combination); asking
-    /// for any other combination is the switch, matching `KaraokeFilter`.
+    /// speed/pitch/rate all default to 1.0 (a no-op combination); asking
+    /// for any other combination is the switch, matching KaraokeFilter.
     fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -667,48 +667,48 @@ impl AudioFilter for TimescaleFilter {
         }
     }
 
-    /// `Stretch` buffers `output_latency` frames (tens of milliseconds) of
+    /// Stretch buffers output_latency frames (tens of milliseconds) of
     /// overlap-add state internally, unlike the single-sample IIR history the
     /// other filters carry — left alone across a seek, that state would blend
     /// pre-seek audio into the first stretch of post-seek playback. Matches
-    /// lavaplayer's own `AudioFilter.seekPerformed` — the original does not
+    /// lavaplayer's own AudioFilter.seekPerformed — the original does not
     /// rebuild its filter chain on seek either, it notifies each filter.
     fn reset(&mut self) {
         self.stretch.reset();
     }
 }
 
-/// `value`, or `fallback` when a client-supplied number made it non-finite.
+/// value, or fallback when a client-supplied number made it non-finite.
 ///
-/// Neither the protocol nor `Filters::validate` bounds any filter value, and
-/// serde turns a JSON number past `f32`'s range into `f32::INFINITY` rather than
-/// an error — so `1e39` is an accepted value, as is `-1e39`, and several of the
-/// expressions below turn one of those into `NaN`.
+/// Neither the protocol nor Filters::validate bounds any filter value, and
+/// serde turns a JSON number past f32's range into f32::INFINITY rather than
+/// an error — so 1e39 is an accepted value, as is -1e39, and several of the
+/// expressions below turn one of those into NaN.
 ///
 /// Two reasons every filter routes its inputs through this rather than leaving
 /// it to whatever each expression happens to do:
 ///
-/// * `f32::clamp` returns `self` for `NaN` (both comparisons are false), so the
-///   clamp several `process` implementations end on is not the backstop it looks
-///   like — a `NaN` walks straight through it into the Opus encoder.
-/// * In the stateful filters the `NaN` is not one bad sample but *state*. An LFO
-///   phase, a biquad's `y1`/`y2` history: once `NaN` is in there it never leaves,
-///   so every sample from that patch onward is `NaN` and a seek does not clear
-///   it — only a fresh `filters` patch rebuilding the chain does.
+/// • f32::clamp returns self for NaN (both comparisons are false), so the
+///   clamp several process implementations end on is not the backstop it looks
+///   like — a NaN walks straight through it into the Opus encoder.
+/// • In the stateful filters the NaN is not one bad sample but state. An LFO
+///   phase, a biquad's y1/y2 history: once NaN is in there it never leaves,
+///   so every sample from that patch onward is NaN and a seek does not clear
+///   it — only a fresh filters patch rebuilding the chain does.
 ///
 /// Falling back to each filter's neutral value rather than reproducing that.
-/// Upstream is equally unguarded here (a JVM `Float` parse of `1e39` is
-/// `Infinity` too) and does not reject the request, so this stays a construction
+/// Upstream is equally unguarded here (a JVM Float parse of 1e39 is
+/// Infinity too) and does not reject the request, so this stays a construction
 /// -time coercion rather than a 400: like tremolo's phase wrap, non-finite audio
 /// is not something a client observes on the wire, only ever a defect.
 ///
-/// Applied at construction, not in `process` — these are per-`filters` patch,
+/// Applied at construction, not in process — these are per-filters patch,
 /// and the inner loops run 48 000 times a second per channel.
 ///
-/// The LFO callers pass `step` in already computed, because tremolo and vibrato
+/// The LFO callers pass step in already computed, because tremolo and vibrato
 /// multiply their terms in a different order and that ordering is part of each
-/// one's f32 rounding. `RotationFilter::new` guards the same way inline, on
-/// `f64`.
+/// one's f32 rounding. RotationFilter::new guards the same way inline, on
+/// f64.
 fn finite(value: f32, fallback: f32) -> f32 {
     if value.is_finite() {
         value
@@ -717,14 +717,14 @@ fn finite(value: f32, fallback: f32) -> f32 {
     }
 }
 
-/// lavadsp `TremoloPcmAudioFilter` + `VectorSupport.tremolo`: amplitude modulation.
+/// lavadsp TremoloPcmAudioFilter + VectorSupport.tremolo: amplitude modulation.
 #[derive(Debug)]
 struct TremoloFilter {
-    /// Radians of LFO phase per sample. Hoisted out of `process`'s inner loop,
+    /// Radians of LFO phase per sample. Hoisted out of process's inner loop,
     /// where it was recomputed per sample from a frequency that never changes, so
-    /// [`finite`] has one place to guard.
+    /// finite has one place to guard.
     step: f32,
-    /// **Half** the requested depth. `setDepth` stores `depth / 2`, and Lavalink
+    /// Half the requested depth. setDepth stores depth / 2, and Lavalink
     /// passes the protocol value straight in, so the halving is part of the wire
     /// meaning rather than an implementation detail.
     depth: f32,
@@ -737,7 +737,7 @@ impl TremoloFilter {
         Self {
             step: finite(2.0 * std::f32::consts::PI / SAMPLE_RATE * config.frequency, 0.0),
             // Halved here rather than per sample. A non-finite depth would
-            // otherwise reach the multiply in `process`, and unlike the phase it
+            // otherwise reach the multiply in process, and unlike the phase it
             // is not state — but it is still every sample of every channel.
             depth: finite(config.depth, 0.0) / 2.0,
             phases: vec![0.0; channels],
@@ -774,20 +774,20 @@ impl AudioFilter for TremoloFilter {
     }
 }
 
-/// lavadsp `VibratoConverter`: frequency modulation via a modulated delay line.
+/// lavadsp VibratoConverter: frequency modulation via a modulated delay line.
 ///
 /// The delay is read with a 4-point Hermite interpolator, which is what makes the
 /// pitch bend smooth rather than stepped — a nearest-sample read would zipper.
 #[derive(Debug)]
 struct VibratoFilter {
-    /// Radians of LFO phase per sample — see [`finite`], which is what
-    /// keeps an out-of-range `frequency` from turning the phase permanently `NaN`.
+    /// Radians of LFO phase per sample — see finite, which is what
+    /// keeps an out-of-range frequency from turning the phase permanently NaN.
     step: f32,
     depth: f32,
     channels: Vec<VibratoChannel>,
 }
 
-/// 2 ms of delay, upstream's `BASE_DELAY_SEC`.
+/// 2 ms of delay, upstream's BASE_DELAY_SEC.
 const VIBRATO_BASE_DELAY_SEC: f32 = 0.002;
 /// Keeps the read index off the write index even at zero modulation.
 const VIBRATO_ADDITIONAL_DELAY: f32 = 3.0;
@@ -854,8 +854,8 @@ impl VibratoChannel {
         ((c3 * x + c2) * x + c1) * x + y1
     }
 
-    /// Upstream's LFO is unipolar — `(sin + 1) * 0.5` — so the delay only ever
-    /// lengthens. A bipolar one would centre the pitch instead of bending it up.
+    /// Upstream's LFO is unipolar — (sin + 1) * 0.5 — so the delay only ever
+    /// lengthens. A bipolar one would center the pitch instead of bending it up.
     fn next_lfo(&mut self, step: f32) -> f32 {
         let value = (self.phase.sin() + 1.0) * 0.5;
         // rem_euclid, not a decrement loop, so an extreme client-supplied
@@ -869,10 +869,10 @@ impl VibratoFilter {
     fn new(config: Vibrato, channels: usize) -> Self {
         Self {
             step: finite(2.0 * std::f32::consts::PI * config.frequency / SAMPLE_RATE, 0.0),
-            // A non-finite depth makes `delay` non-finite, and `read_hermite`
-            // turns that into a NaN sample: `rem_euclid` gives NaN, `NaN as usize`
+            // A non-finite depth makes delay non-finite, and read_hermite
+            // turns that into a NaN sample: rem_euclid gives NaN, NaN as usize
             // saturates to 0, and the interpolation carries the NaN out. 0.0 is a
-            // stopped vibrato, which `is_enabled` then skips entirely.
+            // stopped vibrato, which is_enabled then skips entirely.
             depth: finite(config.depth, 0.0),
             channels: (0..channels).map(|_| VibratoChannel::new()).collect(),
         }
@@ -903,11 +903,11 @@ impl AudioFilter for VibratoFilter {
     }
 }
 
-/// lavadsp `DistortionConverter`.
+/// lavadsp DistortionConverter.
 ///
-/// All three trigonometric functions are always enabled: `DistortionPcmAudioFilter`
-/// starts with `ALL_FUNCTIONS` and Lavalink's `DistortionConfig` never disables any,
-/// so the `useSin`/`useCos`/`useTan` branches upstream are dead code in this context
+/// All three trigonometric functions are always enabled: DistortionPcmAudioFilter
+/// starts with ALL_FUNCTIONS and Lavalink's DistortionConfig never disables any,
+/// so the useSin/useCos/useTan branches upstream are dead code in this context
 /// and are not reproduced.
 #[derive(Debug)]
 struct DistortionFilter {
@@ -915,10 +915,10 @@ struct DistortionFilter {
 }
 
 impl DistortionFilter {
-    /// Every field sanitised to its protocol default, offsets to `0.0` and
-    /// scales to `1.0` — together the identity this filter's `is_enabled` tests
-    /// for. A non-finite scale makes `(sample * scale).sin()` NaN, which the
-    /// clamp in `process` then passes through unchanged.
+    /// Every field sanitised to its protocol default, offsets to 0.0 and
+    /// scales to 1.0 — together the identity this filter's is_enabled tests
+    /// for. A non-finite scale makes (sample * scale).sin() NaN, which the
+    /// clamp in process then passes through unchanged.
     fn new(config: Distortion) -> Self {
         Self {
             config: Distortion {
@@ -961,10 +961,10 @@ impl AudioFilter for DistortionFilter {
     }
 }
 
-/// lavadsp `RotationPcmAudioFilter` + `VectorSupport.rotation`: the "8D audio" pan.
+/// lavadsp RotationPcmAudioFilter + VectorSupport.rotation: the "8D audio" pan.
 #[derive(Debug)]
 struct RotationFilter {
-    /// Phase increment per sample. Zero when `rotationHz` is zero, which upstream
+    /// Phase increment per sample. Zero when rotationHz is zero, which upstream
     /// special-cases to avoid a division that would otherwise be by infinity.
     step: f64,
     phase: f64,
@@ -1017,14 +1017,14 @@ impl AudioFilter for RotationFilter {
     }
 }
 
-/// lavadsp `ChannelMixPcmAudioFilter` + `VectorSupport.channelMix`: a 2×2 matrix.
+/// lavadsp ChannelMixPcmAudioFilter + VectorSupport.channelMix: a 2×2 matrix.
 #[derive(Debug)]
 struct ChannelMixFilter {
     config: ChannelMix,
 }
 
 impl ChannelMixFilter {
-    /// Sanitised to the identity matrix, which is also what `is_enabled` tests
+    /// Sanitised to the identity matrix, which is also what is_enabled tests
     /// for — so an all-non-finite mix disables the stage rather than silencing
     /// the track.
     fn new(config: ChannelMix) -> Self {
@@ -1086,7 +1086,7 @@ mod tests {
     }
 
     /// The volume filter is a tangent curve, not a multiply: at 0.5 the multiplier is
-    /// `tan(0.5 * 0.79) * 10000 / 10000` ≈ 0.4169, not 0.5. Getting this wrong is
+    /// tan(0.5 * 0.79) * 10000 / 10000 ≈ 0.4169, not 0.5. Getting this wrong is
     /// inaudible in isolation and obvious next to the original.
     #[test]
     fn non_unit_volume_follows_the_original_curve() {
@@ -1114,12 +1114,12 @@ mod tests {
         assert_eq!(channels[0], vec![0.5, -0.25]);
     }
 
-    /// Above 1.5 both this filter and `player_volume_multiplier` are the linear
+    /// Above 1.5 both this filter and player_volume_multiplier are the linear
     /// half of the same curve, so they must agree — and they only do on the
     /// constant that also meets the tangent half at 1.5
-    /// (`tan(1.5 * 0.79) * 10000` = 24621.4). Pinned against the other half
+    /// (tan(1.5 * 0.79) * 10000 = 24621.4). Pinned against the other half
     /// rather than against a literal, because a literal is exactly what a
-    /// transposed digit survives: `24612` here passed every test in this module.
+    /// transposed digit survives: 24612 here passed every test in this module.
     #[test]
     fn the_linear_half_of_the_volume_curve_matches_the_players_own() {
         // Small enough that the clamp cannot hide the difference at 3.28x gain.
@@ -1157,9 +1157,9 @@ mod tests {
         assert!(channels[0].iter().all(|sample| sample.is_finite()));
     }
 
-    /// Skipping zero-gain bands (`Equalizer::active`) must not change output:
+    /// Skipping zero-gain bands (Equalizer::active) must not change output:
     /// explicit zero entries for the other 13 bands are equivalent to leaving them
-    /// absent, since a zero-gain band contributes `state[Y0] * 0.0` either way and
+    /// absent, since a zero-gain band contributes state[Y0] * 0.0 either way and
     /// its history never feeds back into a band that IS active. Same two nonzero
     /// bands, same input, byte-for-byte identical output is the bar.
     #[test]
@@ -1187,8 +1187,8 @@ mod tests {
     }
 
     #[test]
-    /// `EqualizerConfiguration.setGain` clamps to [-0.25, 1.0], but Lavalink never
-    /// calls it — `EqualizerConfig` fills the array directly and passes it to the
+    /// EqualizerConfiguration.setGain clamps to [-0.25, 1.0], but Lavalink never
+    /// calls it — EqualizerConfig fills the array directly and passes it to the
     /// constructor. Clamping here would make a loud equalizer quieter than the
     /// original's, so the gain is stored as sent.
     fn equalizer_gains_are_stored_unclamped_like_the_original() {
@@ -1299,7 +1299,7 @@ mod tests {
         );
     }
 
-    /// lavaplayer `PcmVolumeProcessor`: a tangent curve below 150 and linear above,
+    /// lavaplayer PcmVolumeProcessor: a tangent curve below 150 and linear above,
     /// quantised through an integer multiplier, with 100 short-circuited to unity.
     #[test]
     fn player_volume_follows_the_lavaplayer_curve() {
@@ -1318,7 +1318,7 @@ mod tests {
         );
     }
 
-    /// A stereo pair of constant channels, which makes the matrix and centre-channel
+    /// A stereo pair of constant channels, which makes the matrix and center-channel
     /// filters easy to reason about.
     fn stereo(left: f32, right: f32, len: usize) -> Vec<Vec<f32>> {
         vec![vec![left; len], vec![right; len]]
@@ -1382,7 +1382,7 @@ mod tests {
         assert!(chain.is_enabled());
 
         // Identical on both sides is what a centred vocal looks like. With monoLevel
-        // at 0 the extracted centre is not added back, so L-R leaves silence.
+        // at 0 the extracted center is not added back, so L-R leaves silence.
         let mut channels = stereo(0.5, 0.5, 8);
         chain.process(&mut channels);
         for sample in channels.iter().flatten() {
@@ -1401,7 +1401,7 @@ mod tests {
         assert!(channels[0].iter().any(|s| s.abs() > 0.1));
     }
 
-    /// A mono track has no centre to subtract, and the original builds no converter
+    /// A mono track has no center to subtract, and the original builds no converter
     /// for anything but stereo — so it must pass through rather than be silenced.
     #[test]
     fn karaoke_passes_mono_through_untouched() {
@@ -1411,11 +1411,11 @@ mod tests {
         assert_eq!(channels[0], vec![0.5, -0.5, 0.25]);
     }
 
-    /// Unlike `vibrato`/`tremolo`, karaoke's coefficient is computed once and then
-    /// fed back through `y1`/`y2` forever, so a `NaN` here doesn't just spoil one
-    /// sample — it never leaves the filter chain's state. `filterWidth` around 8e5
-    /// or beyond used to make `exp` saturate to `0.0` or `+inf`, turning the `b*b /
-    /// (4.0*c)` division into `0.0/0.0`.
+    /// Unlike vibrato/tremolo, karaoke's coefficient is computed once and then
+    /// fed back through y1/y2 forever, so a NaN here doesn't just spoil one
+    /// sample — it never leaves the filter chain's state. filterWidth around 8e5
+    /// or beyond used to make exp saturate to 0.0 or +inf, turning the b*b /
+    /// (4.0*c) division into 0.0/0.0.
     #[test]
     fn karaoke_survives_unclamped_filter_width() {
         let mut chain =
@@ -1437,10 +1437,10 @@ mod tests {
         );
     }
 
-    /// The same sink one coefficient over: `filterBand` reaches `cos` unguarded,
-    /// and a band past `f32`'s range — serde produces `f32::INFINITY` for `1e39`
-    /// rather than rejecting it — makes `cos` `NaN`, which `b` and `a` then carry
-    /// into the `y1`/`y2` recurrence for the life of the filter chain.
+    /// The same sink one coefficient over: filterBand reaches cos unguarded,
+    /// and a band past f32's range — serde produces f32::INFINITY for 1e39
+    /// rather than rejecting it — makes cos NaN, which b and a then carry
+    /// into the y1/y2 recurrence for the life of the filter chain.
     #[test]
     fn karaoke_survives_unclamped_filter_band() {
         for band in ["1e39", "-1e39"] {
@@ -1455,10 +1455,10 @@ mod tests {
         }
     }
 
-    /// Unlike `vibrato`/`tremolo`'s per-sample phase increment, rotation's `step`
-    /// is derived once in `new()` from `rotationHz * 2 * PI`, which overflows to
-    /// `f64::INFINITY` for an extreme `rotationHz` — and `phase.sin()` is `NaN`
-    /// from the first sample on once `phase` itself goes non-finite.
+    /// Unlike vibrato/tremolo's per-sample phase increment, rotation's step
+    /// is derived once in new() from rotationHz * 2 * PI, which overflows to
+    /// f64::INFINITY for an extreme rotationHz — and phase.sin() is NaN
+    /// from the first sample on once phase itself goes non-finite.
     #[test]
     fn rotation_survives_unclamped_rotation_hz() {
         let mut chain = FilterChain::new(&filters(r#"{"rotation":{"rotationHz":1e308}}"#), 2);
@@ -1497,10 +1497,10 @@ mod tests {
         assert!(min < 0.99, "no attenuation happened at all");
     }
 
-    /// With an unwrapped `f32` phase (lavadsp's own behaviour), a 1000 Hz LFO's
+    /// With an unwrapped f32 phase (lavadsp's own behavior), a 1000 Hz LFO's
     /// per-sample increment falls below the f32 ULP around phase 2^14 — reached
     /// after ~200k samples at this frequency, corresponding to what a 5 Hz LFO
-    /// would only hit after several minutes of playback. `rem_euclid` keeps the
+    /// would only hit after several minutes of playback. rem_euclid keeps the
     /// phase small, so the envelope must still be swinging at the tail.
     #[test]
     fn tremolo_keeps_modulating_past_where_an_unwrapped_phase_would_freeze() {
@@ -1548,10 +1548,10 @@ mod tests {
         );
     }
 
-    /// Neither the protocol nor `Filters::validate` clamps `depth`/`frequency` to
+    /// Neither the protocol nor Filters::validate clamps depth/frequency to
     /// upstream's expected ranges, so the DSP itself has to survive whatever a
-    /// client sends. Extreme values used to spin `read_hermite`'s and `next_lfo`'s
-    /// wrap loops for a very long time; they're `rem_euclid`-based now, so this just
+    /// client sends. Extreme values used to spin read_hermite's and next_lfo's
+    /// wrap loops for a very long time; they're rem_euclid-based now, so this just
     /// has to finish and produce finite output.
     #[test]
     fn vibrato_survives_unclamped_depth_and_frequency() {
@@ -1581,12 +1581,12 @@ mod tests {
         );
     }
 
-    /// The test above uses a large but *finite* frequency, which is why it never
+    /// The test above uses a large but finite frequency, which is why it never
     /// caught this: the phase step only goes non-finite once
-    /// `2 * PI * frequency / SAMPLE_RATE` overflows `f32`, and serde turns `1e39`
-    /// into `f32::INFINITY` without erroring. `inf.rem_euclid(..)` is `NaN`, and
-    /// that `NaN` is phase *state* — every sample after it is `NaN`, and only a
-    /// fresh `filters` patch clears it, not a seek.
+    /// 2 * PI * frequency / SAMPLE_RATE overflows f32, and serde turns 1e39
+    /// into f32::INFINITY without erroring. inf.rem_euclid(..) is NaN, and
+    /// that NaN is phase state — every sample after it is NaN, and only a
+    /// fresh filters patch clears it, not a seek.
     #[test]
     fn an_lfo_frequency_past_f32_does_not_poison_the_phase() {
         for filter in ["vibrato", "tremolo"] {
@@ -1606,11 +1606,11 @@ mod tests {
         }
     }
 
-    /// `read_hermite`'s `rem_euclid` is mathematically confined to `[0, size)`, but
-    /// float rounding can round its result up to exactly `size` when `write_index -
-    /// 1 - delay` is a tiny negative number — indistinguishable from zero at
-    /// `size`'s magnitude once `size` is added back in. That previously read
-    /// `buffer[size + 3]` against a `size + 3`-long buffer and panicked. Engineered
+    /// read_hermite's rem_euclid is mathematically confined to [0, size), but
+    /// float rounding can round its result up to exactly size when write_index -
+    /// 1 - delay is a tiny negative number — indistinguishable from zero at
+    /// size's magnitude once size is added back in. That previously read
+    /// buffer[size + 3] against a size + 3-long buffer and panicked. Engineered
     /// directly rather than swept for, since hitting the exact rounding case by
     /// running ordinary audio through it is luck, not a guarantee.
     #[test]
@@ -1686,7 +1686,7 @@ mod tests {
         }
     }
 
-    /// A `Present(None)` clears one filter without touching the others, so it must
+    /// A Present(None) clears one filter without touching the others, so it must
     /// build no stage rather than a stage at default settings.
     #[test]
     fn a_null_filter_builds_no_stage() {
@@ -1694,9 +1694,9 @@ mod tests {
         assert!(!chain.is_enabled());
     }
 
-    /// `speed`/`pitch`/`rate` all default to `1.0` — the no-op combination — so a
-    /// request naming `timescale` without moving any of them off default must not
-    /// add a stage, same as `unit_volume_is_a_no_op`.
+    /// speed/pitch/rate all default to 1.0 — the no-op combination — so a
+    /// request naming timescale without moving any of them off default must not
+    /// add a stage, same as unit_volume_is_a_no_op.
     #[test]
     fn unit_timescale_is_a_no_op() {
         assert!(IMPLEMENTED_FILTERS.contains(&"timescale"));
@@ -1704,8 +1704,8 @@ mod tests {
         assert!(!chain.is_enabled());
     }
 
-    /// `speed` above 1.0 shrinks the buffer — `timescale` is the one filter whose
-    /// `process` changes frame count instead of transforming samples in place.
+    /// speed above 1.0 shrinks the buffer — timescale is the one filter whose
+    /// process changes frame count instead of transforming samples in place.
     #[test]
     fn timescale_speed_changes_frame_count() {
         let mut chain = FilterChain::new(&filters(r#"{"timescale":{"speed":2.0}}"#), 2);
@@ -1721,22 +1721,22 @@ mod tests {
         assert_eq!(channels[0].len(), channels[1].len(), "channels must stay in lockstep");
     }
 
-    /// `rate` moves speed and pitch together; `speed`/`pitch` alone leave the other
-    /// at its neutral value. Exercised through `is_enabled` rather than the DSP
+    /// rate moves speed and pitch together; speed/pitch alone leave the other
+    /// at its neutral value. Exercised through is_enabled rather than the DSP
     /// output, since the combination rule (not the stretcher's output samples) is
-    /// what this codebase owns — `signalsmith-stretch` owns the rest.
+    /// what this codebase owns — signalsmith-stretch owns the rest.
     #[test]
     fn timescale_rate_moves_speed_and_pitch_together() {
         let chain = FilterChain::new(&filters(r#"{"timescale":{"rate":1.5}}"#), 2);
         assert!(chain.is_enabled());
     }
 
-    /// Neither the protocol nor `Filters::validate` bounds `speed`/`rate` — a
-    /// client can send zero, negative, or a tiny positive value. `speed_factor`
+    /// Neither the protocol nor Filters::validate bounds speed/rate — a
+    /// client can send zero, negative, or a tiny positive value. speed_factor
     /// is a divisor of the per-call frame count, so unclamped this would divide
-    /// by zero (or go negative) and ask `Vec::resize` for an enormous buffer,
-    /// which aborts the process rather than panicking — a crash `engine.rs`'s
-    /// `catch_unwind` cannot contain. `MIN_SPEED_FACTOR` must keep this finite
+    /// by zero (or go negative) and ask Vec::resize for an enormous buffer,
+    /// which aborts the process rather than panicking — a crash engine.rs's
+    /// catch_unwind cannot contain. MIN_SPEED_FACTOR must keep this finite
     /// and bounded regardless of what the client sends.
     #[test]
     fn a_zero_or_negative_speed_does_not_blow_up_the_output_buffer() {
@@ -1754,15 +1754,15 @@ mod tests {
         }
     }
 
-    /// The mirror of `a_non_finite_pitch_does_not_reach_the_stretcher` below,
-    /// on the field that was still missing the guard: `speed_factor` went
-    /// through `.max(MIN_SPEED_FACTOR)` alone, and `.max` on a `+inf` operand
-    /// returns `+inf` rather than the floor. `speed * rate` overflowing `f64`
-    /// therefore left `out_frames` (`in_frames / speed_factor`) rounding to 0,
+    /// The mirror of a_non_finite_pitch_does_not_reach_the_stretcher below,
+    /// on the field that was still missing the guard: speed_factor went
+    /// through .max(MIN_SPEED_FACTOR) alone, and .max on a +inf operand
+    /// returns +inf rather than the floor. speed * rate overflowing f64
+    /// therefore left out_frames (in_frames / speed_factor) rounding to 0,
     /// so the chain emitted nothing at all for the rest of the track — the ring
     /// never filled, the pump raced through the whole source at decode speed,
-    /// and the player reported `Playing` with no `TrackStuckEvent` to
-    /// contradict it (`on_progress` keeps firing). A finite output length is
+    /// and the player reported Playing with no TrackStuckEvent to
+    /// contradict it (on_progress keeps firing). A finite output length is
     /// what pins it: not merely bounded above, as the zero/negative case
     /// checks, but actually non-empty.
     #[test]
@@ -1781,11 +1781,11 @@ mod tests {
         assert_eq!(channels[0].len(), channels[1].len());
     }
 
-    /// `pitch_factor` had no equivalent guard to `speed_factor`'s
-    /// `MIN_SPEED_FACTOR`. `pitch`/`rate` are each individually valid, in-range
-    /// `f64`s (`serde_json` itself already refuses a literal like `1e309`), but
-    /// their *product* can still overflow `f64` to infinity at multiplication
-    /// time, and that infinity reached `Stretch::set_transpose_factor`'s C++ FFI
+    /// pitch_factor had no equivalent guard to speed_factor's
+    /// MIN_SPEED_FACTOR. pitch/rate are each individually valid, in-range
+    /// f64s (serde_json itself already refuses a literal like 1e309), but
+    /// their product can still overflow f64 to infinity at multiplication
+    /// time, and that infinity reached Stretch::set_transpose_factor's C++ FFI
     /// unchecked. Constructing the filter (and processing through it) must not
     /// panic or leave a non-finite factor in place of it.
     #[test]
@@ -1799,9 +1799,9 @@ mod tests {
         assert_eq!(channels[0].len(), channels[1].len());
     }
 
-    /// A finite but zero or negative `pitch_factor` is as meaningless to the
-    /// stretcher as `speed_factor`'s zero/negative case (see
-    /// `a_zero_or_negative_speed_does_not_blow_up_the_output_buffer` above), and
+    /// A finite but zero or negative pitch_factor is as meaningless to the
+    /// stretcher as speed_factor's zero/negative case (see
+    /// a_zero_or_negative_speed_does_not_blow_up_the_output_buffer above), and
     /// gets the same floor rather than being passed through unchecked.
     #[test]
     fn a_non_positive_pitch_is_floored_before_reaching_the_stretcher() {
@@ -1818,14 +1818,14 @@ mod tests {
         }
     }
 
-    /// Every filter value a client can set, pushed past `f32`'s range in both
-    /// directions. serde accepts these — `1e39` deserialises to `f32::INFINITY`
-    /// rather than erroring — and `Filters::validate` only checks the disabled
-    /// -filter name list, so `finite` at construction is the only thing between
+    /// Every filter value a client can set, pushed past f32's range in both
+    /// directions. serde accepts these — 1e39 deserialises to f32::INFINITY
+    /// rather than erroring — and Filters::validate only checks the disabled
+    /// -filter name list, so finite at construction is the only thing between
     /// them and songbird's Opus encoder.
     ///
-    /// Not covered by the clamps several `process` implementations end on:
-    /// `f32::clamp` returns `NaN` unchanged, and karaoke does not clamp at all.
+    /// Not covered by the clamps several process implementations end on:
+    /// f32::clamp returns NaN unchanged, and karaoke does not clamp at all.
     #[test]
     fn no_filter_value_can_make_the_output_non_finite() {
         for json in [
@@ -1853,10 +1853,10 @@ mod tests {
     }
 
     /// The stateful half of the case above, and the reason coercing beats
-    /// letting the `NaN` through: in the equalizer a `NaN` gain is still
-    /// `!= 0.0`, so the band stays active and the `NaN` lands in that band's
-    /// `y0`/`y1`/`y2` history — where nothing removes it. Every later buffer
-    /// would be `NaN` too, and a seek would not clear it; only a fresh `filters`
+    /// letting the NaN through: in the equalizer a NaN gain is still
+    /// != 0.0, so the band stays active and the NaN lands in that band's
+    /// y0/y1/y2 history — where nothing removes it. Every later buffer
+    /// would be NaN too, and a seek would not clear it; only a fresh filters
     /// patch rebuilding the chain would. Same shape for the LFO phases.
     #[test]
     fn a_non_finite_value_does_not_poison_a_filter_for_later_buffers() {
@@ -1879,10 +1879,10 @@ mod tests {
         }
     }
 
-    /// Mirrors lavaplayer's per-filter `seekPerformed`, not a chain rebuild —
-    /// `FilterChain::reset` must reach every stage (`TimescaleFilter`'s internal
-    /// `Stretch` buffering included) without panicking, and the chain must keep
-    /// producing sane output afterward. What lands in `pump::State::seek`.
+    /// Mirrors lavaplayer's per-filter seekPerformed, not a chain rebuild —
+    /// FilterChain::reset must reach every stage (TimescaleFilter's internal
+    /// Stretch buffering included) without panicking, and the chain must keep
+    /// producing sane output afterward. What lands in pump::State::seek.
     #[test]
     fn reset_reaches_every_stage_and_leaves_the_chain_usable() {
         let mut chain =

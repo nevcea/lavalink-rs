@@ -1,26 +1,26 @@
 //! Source managers.
 //!
-//! Three of the original's nine (`twitch`, `vimeo` and `nico`) are refused — see
-//! `MAINTENANCE.md` — plus `deezer`, which is not one of the original nine at
+//! Three of the original's nine (twitch, vimeo and nico) are refused — see
+//! MAINTENANCE.md — plus deezer, which is not one of the original nine at
 //! all: upstream ships it as a separate plugin. The trait is the seam anything
 //! further would slot into. Each manager answers two questions: does this
 //! identifier belong to me, and if so what track does it name.
 //!
-//! [`youtube`], [`soundcloud`] and [`bandcamp`] are all thin: the URL shapes are
-//! theirs, and the extraction belongs to the shared [`ytdlp`] backend. [`getyarn`]
+//! youtube, soundcloud and bandcamp are all thin: the URL shapes are
+//! theirs, and the extraction belongs to the shared ytdlp backend. getyarn
 //! is thin in a different way: unlike Twitch/Vimeo/Nico, getyarn.io's pages embed
 //! a direct non-HLS video URL in an Open Graph tag, so it needs neither yt-dlp
 //! nor a scraping crate — just one GET and two tag reads.
 //!
-//! [`deezer`] is a different shape entirely: Deezer's own API hands back metadata
+//! deezer is a different shape entirely: Deezer's own API hands back metadata
 //! but never a full-length stream, so it resolves through Deezer's HTTP API at load
 //! time and substitutes a YouTube match at playback time, via
-//! [`ytdlp::YtDlp::find_youtube_match`]. Spotify and Apple Music would follow that
+//! ytdlp::YtDlp::find_youtube_match. Spotify and Apple Music would follow that
 //! shape rather than the yt-dlp one.
 //!
-//! Loading is **blocking** by design. Probing a container is file and network I/O
+//! Loading is blocking by design. Probing a container is file and network I/O
 //! plus CPU, so it runs off the async threads; the server never waits on a decoder.
-//! The original does the same work on the request thread (`util/loading.kt`), which
+//! The original does the same work on the request thread (util/loading.kt), which
 //! is why N clients asking for one URL there means N probes each holding a thread.
 
 pub mod bandcamp;
@@ -66,8 +66,8 @@ pub enum SourceLoad {
 
 /// A named group of tracks, with the entry point the identifier singled out.
 ///
-/// `selected_track` is an index into `tracks`, or `-1` for none — the original's
-/// encoding, kept rather than an `Option<usize>` because it is what goes on the wire
+/// selected_track is an index into tracks, or -1 for none — the original's
+/// encoding, kept rather than an Option<usize> because it is what goes on the wire
 /// and translating twice is where an off-by-one would hide.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourcePlaylist {
@@ -79,7 +79,7 @@ pub struct SourcePlaylist {
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
     /// The identifier looked right but there is nothing there. Becomes
-    /// `loadType: "empty"`.
+    /// loadType: "empty".
     #[error("nothing found for this identifier")]
     NotFound,
     /// Reached, but not playable — wrong content type, unsupported container.
@@ -91,7 +91,7 @@ pub enum SourceError {
     /// Network or filesystem failure.
     #[error("{0}")]
     Io(String),
-    /// Ours. Becomes severity `fault`.
+    /// Ours. Becomes severity fault.
     #[error("{0}")]
     Internal(String),
 }
@@ -99,8 +99,8 @@ pub enum SourceError {
 impl SourceError {
     /// Converts to the wire exception, choosing the severity the original would.
     ///
-    /// Everything a user can cause is `common`; only our own failures are `fault`.
-    /// Clients surface `fault` differently, so misclassifying here turns a bad URL
+    /// Everything a user can cause is common; only our own failures are fault.
+    /// Clients surface fault differently, so misclassifying here turns a bad URL
     /// into what looks like a server bug.
     pub fn to_exception(&self) -> Exception {
         let severity = match self {
@@ -137,10 +137,10 @@ pub fn extension_of(url: &str) -> Option<String> {
 }
 
 /// Builds the proxy every blocking HTTP client this node creates should route
-/// through, from `httpConfig`'s keys — the same keys `application.yml.example`
+/// through, from httpConfig's keys — the same keys application.yml.example
 /// warns operators to set to avoid exposing this node's IP address. Shared here
-/// because [`http::HttpSource`], [`deezer::DeezerSource`] and
-/// [`super::stream::HttpMediaSource`] each build their own client.
+/// because http::HttpSource, deezer::DeezerSource and
+/// super::stream::HttpMediaSource each build their own client.
 pub fn configured_proxy(
     config: &crate::config::HttpConfig,
 ) -> Result<Option<reqwest::Proxy>, SourceError> {
@@ -158,8 +158,8 @@ pub fn configured_proxy(
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Builds a blocking client with this node's user agent, request timeout, and
-/// (if configured) proxy — the same construction [`http::HttpSource`],
-/// [`deezer::DeezerSource`] and [`getyarn::GetyarnSource`] each need.
+/// (if configured) proxy — the same construction http::HttpSource,
+/// deezer::DeezerSource and getyarn::GetyarnSource each need.
 pub fn build_client(
     proxy: Option<reqwest::Proxy>,
 ) -> Result<reqwest::blocking::Client, SourceError> {
@@ -174,10 +174,10 @@ pub fn build_client(
         .map_err(|error| SourceError::Internal(error.to_string()))
 }
 
-/// Turns a non-success HTTP status into a [`SourceError`], the way every source
-/// that fetches over HTTP needs to: a 404/410 is [`SourceError::NotFound`] (which
-/// becomes `loadType: "empty"`, not an error), anything else carries the status
-/// and its reason phrase through as [`SourceError::Remote`].
+/// Turns a non-success HTTP status into a SourceError, the way every source
+/// that fetches over HTTP needs to: a 404/410 is SourceError::NotFound (which
+/// becomes loadType: "empty", not an error), anything else carries the status
+/// and its reason phrase through as SourceError::Remote.
 pub fn classify_status(status: StatusCode) -> SourceError {
     match status {
         StatusCode::NOT_FOUND | StatusCode::GONE => SourceError::NotFound,
@@ -188,8 +188,8 @@ pub fn classify_status(status: StatusCode) -> SourceError {
     }
 }
 
-/// Strips a leading `https://`/`http://` — the scheme check every URL-matching
-/// source manager starts with. `None` means the identifier isn't a URL at all.
+/// Strips a leading https:///http:// — the scheme check every URL-matching
+/// source manager starts with. None means the identifier isn't a URL at all.
 pub fn strip_scheme(identifier: &str) -> Option<&str> {
     identifier
         .strip_prefix("https://")
@@ -198,11 +198,11 @@ pub fn strip_scheme(identifier: &str) -> Option<&str> {
 
 /// One source of tracks.
 pub trait SourceManager: Send + Sync + 'static {
-    /// The `sourceName` clients branch on: `"http"`, `"local"`, `"youtube"`.
+    /// The sourceName clients branch on: "http", "local", "youtube".
     fn name(&self) -> &'static str;
 
     /// Whether this manager claims the identifier. Claiming means any failure is
-    /// reported as an error; an identifier no manager claims is `empty`, not an
+    /// reported as an error; an identifier no manager claims is empty, not an
     /// error.
     fn matches(&self, identifier: &str) -> bool;
 

@@ -4,9 +4,9 @@ use serde_json::{Map, Value};
 use crate::filters::Filters;
 use crate::omissible::Omissible;
 
-/// A JSON object field that is always emitted, defaulting to `{}`.
+/// A JSON object field that is always emitted, defaulting to {}.
 ///
-/// The original marks `pluginInfo`/`userData` `@EncodeDefault`, so they appear even
+/// The original marks pluginInfo/userData @EncodeDefault, so they appear even
 /// when empty. Clients read them unconditionally.
 pub type JsonObject = Map<String, Value>;
 
@@ -34,8 +34,8 @@ pub struct Track {
 }
 
 impl Track {
-    /// Builds a track carrying the empty `pluginInfo` our sources always report: we
-    /// ship no plugins, so it is `{}` exactly like the original's built-in sources.
+    /// Builds a track carrying the empty pluginInfo our sources always report: we
+    /// ship no plugins, so it is {} exactly like the original's built-in sources.
     pub fn new(encoded: String, info: TrackInfo) -> Self {
         Self {
             encoded,
@@ -58,7 +58,7 @@ pub struct TrackInfo {
     pub title: String,
     /// Nullable, never absent.
     pub uri: Option<String>,
-    /// `"http"` / `"local"` / `"youtube"` — clients branch on this string.
+    /// "http" / "local" / "youtube" — clients branch on this string.
     pub source_name: String,
     pub artwork_url: Option<String>,
     pub isrc: Option<String>,
@@ -75,7 +75,7 @@ pub struct VoiceState {
 
 impl Default for VoiceState {
     /// What the original reports for a player with no voice server info yet:
-    /// empty strings, null channel (`util.kt:106-111`).
+    /// empty strings, null channel (util.kt:106-111).
     fn default() -> Self {
         Self {
             token: String::new(),
@@ -91,10 +91,10 @@ impl Default for VoiceState {
 pub struct PlayerState {
     /// Unix epoch milliseconds.
     pub time: i64,
-    /// Milliseconds into the *track* — not the same clock as `time`.
+    /// Milliseconds into the track — not the same clock as time.
     pub position: i64,
     pub connected: bool,
-    /// `-1` when there is no voice connection.
+    /// -1 when there is no voice connection.
     pub ping: i64,
 }
 
@@ -112,10 +112,10 @@ pub struct PlayerUpdateTrack {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerUpdate {
-    /// Deprecated in v4 in favour of [`PlayerUpdateTrack::encoded`], still accepted.
+    /// Deprecated in v4 in favour of PlayerUpdateTrack::encoded, still accepted.
     #[serde(default, skip_serializing_if = "Omissible::is_omitted")]
     pub encoded_track: Omissible<Option<String>>,
-    /// Deprecated in v4 in favour of [`PlayerUpdateTrack::identifier`].
+    /// Deprecated in v4 in favour of PlayerUpdateTrack::identifier.
     #[serde(default, skip_serializing_if = "Omissible::is_omitted")]
     pub identifier: Omissible<String>,
     #[serde(default, skip_serializing_if = "Omissible::is_omitted")]
@@ -134,17 +134,17 @@ pub struct PlayerUpdate {
     pub voice: Omissible<VoiceState>,
 }
 
-/// `GET /v4/sessions/{id}/players` returns a bare array, not an object.
+/// GET /v4/sessions/{id}/players returns a bare array, not an object.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Players(pub Vec<Player>);
 
-/// `POST /v4/decodetracks` request body: a bare array of encoded strings.
+/// POST /v4/decodetracks request body: a bare array of encoded strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EncodedTracks(pub Vec<String>);
 
-/// `POST /v4/decodetracks` response body: a bare array.
+/// POST /v4/decodetracks response body: a bare array.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Tracks(pub Vec<Track>);

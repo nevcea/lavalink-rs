@@ -9,7 +9,7 @@ license.workspace = true
 [dependencies]
 lavalink-protocol = { path = "../protocol" }
 
-# `rc` so `Json<Arc<LoadResult>>` serializes: the loader shares one result
+# rc so Json<Arc<LoadResult>> serializes: the loader shares one result
 # between its cache, the single-flight followers and the caller, and unwrapping
 # the Arc at the REST edge would deep-copy the whole playlist back.
 serde = { workspace = true, features = ["rc"] }
@@ -37,36 +37,36 @@ symphonia = { version = "0.6", default-features = false, features = [
     "isomp4", "mkv", "ogg", "wav",
 ] }
 # Never imported — this exists purely so Cargo's feature unification reaches
-# *songbird's* symphonia, which is a different major version from ours and
+# songbird's symphonia, which is a different major version from ours and
 # therefore a different crate entirely.
 #
-# songbird builds its codec registry with `symphonia::default::register_enabled_codecs`
+# songbird builds its codec registry with symphonia::default::register_enabled_codecs
 # and enables no features on its own symphonia dependency, deliberately: the
 # downstream crate is expected to pick the codec set, and unification carries it
-# across. The mixer's `RawAdapter` path needs the PCM decoder specifically
-# (`RawReader` declares `CODEC_TYPE_PCM_F32LE`), so without this the registry has
-# only Opus, `LiveInput::promote` finds no decoder for our ring, and the mixer
+# across. The mixer's RawAdapter path needs the PCM decoder specifically
+# (RawReader declares CODEC_TYPE_PCM_F32LE), so without this the registry has
+# only Opus, LiveInput::promote finds no decoder for our ring, and the mixer
 # silently never pulls a frame — see #9 and
-# `ring.rs`'s `songbird_can_promote_the_ring_into_a_playable_input`, which fails
+# ring.rs's songbird_can_promote_the_ring_into_a_playable_input, which fails
 # the moment this line goes away. This used to be satisfied by accident, back when
 # our own symphonia was also 0.5.x.
 symphonia-songbird = { package = "symphonia", version = "0.5", default-features = false, features = ["pcm"] }
-# `driver` only — no gateway client. Lavalink receives voice state and voice server
+# driver only — no gateway client. Lavalink receives voice state and voice server
 # updates from its own client over REST, which is exactly the standalone driver's
-# input, so serenity/twilight are not needed. `tungstenite` is the websocket backend
+# input, so serenity/twilight are not needed. tungstenite is the websocket backend
 # the driver requires (it insists on exactly one).
 songbird = { version = "0.6", default-features = false, features = [
     "driver",
     "rustls",
     "tungstenite",
 ] }
-# Windowed-sinc resampling for `resamplingQuality` (LOW/MEDIUM/HIGH map to
-# SincInterpolationParameters presets in audio/resample.rs). `fft_resampler`,
+# Windowed-sinc resampling for resamplingQuality (LOW/MEDIUM/HIGH map to
+# SincInterpolationParameters presets in audio/resample.rs). fft_resampler,
 # the only default feature, pulls in realfft/num-complex for a resampler
 # variant this node doesn't use — only the sinc/fast asynchronous resamplers
 # are needed here.
 rubato = { version = "5.0", default-features = false }
-# `timescale`'s time/pitch stretcher (audio/filter.rs's TimescaleFilter) — a Rust
+# timescale's time/pitch stretcher (audio/filter.rs's TimescaleFilter) — a Rust
 # wrapper (cc + bindgen, needs a C++ compiler and libclang) around Signalsmith's
 # phase-vocoder stretcher. Not a WSOLA/SoundTouch port; see filter.rs's module docs
 # for why that trade was made anyway. Prototyped in examples/repro_timescale.rs.
@@ -75,15 +75,15 @@ signalsmith-stretch = "0.1"
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
-# Already in the tree transitively via axum; `util` just exposes `oneshot` so
+# Already in the tree transitively via axum; util just exposes oneshot so
 # router wiring (fallbacks, layer ordering) can be tested as real HTTP calls
 # instead of trusted by inspection.
 tower = { version = "0.5", features = ["util"] }
 
 # The lib and bin targets are built with libtest's harness, which rejects
-# criterion's flags — `cargo bench -- --save-baseline x` used to die on them before
-# reaching a single benchmark. Neither target has a `#[bench]` in it, so there is
-# nothing to lose by keeping them out of `cargo bench` entirely.
+# criterion's flags — cargo bench -- --save-baseline x used to die on them before
+# reaching a single benchmark. Neither target has a #[bench] in it, so there is
+# nothing to lose by keeping them out of cargo bench entirely.
 [lib]
 bench = false
 

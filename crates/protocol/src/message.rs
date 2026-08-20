@@ -1,9 +1,9 @@
-//! Outbound websocket messages.
+//! Outbound WebSocket messages.
 //!
 //! Two layers of internal tagging, matching the original's two
-//! `JsonContentPolymorphicSerializer`s: `op` selects the message, and for
-//! `op: "event"` the `type` field selects the event. Both tags sit at the top level
-//! of the same object — an event is `{"op":"event","type":"TrackStartEvent",...}`,
+//! JsonContentPolymorphicSerializers: op selects the message, and for
+//! op: "event" the type field selects the event. Both tags sit at the top level
+//! of the same object — an event is {"op":"event","type":"TrackStartEvent",...},
 //! not a nested payload.
 
 use serde::{Deserialize, Serialize};
@@ -31,10 +31,10 @@ pub enum Message {
 }
 
 impl Message {
-    /// Coalescing key for discardable messages: an unsent `playerUpdate` for a guild
-    /// is replaced by a newer one for the same guild. `playerUpdate` and `stats` are
+    /// Coalescing key for discardable messages: an unsent playerUpdate for a guild
+    /// is replaced by a newer one for the same guild. playerUpdate and stats are
     /// snapshots — a newer one supersedes an older one, so coalescing loses nothing.
-    /// Events (`None` here) are history: dropping one would desynchronise the
+    /// Events (None here) are history: dropping one would desynchronise the
     /// client's queue, so a client too slow to keep up with events gets closed
     /// instead of having one skipped.
     pub fn coalesce_key(&self) -> Option<CoalesceKey<'_>> {
@@ -109,7 +109,7 @@ impl TrackEndReason {
     /// Whether the client should start the next track on receiving this.
     ///
     /// Clients branch on this to drive their queue, so the mapping is copied from
-    /// the original enum's `mayStartNext` rather than re-reasoned.
+    /// the original enum's mayStartNext rather than re-reasoned.
     pub fn may_start_next(self) -> bool {
         matches!(self, TrackEndReason::Finished | TrackEndReason::LoadFailed)
     }

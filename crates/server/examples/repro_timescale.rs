@@ -1,18 +1,17 @@
-//! Standalone listening/timing harness for `signalsmith-stretch`, the stretcher
-//! behind `filter::TimescaleFilter`.
+//! Standalone listening/timing harness for signalsmith-stretch, the stretcher
+//! behind filter::TimescaleFilter.
 //!
 //! Runs outside the pump and the ring on purpose: it is faster to iterate on
 //! chunk size, speed and pitch here than to spin up a whole player, and the WAV it
 //! writes is what actually answers "does this sound right" — a question the unit
-//! tests in `filter.rs` deliberately don't try to answer (see
-//! `timescale_speed_changes_frame_count`'s doc comment).
+//! tests in filter.rs deliberately don't try to answer (see
+//! timescale_speed_changes_frame_count's doc comment).
 //!
-//! ```sh
+//! Example command:
 //! cargo run -p lavalink-server --release --example repro_timescale -- --speed 1.5 --pitch 2.0 out.wav
-//! ```
 //!
-//! Generates a 3-second 440Hz+880Hz stereo test tone, runs it through `Stretch` in
-//! 1024-frame chunks (the same order of magnitude as one `pump` read), and writes the
+//! Generates a 3-second 440Hz+880Hz stereo test tone, runs it through Stretch in
+//! 1024-frame chunks (the same order of magnitude as one pump read), and writes the
 //! result as a 16-bit PCM WAV for listening. Prints per-chunk timing so the CPU cost
 //! is visible before it is a player.
 

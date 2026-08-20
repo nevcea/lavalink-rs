@@ -1,9 +1,9 @@
-//! `GET /v4/loadtracks` result.
+//! GET /v4/loadtracks result.
 //!
-//! Modelled by hand rather than with `#[serde(tag, content)]` because the original
-//! always emits the `data` key — including `"data": null` for `empty`
-//! (`docs/api/rest.md:200-204`, `LoadResultSerializerTest.kt:97-102`). A `content`
-//! tagged enum would drop the key for the unit variant, which is an L1 difference.
+//! Modeled by hand rather than with #[serde(tag, content)] because the original
+//! always emits the data key — including "data": null for empty
+//! (docs/api/rest.md:200-204, LoadResultSerializerTest.kt:97-102). A content
+//! tagged enum would drop the key for the unit variant, changing the wire shape.
 
 // The derive macros and the traits share these names; importing from the crate root
 // brings both, which the manual impls below and the derives above each need.
@@ -20,7 +20,7 @@ pub enum ResultStatus {
     Track,
     Playlist,
     Search,
-    /// Serialized as `"empty"`, not `"none"`.
+    /// Serialized as "empty", not "none".
     #[serde(rename = "empty")]
     None,
     Error,
@@ -32,7 +32,7 @@ pub enum LoadResult {
     Playlist(Playlist),
     Search(Vec<Track>),
     /// No matches. Also what an unsupported source URL yields — HTTP 200 with
-    /// `loadType: "empty"` rather than an error.
+    /// loadType: "empty" rather than an error.
     Empty,
     /// Loading failed. Still returned with HTTP 200.
     Error(Exception),
@@ -112,7 +112,7 @@ pub struct Playlist {
 #[serde(rename_all = "camelCase")]
 pub struct PlaylistInfo {
     pub name: String,
-    /// `-1` when the playlist has no selected track.
+    /// -1 when the playlist has no selected track.
     pub selected_track: i32,
 }
 

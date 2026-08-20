@@ -1,24 +1,21 @@
-//! Three-state field wrapper matching the original `protocol/.../omissible.kt`.
+//! Three-state field wrapper matching the original protocol/.../omissible.kt.
 //!
-//! The distinction that must survive the port:
+//! The three states must remain distinct through serialization:
+//! Omissible::Omitted means the key is absent and the value stays unchanged.
+//! Present(None) emits null and explicitly clears the value.
+//! Present(Some(v)) emits the value v.
 //!
-//! | state | JSON | meaning |
-//! |---|---|---|
-//! | [`Omissible::Omitted`] | key absent | leave untouched |
-//! | `Present(None)` | `"field": null` | explicit clear (e.g. `encodedTrack: null` = stop) |
-//! | `Present(Some(v))` | `"field": v` | set to `v` |
-//!
-//! `Option<Option<T>>` cannot express this under serde, because a missing field and
-//! an explicit `null` both deserialize to the outer `None`. Hence the custom type:
-//! `Deserialize` is only invoked when the key is present, so `#[serde(default)]`
-//! supplies `Omitted` for absence and everything else lands in `Present`.
+//! Option<Option<T>> cannot express this under serde, because a missing field and
+//! an explicit null both deserialize to the outer None. Hence the custom type:
+//! Deserialize is only invoked when the key is present, so #[serde(default)]
+//! supplies Omitted for absence and everything else lands in Present.
 
 use serde::de::{Deserialize, Deserializer};
 use serde::ser::{Error as _, Serialize, Serializer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Omissible<T> {
-    /// The default, and the reason `#[serde(default)]` on every field is enough to
+    /// The default, and the reason #[serde(default)] on every field is enough to
     /// distinguish an absent key from an explicit null.
     #[default]
     Omitted,
@@ -34,7 +31,7 @@ impl<T> Omissible<T> {
         matches!(self, Omissible::Present(_))
     }
 
-    /// The present value, or `None` when omitted. Mirrors Kotlin `ifPresent`.
+    /// The present value, or None when omitted. Mirrors Kotlin ifPresent.
     pub fn into_option(self) -> Option<T> {
         match self {
             Omissible::Omitted => None,
@@ -42,10 +39,10 @@ impl<T> Omissible<T> {
         }
     }
 
-    /// Kotlin `takeIfPresent { predicate }`: present *and* the predicate holds.
+    /// Kotlin takeIfPresent { predicate }: present and the predicate holds.
     ///
-    /// The original uses this to make `paused`/`position`/`endTime`/`userData` apply
-    /// only when no new track is being set (`PlayerRestHandler.kt:145,151,161,169`).
+    /// The original uses this to make paused/position/endTime/userData apply
+    /// only when no new track is being set (PlayerRestHandler.kt:145,151,161,169).
     pub fn take_if(self, condition: bool) -> Option<T> {
         if condition {
             self.into_option()

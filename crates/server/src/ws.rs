@@ -1,15 +1,15 @@
-//! `GET /v4/websocket`.
+//! GET /v4/websocket.
 //!
 //! Two things differ from the original, both at the edges:
 //!
-//! * **`User-Id` is validated.** The original does
-//!   `session.handshakeHeaders.getFirst("User-Id")!!.toLong()`
-//!   (`SocketServer.kt:98`) — a missing header is a null assertion failure and a
-//!   non-numeric one is a `NumberFormatException`, either way a 500-class crash
+//! • User-Id is validated. The original does
+//!   session.handshakeHeaders.getFirst("User-Id")!!.toLong()
+//!   (SocketServer.kt:98) — a missing header is a null assertion failure and a
+//!   non-numeric one is a NumberFormatException, either way a 500-class crash
 //!   during the handshake. A client cannot usefully observe a crash, so this is a
 //!   400 with a message instead.
-//! * **No servlet container in the send path.** The original reaches through Spring
-//!   into Undertow's channel to write (`SocketContext.kt:164`), which ties the
+//! • No servlet container in the send path. The original reaches through Spring
+//!   into Undertow's channel to write (SocketContext.kt:164), which ties the
 //!   protocol to one server implementation. Here the sink is plain data and the
 //!   writer task owns the socket.
 
@@ -43,10 +43,10 @@ const OVERFLOW_THRESHOLD: usize = 2048;
 /// considered unresponsive.
 ///
 /// Without this, a client whose TCP receive window is stuck blocks this task
-/// inside `writer.send` indefinitely — the `pending_essentials` check below
+/// inside writer.send indefinitely — the pending_essentials check below
 /// only runs after a write returns, so essentials keep accumulating in
-/// `sink.rs` for the entire stall. Past `ESSENTIAL_CAPACITY` they start being
-/// silently discarded (`SendError::Overflow`, ignored by every caller), which
+/// sink.rs for the entire stall. Past ESSENTIAL_CAPACITY they start being
+/// silently discarded (SendError::Overflow, ignored by every caller), which
 /// is exactly the "never dropped" guarantee the essential lane exists to make.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -66,10 +66,10 @@ pub async fn handler(
         );
     }
 
-    // Read-only: the actual claim happens inside `run`, once the socket this
-    // header describes actually exists (`HandshakeInterceptorImpl.kt` sets
-    // this before the handshake completes too, from the same `canResume`
-    // check `SocketServer` later uses for the real resume).
+    // Read-only: the actual claim happens inside run, once the socket this
+    // header describes actually exists (HandshakeInterceptorImpl.kt sets
+    // this before the handshake completes too, from the same canResume
+    // check SocketServer later uses for the real resume).
     let can_resume = requested_session
         .as_deref()
         .is_some_and(|id| state.sessions.can_resume(id, Instant::now()));
@@ -91,8 +91,8 @@ fn parse_user_id(headers: &HeaderMap) -> Result<u64, ApiError> {
         .parse::<u64>()
         .map_err(|_| ApiError::bad_request(format!("The User-Id header is not a snowflake: {raw}")))?;
 
-    // `HandshakeInterceptorImpl.kt`: `userId.isNullOrEmpty() || userId.toLongOrNull()
-    // == 0L` is rejected the same way a missing/non-numeric header is.
+    // HandshakeInterceptorImpl.kt: userId.isNullOrEmpty() || userId.toLongOrNull()
+    // == 0L is rejected the same way a missing/non-numeric header is.
     if id == 0 {
         return Err(ApiError::bad_request("The User-Id header is not a snowflake: 0"));
     }
@@ -278,40 +278,40 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
     false
 }
 
-/// Sends `Command::EmitUpdate` to every player in `session`, non-blocking.
+/// Sends Command::EmitUpdate to every player in session, non-blocking.
 ///
-/// `SocketContext.kt:193`: after replaying its queue, the original sends a
-/// fresh `playerUpdate` for every player unconditionally, right at resume —
+/// SocketContext.kt:193: after replaying its queue, the original sends a
+/// fresh playerUpdate for every player unconditionally, right at resume —
 /// not waiting for the next periodic tick. Our sink drops snapshot messages
-/// entirely while paused (`Sink::send`'s docs), so without this a resumed
+/// entirely while paused (Sink::send's docs), so without this a resumed
 /// client sees nothing for a guild whose state didn't happen to change since
 /// disconnecting, and stale-until-corrected state for one that did, for up to
-/// `playerUpdateInterval` (5s default).
+/// playerUpdateInterval (5s default).
 ///
-/// `try_send`, not an awaited `send`: this must not hold up completing the
+/// try_send, not an awaited send: this must not hold up completing the
 /// handshake behind a busy actor, and a skipped one is superseded by the next
-/// periodic tick regardless — the same trade `ticker.rs`'s own use of
-/// `EmitUpdate` makes.
+/// periodic tick regardless — the same trade ticker.rs's own use of
+/// EmitUpdate makes.
 fn emit_fresh_updates(session: &Session) {
     for player in session.players() {
         let _ = player.try_send(crate::player::Command::EmitUpdate);
     }
 }
 
-/// Puts an essential `message` that `recv()` already dequeued back at the front
+/// Puts an essential message that recv() already dequeued back at the front
 /// of the essential lane, after the write that was going to deliver it failed or
 /// timed out.
 ///
-/// Without this, `recv()`'s `try_recv` (`sink.rs`'s `essential.pop_front()`)
+/// Without this, recv()'s try_recv (sink.rs's essential.pop_front())
 /// already removed the message from the queue before the write that was
 /// supposed to deliver it ever ran — so a write failure here lost it silently,
 /// even though this is exactly the abnormal-disconnect case resume exists to
 /// recover from.
 ///
-/// A snapshot message (`playerUpdate`/`stats`, identified by
-/// [`Message::coalesce_key`] being `Some`) is not restored: the caller's
-/// `on_disconnect` unconditionally clears the snapshot lane
-/// (`Sink::pause`), so putting one back here would just be thrown away a
+/// A snapshot message (playerUpdate/stats, identified by
+/// Message::coalesce_key being Some) is not restored: the caller's
+/// on_disconnect unconditionally clears the snapshot lane
+/// (Sink::pause), so putting one back here would just be thrown away a
 /// moment later, and the next tick regenerates a fresher one regardless.
 fn restore_undelivered(session: &Session, message: Message) {
     if message.coalesce_key().is_none() {
@@ -319,24 +319,24 @@ fn restore_undelivered(session: &Session, message: Message) {
     }
 }
 
-/// Whether a session that now has `pending` essential messages queued should be
-/// closed as a policy violation, given whether enforcement is currently `armed`
+/// Whether a session that now has pending essential messages queued should be
+/// closed as a policy violation, given whether enforcement is currently armed
 /// (mutated in place).
 ///
 /// Essentials backing up ordinarily means a connected client is not reading. But
 /// a session resumed after a long detach can start already over
-/// [`OVERFLOW_THRESHOLD`] on a backlog that piled up while nobody was connected
+/// OVERFLOW_THRESHOLD on a backlog that piled up while nobody was connected
 /// to drain it — punishing that on the very first check would close a client
 /// that never had a chance to prove it isn't draining. So enforcement starts
 /// disarmed whenever the backlog is already over threshold, and arms itself the
 /// first time it is observed under threshold; only a backlog that regrows past
 /// threshold after that is a client that truly isn't keeping up.
 ///
-/// The grace period above only ever waives [`OVERFLOW_THRESHOLD`], never
-/// [`crate::sink::ESSENTIAL_CAPACITY`] itself: past that point `Sink::send` is
-/// already returning `SendError::Overflow` and silently dropping messages
+/// The grace period above only ever waives OVERFLOW_THRESHOLD, never
+/// crate::sink::ESSENTIAL_CAPACITY itself: past that point Sink::send is
+/// already returning SendError::Overflow and silently dropping messages
 /// (every caller discards that error), so a backlog that never dips back under
-/// `OVERFLOW_THRESHOLD` — staying disarmed forever under the logic above — would
+/// OVERFLOW_THRESHOLD — staying disarmed forever under the logic above — would
 /// otherwise keep losing events indefinitely with nothing to ever close it.
 fn overflow_closes(armed: &mut bool, pending: usize) -> bool {
     if pending >= crate::sink::ESSENTIAL_CAPACITY {
@@ -380,9 +380,9 @@ mod tests {
         crate::session::SessionRegistry::new().open(1, None)
     }
 
-    /// `sink` is the session's own — matching `AppState::player`'s production
-    /// wiring — so an event a spawned actor emits (here, the `PlayerUpdate`
-    /// `Command::EmitUpdate` triggers) lands where a test reading the
+    /// sink is the session's own — matching AppState::player's production
+    /// wiring — so an event a spawned actor emits (here, the PlayerUpdate
+    /// Command::EmitUpdate triggers) lands where a test reading the
     /// session's sink can see it.
     fn dummy_pair(
         guild_id: u64,
@@ -391,7 +391,7 @@ mod tests {
         crate::testing::dummy_pair(guild_id, sink)
     }
 
-    /// The bug this guards: `recv()` already removed the message from the
+    /// The bug this guards: recv() already removed the message from the
     /// essential lane before a write that fails or times out ever runs, so
     /// without restoring it the message that was supposed to be delivered (or
     /// replayed after a resume) is silently gone.
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(session.sink.try_recv(), Some(event("2")));
     }
 
-    /// A snapshot message is not restored: `on_disconnect`'s `sink.pause()`
+    /// A snapshot message is not restored: on_disconnect's sink.pause()
     /// clears the snapshot lane unconditionally right after, so putting one
     /// back here would only be thrown away a moment later.
     #[test]
@@ -420,12 +420,12 @@ mod tests {
         assert_eq!(session.sink.try_recv(), None);
     }
 
-    /// The bug this guards: `Sink::send` drops every `playerUpdate` while
+    /// The bug this guards: Sink::send drops every playerUpdate while
     /// paused (see its own docs on why), so a resumed session's sink starts
     /// back up with nothing queued for any player whose state didn't happen
     /// to change while detached — a client would see no update at all until
-    /// the next periodic tick, up to `playerUpdateInterval` (5s default)
-    /// later. `SocketContext.kt:193` closes exactly this gap in the original
+    /// the next periodic tick, up to playerUpdateInterval (5s default)
+    /// later. SocketContext.kt:193 closes exactly this gap in the original
     /// by sending one immediately for every player on resume.
     #[tokio::test]
     async fn resuming_emits_a_fresh_update_for_every_player() {
@@ -496,7 +496,7 @@ mod tests {
         assert!(error.message.contains("not-a-snowflake"));
     }
 
-    /// `HandshakeInterceptorImpl.kt` rejects `0` the same way it rejects a
+    /// HandshakeInterceptorImpl.kt rejects 0 the same way it rejects a
     /// missing header — a numeric-looking value that is still not a real
     /// snowflake.
     #[test]
@@ -555,12 +555,12 @@ mod tests {
         assert!(overflow_closes(&mut armed, OVERFLOW_THRESHOLD));
     }
 
-    /// The bug this guards: a backlog resumed above `OVERFLOW_THRESHOLD` that
+    /// The bug this guards: a backlog resumed above OVERFLOW_THRESHOLD that
     /// never dips back under it (a client slow enough to stay over the grace
-    /// threshold but not slow enough to stop entirely) left `armed` `false`
+    /// threshold but not slow enough to stop entirely) left armed false
     /// forever under the old logic — so it was never closed even once
-    /// `Sink::send` started silently dropping messages at
-    /// `ESSENTIAL_CAPACITY`. The hard cap must fire regardless of `armed`.
+    /// Sink::send started silently dropping messages at
+    /// ESSENTIAL_CAPACITY. The hard cap must fire regardless of armed.
     #[test]
     fn a_backlog_that_never_arms_still_closes_once_data_is_actually_being_lost() {
         let mut armed = false; // never observed under OVERFLOW_THRESHOLD

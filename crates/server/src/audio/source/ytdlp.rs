@@ -1,31 +1,31 @@
 //! The yt-dlp subprocess, shared by every source that resolves through it.
 //!
-//! This module knows how to *run* yt-dlp and read what it prints. It does not know
-//! which sites exist — [`youtube`](super::youtube) and
-//! [`soundcloud`](super::soundcloud) own their own URL shapes and hand this layer a
-//! URL and a [`SourceKind`].
+//! This module knows how to run yt-dlp and read what it prints. It does not know
+//! which sites exist — youtube and
+//! soundcloud own their own URL shapes and hand this layer a
+//! URL and a SourceKind.
 //!
-//! # A runtime-optional dependency
+//! A runtime-optional dependency
 //!
 //! yt-dlp is detected at startup and, if it is missing, every source that needs it is
-//! simply not registered and does not appear in `/v4/info.sourceManagers`. **The node
-//! works fully without it** — local and HTTP are unaffected. That is the whole point
+//! simply not registered and does not appear in /v4/info.sourceManagers. The node
+//! works fully without it — local and HTTP are unaffected. That is the whole point
 //! of the arrangement: these sites break often, and when they do the failure should
 //! be confined to them rather than deciding whether the server starts.
 //!
-//! # Expiring URLs
+//! Expiring URLs
 //!
-//! A resolved media URL is valid for hours at best, so it is deliberately *not*
+//! A resolved media URL is valid for hours at best, so it is deliberately not
 //! stored in the encoded track. What is stored is whatever
-//! [`SourceKind::playback_url`] can turn back into a page URL; the direct stream is
-//! resolved again at playback time by [`YtDlp::resolve_stream_url`]. A track queued
+//! SourceKind::playback_url can turn back into a page URL; the direct stream is
+//! resolved again at playback time by YtDlp::resolve_stream_url. A track queued
 //! in the morning therefore still plays in the evening, which storing the URL would
 //! not give.
 //!
-//! # No circumvention
+//! No circumvention
 //!
 //! Rate limits, bot checks, age gates and region blocks are reported as they come
-//! back — `TrackException` with the message yt-dlp gave. Nothing here works around
+//! back — TrackException with the message yt-dlp gave. Nothing here works around
 //! them.
 
 use std::io::Read as _;
@@ -45,32 +45,32 @@ const PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// googlevideo.com validates the fetching client against the one that obtained the
 /// URL; a stream URL resolved under one UA and then fetched with another (e.g.
-/// reqwest's default `lavalink-rs/x.y.z`) comes back `403 Forbidden`. This is passed
-/// both to yt-dlp via `--user-agent` and to the HTTP client that reads the bytes, so
+/// reqwest's default lavalink-rs/x.y.z) comes back 403 Forbidden. This is passed
+/// both to yt-dlp via --user-agent and to the HTTP client that reads the bytes, so
 /// the two always agree.
 pub const STREAM_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /// Results returned for a bare search query, matching what clients expect from the
-/// original's search behaviour.
+/// original's search behavior.
 pub(super) const SEARCH_RESULTS: usize = 10;
 
 /// The default cap on how many entries a playlist load will take, when nothing in
-/// `application.yml` overrides it via `youtubePlaylistLoadLimit`.
+/// application.yml overrides it via youtubePlaylistLoadLimit.
 ///
-/// The original bounds this too (pages of 100; `youtubePlaylistLoadLimit: 6` is
+/// The original bounds this too (pages of 100; youtubePlaylistLoadLimit: 6 is
 /// its default, so 600 tracks). A cap is not optional: a several-thousand-entry
 /// playlist would otherwise hold a loader permit for minutes and return a
 /// response no client wants. Ours is a flat track count rather than a page
-/// count, so `main.rs` multiplies the config value by 100 before it reaches
-/// [`YtDlp::detect`]. Only [`YtDlp::stub`] (test-only) reads this directly —
-/// `detect` always takes the caller's value.
+/// count, so main.rs multiplies the config value by 100 before it reaches
+/// YtDlp::detect. Only YtDlp::stub (test-only) reads this directly —
+/// detect always takes the caller's value.
 #[cfg(test)]
 const DEFAULT_PLAYLIST_TRACK_LIMIT: usize = 600;
 
 /// AAC first: symphonia (used to decode every source before it is mixed and
 /// re-encoded for Discord) has no Opus decoder, so an opus-only stream cannot be
-/// played at all despite being what Discord ultimately wants. `acodec!=opus` on the
+/// played at all despite being what Discord ultimately wants. acodec!=opus on the
 /// fallback keeps a plain "bestaudio" from re-selecting an opus stream when no m4a
 /// track exists.
 const FORMAT: &str = "bestaudio[acodec=aac]/bestaudio[ext=m4a]/bestaudio[acodec!=opus]/bestaudio/best";
@@ -78,7 +78,7 @@ const FORMAT: &str = "bestaudio[acodec=aac]/bestaudio[ext=m4a]/bestaudio[acodec!
 /// Which site a track came from.
 ///
 /// Carries the two things that differ per site once yt-dlp has done the extraction:
-/// the `sourceName` clients branch on, and how to get back from a stored identifier
+/// the sourceName clients branch on, and how to get back from a stored identifier
 /// to a page URL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
@@ -111,7 +111,7 @@ impl SourceKind {
         }
     }
 
-    /// What to store as the track's identifier, given yt-dlp's `id` and page URL.
+    /// What to store as the track's identifier, given yt-dlp's id and page URL.
     fn identifier(self, id: String, webpage_url: Option<&str>) -> String {
         match self {
             SourceKind::YouTube => id,
@@ -126,17 +126,17 @@ impl SourceKind {
 pub struct YtDlp {
     program: String,
     pub version: String,
-    /// `httpConfig`'s proxy, in the `[user:password@]host:port` form yt-dlp's own
-    /// `--proxy` flag takes. Not used by `detect` itself — a version check makes
+    /// httpConfig's proxy, in the [user:password@]host:port form yt-dlp's own
+    /// --proxy flag takes. Not used by detect itself — a version check makes
     /// no network request, so there is nothing there for a proxy to route.
     proxy_arg: Option<String>,
-    /// `youtubePlaylistLoadLimit`, already converted from the original's "pages
+    /// youtubePlaylistLoadLimit, already converted from the original's "pages
     /// of 100" into a flat track count.
     playlist_track_limit: usize,
 }
 
 impl YtDlp {
-    /// Looks for a usable yt-dlp. `None` means every source needing it stays
+    /// Looks for a usable yt-dlp. None means every source needing it stays
     /// disabled.
     pub fn detect(program: &str, proxy_arg: Option<String>, playlist_track_limit: usize) -> Option<Self> {
         let output = run(program, &["--version"], PROCESS_TIMEOUT).ok()?;
@@ -165,7 +165,7 @@ impl YtDlp {
 
     /// A backend naming a program without probing for it.
     ///
-    /// The site modules' tests are about URL shapes — `matches` never touches the
+    /// The site modules' tests are about URL shapes — matches never touches the
     /// binary — so they need a backend to hang a source off, not a working one.
     #[cfg(test)]
     pub(super) fn stub() -> Self {
@@ -177,8 +177,8 @@ impl YtDlp {
         }
     }
 
-    /// `["--proxy", "<url>"]` when a proxy is configured, else empty — spread
-    /// into every argument list below with `args.extend(self.proxy_args())`.
+    /// ["--proxy", "<url>"] when a proxy is configured, else empty — spread
+    /// into every argument list below with args.extend(self.proxy_args()).
     fn proxy_args(&self) -> Vec<&str> {
         match &self.proxy_arg {
             Some(proxy) => vec!["--proxy", proxy.as_str()],
@@ -229,13 +229,13 @@ impl YtDlp {
 
     /// Loads a playlist, flat.
     ///
-    /// `--yes-playlist` is required because a URL naming both a track and a playlist
+    /// --yes-playlist is required because a URL naming both a track and a playlist
     /// makes yt-dlp default to the single track; lavaplayer treats the same URL as a
     /// playlist with that track selected, and what a client observes follows the
     /// original.
     ///
-    /// `--flat-playlist` keeps this to one extraction rather than one per entry. The
-    /// cost is that entries carry no `is_live` flag, so a live entry is only
+    /// --flat-playlist keeps this to one extraction rather than one per entry. The
+    /// cost is that entries carry no is_live flag, so a live entry is only
     /// discovered when it is played — the same trade the search path makes.
     pub(super) fn load_playlist(
         &self,
@@ -270,9 +270,9 @@ impl YtDlp {
 
     /// Finds a YouTube video id to substitute for a track whose own site has no
     /// full-length stream — Deezer's public API only ever hands back a 30-second
-    /// preview clip. `query` is free text, ordinarily "title author".
+    /// preview clip. query is free text, ordinarily "title author".
     ///
-    /// Public rather than `pub(super)`: [`crate::audio::stream::StreamOpener`]
+    /// Public rather than pub(super): crate::audio::stream::StreamOpener
     /// calls this at playback time, once per track, so the substitute is found
     /// fresh rather than stored — a stored video id would go stale exactly like a
     /// resolved stream URL would.
@@ -287,7 +287,7 @@ impl YtDlp {
         }
     }
 
-    /// Runs a search. `target` is a full yt-dlp search spec, e.g. `ytsearch10:query`.
+    /// Runs a search. target is a full yt-dlp search spec, e.g. ytsearch10:query.
     pub(super) fn search(&self, target: &str, kind: SourceKind) -> Result<SourceLoad, SourceError> {
         // --flat-playlist skips a full extraction per result. A search that
         // resolved every hit would take tens of seconds.
@@ -309,7 +309,7 @@ fn parse<T: serde::de::DeserializeOwned>(output: &str) -> Result<T, SourceError>
 }
 
 /// Drops entries yt-dlp could not identify, and reports "nothing here" rather than
-/// an empty list — `NotFound` becomes `loadType: "empty"`, which is what a client
+/// an empty list — NotFound becomes loadType: "empty", which is what a client
 /// expects from a search that matched nothing.
 fn into_tracks(entries: Vec<Video>, kind: SourceKind) -> Result<Vec<SourceTrack>, SourceError> {
     let tracks: Vec<SourceTrack> = entries
@@ -324,7 +324,7 @@ fn into_tracks(entries: Vec<Video>, kind: SourceKind) -> Result<Vec<SourceTrack>
     Ok(tracks)
 }
 
-/// yt-dlp's `-J` output, only the fields we use.
+/// yt-dlp's -J output, only the fields we use.
 #[derive(Debug, Deserialize)]
 pub(super) struct Video {
     #[serde(default)]
@@ -355,8 +355,8 @@ struct SearchResults {
     entries: Vec<Video>,
 }
 
-/// Same shape as [`SearchResults`] plus the playlist's own title, which a search
-/// result does not have and a `loadType: "playlist"` response requires.
+/// Same shape as SearchResults plus the playlist's own title, which a search
+/// result does not have and a loadType: "playlist" response requires.
 #[derive(Debug, Deserialize)]
 struct PlaylistResults {
     #[serde(default)]
@@ -411,7 +411,7 @@ impl Video {
 
 /// Runs the program and captures stdout, killing it if it overruns.
 ///
-/// [`KillOnDrop`] is what makes the timeout real: without it a killed child that is
+/// KillOnDrop is what makes the timeout real: without it a killed child that is
 /// never reaped stays around as a zombie, and an early return would leak the process
 /// entirely.
 fn run(program: &str, args: &[&str], timeout: Duration) -> Result<String, SourceError> {
@@ -476,9 +476,9 @@ fn run(program: &str, args: &[&str], timeout: Duration) -> Result<String, Source
 
 /// Turns yt-dlp's stderr into the right kind of failure.
 ///
-/// The severity matters: a private track is the user's problem (`common`), while a
+/// The severity matters: a private track is the user's problem (common), while a
 /// broken extractor is not something the client can act on. Everything here is
-/// caused by the site or the request, so none of it is `fault`.
+/// caused by the site or the request, so none of it is fault.
 fn classify(stderr: &str) -> SourceError {
     let lower = stderr.to_ascii_lowercase();
 
@@ -640,7 +640,7 @@ mod tests {
         );
     }
 
-    /// `--flat-playlist` entries carry `url` rather than `webpage_url`.
+    /// --flat-playlist entries carry url rather than webpage_url.
     #[test]
     fn a_flat_entry_falls_back_to_its_url_field() {
         let video: Video = serde_json::from_str(

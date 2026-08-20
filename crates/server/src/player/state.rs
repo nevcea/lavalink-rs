@@ -2,11 +2,11 @@
 //!
 //! Two state machines live here and they deliberately do not talk to each other:
 //!
-//! * [`Playback`] — ours. The actor is the sole authority.
-//! * [`VoiceConnection`] — not ours. It is a *cache* of what the voice layer last
+//! • Playback — ours. The actor is the sole authority.
+//! • VoiceConnection — not ours. It is a cache of what the voice layer last
 //!   told us, updated only by events. Nothing here ever asks the voice layer a
 //!   question, which is what makes the read path side-effect free: the original's
-//!   `sendPlayerUpdate` calls `getMediaConnection`, which creates a connection if
+//!   sendPlayerUpdate calls getMediaConnection, which creates a connection if
 //!   none exists, so merely reporting state changes it.
 //!
 //! Illegal transitions are rejected internally, but that rejection never reaches the
@@ -17,9 +17,9 @@ use std::time::Instant;
 use lavalink_protocol::filters::Filters;
 use lavalink_protocol::player::{Player, PlayerState as WirePlayerState, Track, VoiceState};
 
-/// What the player is doing. `Idle` and `Stopped` look identical on the wire
-/// (`track: null`) but differ in whether a track has ever run, which decides
-/// whether stopping should emit a `TrackEndEvent`.
+/// What the player is doing. Idle and Stopped look identical on the wire
+/// (track: null) but differ in whether a track has ever run, which decides
+/// whether stopping should emit a TrackEndEvent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Playback {
     /// Created, never given a track.
@@ -47,7 +47,7 @@ pub enum VoiceConnection {
 }
 
 impl VoiceConnection {
-    /// What `playerUpdate.state.connected` reports.
+    /// What playerUpdate.state.connected reports.
     pub fn is_connected(self) -> bool {
         matches!(self, VoiceConnection::Connected)
     }
@@ -57,32 +57,32 @@ impl VoiceConnection {
 #[derive(Debug)]
 pub struct PlayerModel {
     pub guild_id: u64,
-    /// `guild_id` formatted once, not on every `snapshot()` — the wire field is a
-    /// string but the model's own identity is the `u64`, and `snapshot()` runs on
-    /// every `playerUpdate` tick.
+    /// guild_id formatted once, not on every snapshot() — the wire field is a
+    /// string but the model's own identity is the u64, and snapshot() runs on
+    /// every playerUpdate tick.
     guild_id_str: String,
     pub playback: Playback,
     pub track: Option<Track>,
-    /// What `PATCH`'s `paused` field last requested, tracked independently of
-    /// `playback`/`track` — the original's `AudioPlayer.paused` is its own flag,
-    /// not derived from whether a track happens to be loaded, so `PATCH
-    /// {"paused": true}` against an empty player still reports back `"paused":
-    /// true` there. `playback` alone cannot represent that: a trackless player
-    /// can never be `Playback::Paused`, since `Playback` also drives
-    /// `is_playing()`/stuck-detection, which really do depend on a track
+    /// What PATCH's paused field last requested, tracked independently of
+    /// playback/track — the original's AudioPlayer.paused is its own flag,
+    /// not derived from whether a track happens to be loaded, so PATCH
+    /// {"paused": true} against an empty player still reports back "paused":
+    /// true there. playback alone cannot represent that: a trackless player
+    /// can never be Playback::Paused, since Playback also drives
+    /// is_playing()/stuck-detection, which really do depend on a track
     /// actually running.
     paused: bool,
-    /// 0..=1000, as the original's `AudioPlayer.volume`.
+    /// 0..=1000, as the original's AudioPlayer.volume.
     pub volume: i32,
     pub filters: Filters,
     pub end_time_ms: Option<i64>,
     /// Voice server details as last accepted from the client. Reported verbatim in
-    /// `GET player`, independent of whether the connection actually came up.
+    /// GET player, independent of whether the connection actually came up.
     pub voice: VoiceState,
     /// Cached from voice-layer events; never queried.
     pub connection: VoiceConnection,
     pub ping_ms: i64,
-    /// When the current track last produced audio, for `TrackStuckEvent`.
+    /// When the current track last produced audio, for TrackStuckEvent.
     pub last_progress: Option<Instant>,
 }
 
@@ -108,9 +108,9 @@ impl PlayerModel {
 
     /// Starts a new track.
     ///
-    /// `paused` is passed explicitly because the caller has already applied the
-    /// rule that a play request with no `paused` field forces `false`
-    /// (`PlayerRestHandler.kt:186`) — encoding it here would hide a wire-visible
+    /// paused is passed explicitly because the caller has already applied the
+    /// rule that a play request with no paused field forces false
+    /// (PlayerRestHandler.kt:186) — encoding it here would hide a wire-visible
     /// decision inside the model.
     pub fn play(&mut self, track: Track, paused: bool, now: Instant) {
         self.track = Some(track);
@@ -123,13 +123,13 @@ impl PlayerModel {
         self.last_progress = Some(now);
     }
 
-    /// Clears the current track and hands it back, `None` if there was none — which
-    /// is also whether a `TrackEndEvent` is owed.
+    /// Clears the current track and hands it back, None if there was none — which
+    /// is also whether a TrackEndEvent is owed.
     ///
     /// Returns the track rather than a bool because the caller needs it for that
     /// event: taking it out here means the common path (stopping a player with no
-    /// track) moves nothing, where cloning `track` before the call cloned a whole
-    /// [`Track`] — eight strings and two JSON objects — on every stop, including the
+    /// track) moves nothing, where cloning track before the call cloned a whole
+    /// Track — eight strings and two JSON objects — on every stop, including the
     /// ones that turn out to owe no event at all.
     pub fn stop(&mut self) -> Option<Track> {
         let track = self.track.take();
@@ -143,10 +143,10 @@ impl PlayerModel {
         track
     }
 
-    /// Applies `paused`. The flag itself is recorded unconditionally — the
-    /// original's `AudioPlayer.setPaused` is not gated on a track being
-    /// loaded — but `playback` only transitions while a track is actually
-    /// running, since that is what `is_playing()`/stuck-detection depend on.
+    /// Applies paused. The flag itself is recorded unconditionally — the
+    /// original's AudioPlayer.setPaused is not gated on a track being
+    /// loaded — but playback only transitions while a track is actually
+    /// running, since that is what is_playing()/stuck-detection depend on.
     pub fn set_paused(&mut self, paused: bool, now: Instant) {
         self.paused = paused;
         match (self.playback, paused) {
@@ -166,10 +166,10 @@ impl PlayerModel {
         self.volume = volume.clamp(0, 1000);
     }
 
-    /// Assembles the `GET player` / `playerUpdate` view.
+    /// Assembles the GET player / playerUpdate view.
     ///
     /// Player fields come from this model, voice fields from the event cache — the
-    /// same split the original gets from koe (`util.kt:91-113`), minus the query.
+    /// same split the original gets from koe (util.kt:91-113), minus the query.
     pub fn snapshot(&self, position_ms: i64, now_epoch_ms: i64) -> Player {
         Player {
             guild_id: self.guild_id_str.clone(),
@@ -240,13 +240,13 @@ mod tests {
         assert!(model.track.is_none());
     }
 
-    /// `playback` cannot represent "paused" without a track — it stays `Idle`,
-    /// since `is_playing()`/stuck-detection genuinely depend on a track
-    /// running — but the wire `paused` field must still report back what was
-    /// requested, matching the original's `AudioPlayer.paused`, which is not
-    /// gated on a loaded track. This used to report `false` here (derived
-    /// purely from `playback == Paused`, which an empty player can never be),
-    /// diverging from the original for a `PATCH {"paused": true}` sent before
+    /// playback cannot represent "paused" without a track — it stays Idle,
+    /// since is_playing()/stuck-detection genuinely depend on a track
+    /// running — but the wire paused field must still report back what was
+    /// requested, matching the original's AudioPlayer.paused, which is not
+    /// gated on a loaded track. This used to report false here (derived
+    /// purely from playback == Paused, which an empty player can never be),
+    /// diverging from the original for a PATCH {"paused": true} sent before
     /// any track was ever played.
     #[test]
     fn pausing_an_empty_player_still_reports_paused_on_the_wire() {
@@ -259,8 +259,8 @@ mod tests {
         assert!(!model.snapshot(0, 1).paused);
     }
 
-    /// The flag survives a track ending: the original's `AudioPlayer.paused`
-    /// is an independent switch, not reset by `onTrackEnd`, so a player
+    /// The flag survives a track ending: the original's AudioPlayer.paused
+    /// is an independent switch, not reset by onTrackEnd, so a player
     /// paused mid-track and then stopped stays reported as paused until a
     /// client explicitly unpauses it.
     #[test]
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(model.playback, Playback::Playing);
     }
 
-    /// `Playing` while the voice connection is down is legal. Frames keep being
+    /// Playing while the voice connection is down is legal. Frames keep being
     /// produced and discarded, and position keeps advancing — same as the original.
     #[test]
     fn playing_while_disconnected_is_legal() {

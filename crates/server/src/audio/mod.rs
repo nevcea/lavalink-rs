@@ -1,32 +1,30 @@
 //! The audio pipeline.
 //!
-//! ```text
 //! [pump: CPU-bound, no deadline]                [send: O(1), 20ms deadline]
 //! source → decode → resample → filter ──▶ ring ──▶ mixer pulls, encodes Opus
-//! ```
 //!
-//! # Why filtering costs us seeking
+//! Why filtering costs us seeking
 //!
 //! Running our own DSP means giving the voice layer raw PCM, which it then treats as
 //! a live stream and cannot seek; using its own seekable input would leave nowhere to
-//! put a filter. Filters won, so seeking is reimplemented in [`pump`]: it seeks the
+//! put a filter. Filters won, so seeking is reimplemented in pump: it seeks the
 //! demuxer, discards the buffered audio and rebases the position counter. Precision
 //! therefore follows the container — exact where there is an index, approximate where
 //! the duration was guessed, refused on a live stream.
 //!
 //! Two properties of the send side are constraints, not decisions:
 //!
-//! * **The mixer pulls.** It reads a `MediaSource` on its own clock; there is no API
+//! • The mixer pulls. It reads a MediaSource on its own clock; there is no API
 //!   for handing it finished frames. So the ring's read end is what we expose.
-//! * **The mixer encodes.** Opus passthrough needs track volume to be exactly 1.0,
-//!   and `volume` is a filter we must support, so passthrough is off. There is no
-//!   `encode.rs` here because encoding is not ours.
+//! • The mixer encodes. Opus passthrough needs track volume to be exactly 1.0,
+//!   and volume is a filter we must support, so passthrough is off. There is no
+//!   encode.rs here because encoding is not ours.
 //!
-//! And the position counter is advanced by the **consuming** side, inside the ring's
+//! And the position counter is advanced by the consuming side, inside the ring's
 //! read — the pump runs a whole buffer ahead, so its output is not a playback
 //! position.
 //!
-//! # What is untested here
+//! What is untested here
 //!
 //! Seek precision on real containers, and the thread and CPU cost of several players
 //! at once, both need a live Discord voice channel to measure. The pieces that can be
@@ -56,7 +54,7 @@ pub struct PlayRequest {
     pub start_position_ms: i64,
     pub end_time_ms: Option<i64>,
     pub paused: bool,
-    /// The player's `volume` field (0..=1000), not the `volume` filter.
+    /// The player's volume field (0..=1000), not the volume filter.
     pub volume: i32,
     pub filters: Filters,
 }
@@ -67,17 +65,17 @@ pub struct PlayRequest {
 pub enum EngineEvent {
     /// Audio was produced. Resets the stuck timer.
     Progress,
-    /// The track reached its end, or its configured `endTime`.
+    /// The track reached its end, or its configured endTime.
     Finished,
-    /// The track failed. `started` distinguishes "never produced audio"
-    /// (`loadFailed`) from "died partway through" (`finished`).
+    /// The track failed. started distinguishes "never produced audio"
+    /// (loadFailed) from "died partway through" (finished).
     Failed { exception: Exception, started: bool },
 }
 
 /// The pipeline, as the actor sees it.
 ///
 /// Every method returns immediately — the actor must not block, so anything slow is
-/// the implementation's job to defer. Results come back as [`EngineEvent`]s.
+/// the implementation's job to defer. Results come back as EngineEvents.
 pub trait Engine: Send + Sync + 'static {
     /// The shared playback position in milliseconds.
     ///
@@ -85,8 +83,8 @@ pub trait Engine: Send + Sync + 'static {
     /// global tick without a lock. Single writer, so no coordination is needed.
     fn position_handle(&self) -> Arc<AtomicI64>;
 
-    /// Frames sent/nulled, for `/v4/stats`' `frameStats`. Defaulted to an
-    /// unshared, always-empty counter so [`testing::RecordingEngine`] does not
+    /// Frames sent/nulled, for /v4/stats' frameStats. Defaulted to an
+    /// unshared, always-empty counter so testing::RecordingEngine does not
     /// need one.
     fn frame_counters(&self) -> Arc<ring::FrameCounters> {
         Arc::default()
@@ -96,7 +94,7 @@ pub trait Engine: Send + Sync + 'static {
     ///
     /// Its own channel, not the actor's general command queue: a terminal event
     /// that loses its slot to a burst of REST traffic is a player wedged forever
-    /// — see `PlayerHandle::engine_events`.
+    /// — see PlayerHandle::engine_events.
     fn attach(&self, _events: mpsc::Sender<EngineEvent>) {}
 
     fn play(&self, request: PlayRequest);
@@ -113,12 +111,12 @@ pub trait Engine: Send + Sync + 'static {
 /// How one track's pump ended.
 #[derive(Debug)]
 pub enum PumpOutcome {
-    /// Reached the end of the stream, or the configured `endTime`.
+    /// Reached the end of the stream, or the configured endTime.
     Finished,
     /// Asked to stop. The actor already knows, so no event follows.
     Stopped,
-    /// `started` is whether any audio ever reached the ring, which decides between
-    /// `loadFailed` and `finished` on the resulting `TrackEndEvent`.
+    /// started is whether any audio ever reached the ring, which decides between
+    /// loadFailed and finished on the resulting TrackEndEvent.
     Failed { exception: Exception, started: bool },
 }
 
@@ -134,7 +132,7 @@ pub mod testing {
 
     use super::{Engine, EngineEvent, PlayRequest};
 
-    /// A record of one call into an [`Engine`].
+    /// A record of one call into an Engine.
     #[derive(Debug, Clone, PartialEq)]
     pub enum EngineCall {
         Play {

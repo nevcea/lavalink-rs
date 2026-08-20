@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-/// `GET /v4/info`.
+/// GET /v4/info.
 ///
-/// `sourceManagers` and `filters` list what this node *actually* runs, so that a
-/// partial port advertises itself honestly. The `jvm` and `lavaplayer` fields have
+/// sourceManagers and filters list what this node actually runs, so that a
+/// partial port advertises itself honestly. The jvm and lavaplayer fields have
 /// no meaning here but stay in the shape because clients read them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,8 +29,8 @@ pub struct Version {
 }
 
 impl Version {
-    /// Parses a semver string, falling back to `0.0.0` when it does not match —
-    /// the same lenient behaviour as `Version.fromSemver` (`info.kt:59-63`).
+    /// Parses a semver string, falling back to 0.0.0 when it does not match —
+    /// the same lenient behavior as Version.fromSemver (info.kt:59-63).
     pub fn from_semver(semver: &str) -> Self {
         let fallback = || Self {
             semver: semver.to_owned(),

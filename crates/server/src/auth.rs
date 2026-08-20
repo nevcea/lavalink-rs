@@ -1,6 +1,6 @@
 //! Password check.
 //!
-//! The original compares with `==` (`RequestAuthorizationFilter.kt:26`), which on
+//! The original compares with == (RequestAuthorizationFilter.kt:26), which on
 //! the JVM short-circuits at the first differing character. That leaks the password
 //! prefix-by-prefix to anyone who can time responses. The comparison here is
 //! constant time.
@@ -45,11 +45,11 @@ pub async fn require_password(
 /// the same length is not secret in any useful way, and pretending otherwise
 /// would mean hashing, which is more machinery than this needs.
 ///
-/// Takes raw bytes, not `&str`: an `Authorization` header is present here
+/// Takes raw bytes, not &str: an Authorization header is present here
 /// whether or not its bytes happen to be valid UTF-8 (RFC 7230 allows
-/// `obs-text`, and the JVM decodes it as Latin-1 rather than rejecting it),
+/// obs-text, and the JVM decodes it as Latin-1 rather than rejecting it),
 /// so comparing bytes is what keeps a non-UTF-8 header "present but wrong"
-/// (403) instead of `HeaderValue::to_str()` silently failing and this
+/// (403) instead of HeaderValue::to_str() silently failing and this
 /// treating it as "absent" (401).
 fn matches(provided: &[u8], expected: &[u8]) -> bool {
     if provided.len() != expected.len() {
@@ -80,7 +80,7 @@ mod tests {
         assert!(!matches(b"youshallnotpassword", b"youshallnotpass"));
     }
 
-    /// The bug this fix targets: a non-UTF-8 (but present) `Authorization`
+    /// The bug this fix targets: a non-UTF-8 (but present) Authorization
     /// header must still compare as "wrong", not be silently treated as
     /// bytes that happen not to decode to anything comparable.
     #[test]

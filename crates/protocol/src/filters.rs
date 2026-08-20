@@ -1,11 +1,11 @@
 //! Filter DTOs.
 //!
-//! All ten original filters are modelled here, independently of which ones a
+//! All ten original filters are modeled here, independently of which ones a
 //! server actually runs: the wire shape has to parse in full so that a request
 //! naming a filter the node does not run can be rejected with the original's
-//! 400 + name list (`PlayerRestHandler.kt:90-95`) rather than a parse error.
+//! 400 + name list (PlayerRestHandler.kt:90-95) rather than a parse error.
 //! What is really implemented is the server's own list, not this crate's — see
-//! `lavalink-server`'s `audio::filter::IMPLEMENTED_FILTERS`.
+//! lavalink-server's audio::filter::IMPLEMENTED_FILTERS.
 
 use std::collections::BTreeMap;
 
@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::omissible::Omissible;
 
-/// Filter names in the original's application order (`FilterChain.kt:79-91`).
+/// Filter names in the original's application order (FilterChain.kt:79-91).
 ///
 /// The relative order is part of how the audio sounds, so it is pinned here and
 /// consumed by the DSP chain rather than being re-derived per call site.
@@ -57,13 +57,13 @@ pub struct Filters {
     /// Always empty for us — we ship no plugins. Kept so a client that sends it
     /// round-trips instead of erroring.
     ///
-    /// Not upstream's shape: v4 carries plugin filters as arbitrary *top-level*
-    /// keys inside `filters`, and this nests them under a `pluginFilters` key
+    /// Not upstream's shape: v4 carries plugin filters as arbitrary top-level
+    /// keys inside filters, and this nests them under a pluginFilters key
     /// and omits it when empty. Unobservable, because a plugin filter name only
     /// exists if a plugin defines one and this node has none — an unknown
-    /// top-level key is dropped either way. See `MAINTENANCE.md`'s "Post-auth
+    /// top-level key is dropped either way. See MAINTENANCE.md's "Post-auth
     /// resource limits and source reach" for why it is not worth restructuring
-    /// `Filters` for a path with no reachable caller.
+    /// Filters for a path with no reachable caller.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plugin_filters: BTreeMap<String, Value>,
 }
@@ -71,8 +71,8 @@ pub struct Filters {
 impl Filters {
     /// Names present in this request that the server has disabled.
     ///
-    /// Mirrors `Filters.validate` (`filters.kt:21-57`) including its ordering, which
-    /// the original joins into the 400 message verbatim — hence [`FILTER_ORDER`]
+    /// Mirrors Filters.validate (filters.kt:21-57) including its ordering, which
+    /// the original joins into the 400 message verbatim — hence FILTER_ORDER
     /// driving the walk rather than a second list that could drift from it.
     pub fn validate(&self, disabled: &[String]) -> Vec<String> {
         FILTER_ORDER
@@ -86,7 +86,7 @@ impl Filters {
     }
 
     /// Whether the named filter appears in this request. Names are the wire names,
-    /// i.e. the entries of [`FILTER_ORDER`].
+    /// i.e. the entries of FILTER_ORDER.
     fn contains(&self, name: &str) -> bool {
         match name {
             "volume" => self.volume.is_present(),

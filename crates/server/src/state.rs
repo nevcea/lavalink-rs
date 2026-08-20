@@ -15,15 +15,15 @@ use crate::stats::StatsCollector;
 use crate::voice::VoiceConnection;
 
 /// The crate's own build version. Used only for self-identification strings
-/// (`Info.jvm`, `Info.lavaplayer`) — clients don't parse those beyond display.
+/// (Info.jvm, Info.lavaplayer) — clients don't parse those beyond display.
 const SEMVER: &str = env!("CARGO_PKG_VERSION");
 
-/// What `/version` and `Info.version` report. Clients gate on `version.major < 4`
+/// What /version and Info.version report. Clients gate on version.major < 4
 /// and refuse to connect below it, so this must track the Lavalink protocol this
-/// node speaks, not the crate's own version. Reported as an exact `4.0.0` rather
-/// than `CARGO_PKG_VERSION`: this node speaks the v4 wire protocol, but a
-/// pre-release-shaped string (e.g. `4.0.0-rs.0.1.0`) sorts *below* `4.0.0` under
-/// semver, and a client checking `>= 4.0.0` would reject it. `4.0.0` is the floor
+/// node speaks, not the crate's own version. Reported as an exact 4.0.0 rather
+/// than CARGO_PKG_VERSION: this node speaks the v4 wire protocol, but a
+/// pre-release-shaped string (e.g. 4.0.0-rs.0.1.0) sorts below 4.0.0 under
+/// semver, and a client checking >= 4.0.0 would reject it. 4.0.0 is the floor
 /// of the wire contract this node implements and claims nothing added by later
 /// 4.0.x releases.
 const PROTOCOL_VERSION: &str = "4.0.0";
@@ -35,25 +35,25 @@ pub struct AppState {
     pub loader: Arc<Loader>,
     pub stats: Arc<StatsCollector>,
     pub info: Arc<Info>,
-    /// `info` serialized once at startup — `Info` never changes after this, so
-    /// `/v4/info` serves these bytes directly instead of re-serializing (and
-    /// deep-cloning `Info`'s `Vec`/`String` fields) on every request. `Bytes`
-    /// rather than `Arc<Vec<u8>>` so the handler's `.clone()` is a refcount
+    /// info serialized once at startup — Info never changes after this, so
+    /// /v4/info serves these bytes directly instead of re-serializing (and
+    /// deep-cloning Info's Vec/String fields) on every request. Bytes
+    /// rather than Arc<Vec<u8>> so the handler's .clone() is a refcount
     /// bump, not a copy of the whole buffer.
     pub info_json: axum::body::Bytes,
-    /// `info.version.semver` as bytes — `/version` serves these directly instead
-    /// of cloning the `String` on every request, the same reasoning as
-    /// `info_json` above.
+    /// info.version.semver as bytes — /version serves these directly instead
+    /// of cloning the String on every request, the same reasoning as
+    /// info_json above.
     pub version_text: axum::body::Bytes,
     /// Opens byte streams at playback time. Shared by every player.
     pub opener: Arc<StreamOpener>,
-    /// Filter names a `PATCH player` is rejected for naming. Fixed at startup, and
-    /// the complement of `info.filters` — computed here once so the two cannot
+    /// Filter names a PATCH player is rejected for naming. Fixed at startup, and
+    /// the complement of info.filters — computed here once so the two cannot
     /// disagree, and so a request carrying filters does not rebuild the list.
     pub disabled_filters: Arc<[String]>,
-    /// Fires once when the node is asked to shut down, so `ws.rs`'s per-connection
+    /// Fires once when the node is asked to shut down, so ws.rs's per-connection
     /// pump loop can send a clean close frame instead of being cut off mid-stream
-    /// when the process exits (`axum::serve`'s graceful shutdown otherwise only
+    /// when the process exits (axum::serve's graceful shutdown otherwise only
     /// stops accepting new connections and waits for existing ones to end on
     /// their own, which a healthy client never does by itself).
     pub shutdown: tokio::sync::watch::Receiver<()>,
@@ -112,22 +112,22 @@ impl AppState {
     /// Returns the guild's player and its voice connection, creating and spawning
     /// them if there is none.
     ///
-    /// Construction happens inside `build`, which `Session::get_or_create_player`
-    /// runs at most once per guild under its own lock — nothing in `build` awaits,
+    /// Construction happens inside build, which Session::get_or_create_player
+    /// runs at most once per guild under its own lock — nothing in build awaits,
     /// so nothing blocks while it is held. This is what keeps a race between two
     /// first-time callers for the same guild from registering a player from one
     /// caller alongside a voice connection from the other: see
-    /// `Session::get_or_create_player`'s docs for what that used to cost.
+    /// Session::get_or_create_player's docs for what that used to cost.
     ///
     /// The pair is returned together, not just the handle, so a caller can't
-    /// re-derive the voice connection with a second, independent `session.voice`
+    /// re-derive the voice connection with a second, independent session.voice
     /// lookup later — doing so would reopen the exact race this pairing exists to
     /// close, since a session teardown between the two lookups would silently
     /// return a different (or no) answer the second time.
     ///
-    /// Returns `None` if the session was torn down (resume deadline swept, or an
+    /// Returns None if the session was torn down (resume deadline swept, or an
     /// overflowing sink closed) while this call was reaching the actor build —
-    /// see `Session::get_or_create_player`'s docs.
+    /// see Session::get_or_create_player's docs.
     pub fn player(
         &self,
         session: &Arc<Session>,
@@ -247,7 +247,7 @@ mod tests {
     /// The same call that returns the handle also returns its voice connection —
     /// a second, independent lookup of the connection by guild id is exactly the
     /// TOCTOU this pairing exists to prevent, which is why no such accessor exists
-    /// on `Session` (see `AppState::player`'s doc comment).
+    /// on Session (see AppState::player's doc comment).
     #[tokio::test]
     async fn player_returns_its_own_voice_connection_paired() {
         let state = state();

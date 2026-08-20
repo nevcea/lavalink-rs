@@ -2,7 +2,7 @@
 //!
 //! Everything site-specific lives here — which URLs are ours, and how to turn one
 //! into something yt-dlp can extract. The extraction itself belongs to
-//! [`YtDlp`](super::ytdlp::YtDlp).
+//! YtDlp.
 
 use std::sync::Arc;
 
@@ -11,7 +11,7 @@ use super::{strip_scheme, SourceError, SourceLoad, SourceManager};
 
 pub struct YouTubeSource {
     backend: Arc<YtDlp>,
-    /// `youtubeSearchEnabled`. `false` leaves direct URLs and playlists claimed —
+    /// youtubeSearchEnabled. false leaves direct URLs and playlists claimed —
     /// only the search prefixes stop being claimed, the same distinction the
     /// original's key draws.
     search_enabled: bool,
@@ -87,7 +87,7 @@ impl SourceManager for YouTubeSource {
 
 /// The URL to hand yt-dlp for a playlist.
 ///
-/// A mix (`list=RD…`) is generated *from* a video and `/playlist?list=RD…` does not
+/// A mix (list=RD…) is generated from a video and /playlist?list=RD… does not
 /// resolve, so when a video id is known the watch form is used — it works for both
 /// kinds, while the bare form only works for real playlists.
 fn playlist_url(playlist_id: &str, video_id: Option<&str>) -> String {
@@ -99,8 +99,8 @@ fn playlist_url(playlist_id: &str, video_id: Option<&str>) -> String {
 
 /// Strips the scheme and the host prefixes YouTube answers on.
 ///
-/// `None` means the URL is not a YouTube one at all, which makes the identifier
-/// `empty` rather than an error — so a Vimeo link does not become a YouTube failure.
+/// None means the URL is not a YouTube one at all, which makes the identifier
+/// empty rather than an error — so a Vimeo link does not become a YouTube failure.
 fn youtube_host(identifier: &str) -> Option<&str> {
     let rest = strip_scheme(identifier)?;
     let rest = rest.strip_prefix("www.").unwrap_or(rest);
@@ -139,10 +139,10 @@ fn video_id_of(identifier: &str) -> Option<String> {
     }
 }
 
-/// Extracts a `list=` id from a YouTube URL.
+/// Extracts a list= id from a YouTube URL.
 ///
-/// Held to the same standard as [`video_id_of`]: an id that does not look like one
-/// is `None`, so a malformed URL becomes `empty` rather than a subprocess launch.
+/// Held to the same standard as video_id_of: an id that does not look like one
+/// is None, so a malformed URL becomes empty rather than a subprocess launch.
 fn playlist_id_of(identifier: &str) -> Option<String> {
     let rest = youtube_host(identifier)?;
     if !rest.starts_with("youtube.com/") && !rest.starts_with("youtu.be/") {
@@ -258,7 +258,7 @@ mod tests {
         }
     }
 
-    /// A mix does not resolve through `/playlist?list=`, so a known video keeps the
+    /// A mix does not resolve through /playlist?list=, so a known video keeps the
     /// watch form.
     #[test]
     fn a_playlist_with_a_known_video_uses_the_watch_form() {
@@ -272,8 +272,8 @@ mod tests {
         );
     }
 
-    /// `matches` has to claim playlists, or they never reach `load` at all and the
-    /// node answers `empty` for a perfectly good URL.
+    /// matches has to claim playlists, or they never reach load at all and the
+    /// node answers empty for a perfectly good URL.
     #[test]
     fn playlists_and_searches_are_claimed() {
         let source = source();
@@ -291,7 +291,7 @@ mod tests {
         ));
     }
 
-    /// `youtubeSearchEnabled: false` stops search prefixes from being claimed, but
+    /// youtubeSearchEnabled: false stops search prefixes from being claimed, but
     /// direct URLs and playlists are unaffected.
     #[test]
     fn disabling_search_leaves_direct_urls_claimed() {
@@ -308,8 +308,8 @@ mod tests {
         ));
     }
 
-    /// `ytmsearch:` must be claimed (so it reports `loadType: "error"`, not
-    /// `"empty"`) but refused rather than silently degraded to a plain YouTube
+    /// ytmsearch: must be claimed (so it reports loadType: "error", not
+    /// "empty") but refused rather than silently degraded to a plain YouTube
     /// search.
     #[test]
     fn ytmsearch_is_claimed_and_refused_rather_than_downgraded() {
