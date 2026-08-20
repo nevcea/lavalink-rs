@@ -45,6 +45,11 @@ fn bench_into(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::
         resampler.process_into(&input, &mut out);
         b.iter(|| {
             resampler.process_into(black_box(&input), black_box(&mut out));
+            // Weak sanity check, not a correctness guarantee: catches a regression
+            // that silently turns conversion into a no-op (a broken is_passthrough
+            // check, sinc never getting constructed when it should) rather than
+            // reporting a fast, wrong number with no signal.
+            debug_assert!(!out.is_empty(), "process_into produced nothing");
         });
     });
 }

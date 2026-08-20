@@ -9,6 +9,7 @@ use std::io::Read as _;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use lavalink_protocol::filters::Filters;
@@ -16,6 +17,7 @@ use lavalink_protocol::player::TrackInfo;
 use lavalink_server::audio::pump::{self, PumpConfig};
 use lavalink_server::audio::ring;
 use lavalink_server::audio::stream::StreamOpener;
+use lavalink_server::audio::PumpOutcome;
 
 const SAMPLE_RATE: u32 = 44_100;
 const CHANNELS: u16 = 2;
@@ -97,37 +99,53 @@ fn bench_pipeline(c: &mut Criterion) {
         ("5s_44100_stereo_wav_equalizer", equalizer()),
     ] {
         group.bench_function(BenchmarkId::new("run", name), |b| {
-            b.iter(|| {
-                let position = Arc::new(AtomicI64::new(0));
-                // Large enough to hold the whole track, so the pump is never blocked
-                // waiting on the ring — this measures decode+resample+filter alone.
-                let (writer, mut reader) = ring::channel(
-                    (TRACK_SECONDS * 1000.0) as u32 + 1000,
-                    Arc::clone(&position),
-                    Arc::new(ring::FrameCounters::default()),
-                );
-                let (_commands_tx, commands_rx) = mpsc::channel();
+            // Setup (ring/channel/config) and the post-run drain are both outside the
+            // timed span — only `pump::run` itself, i.e. decode+resample+filter, is
+            // measured. Folding the drain in here used to inflate every sample with
+            // an unrelated ring-read cost, the same conflation `ring.rs`'s
+            // `read_only` bench was restructured to avoid.
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let position = Arc::new(AtomicI64::new(0));
+                    // Large enough to hold the whole track, so the pump is never
+                    // blocked waiting on the ring — this measures decode+resample+
+                    // filter alone, not ring backpressure.
+                    let (writer, mut reader) = ring::channel(
+                        (TRACK_SECONDS * 1000.0) as u32 + 1000,
+                        Arc::clone(&position),
+                        Arc::new(ring::FrameCounters::default()),
+                    );
+                    let (_commands_tx, commands_rx) = mpsc::channel();
 
-                let config = PumpConfig {
-                    info: track_info(&path),
-                    start_position_ms: 0,
-                    end_time_ms: None,
-                    volume: 100,
-                    filters: filters.clone(),
-                    opener: Arc::new(StreamOpener::default()),
-                    resampling_quality: lavalink_server::config::ResamplingQuality::Low,
-                    interrupt: Arc::new(AtomicBool::new(false)),
-                    produced: Arc::new(AtomicBool::new(false)),
-                };
+                    let config = PumpConfig {
+                        info: track_info(&path),
+                        start_position_ms: 0,
+                        end_time_ms: None,
+                        volume: 100,
+                        filters: filters.clone(),
+                        opener: Arc::new(StreamOpener::default()),
+                        resampling_quality: lavalink_server::config::ResamplingQuality::Low,
+                        interrupt: Arc::new(AtomicBool::new(false)),
+                        produced: Arc::new(AtomicBool::new(false)),
+                    };
 
-                let outcome = pump::run(config, writer, commands_rx, position, &|| {});
+                    let start = Instant::now();
+                    let outcome = pump::run(config, writer, commands_rx, position, &|| {});
+                    total += start.elapsed();
 
-                // Drain so the reader's thread-local state doesn't accumulate across
-                // iterations; the ring itself is dropped with reader regardless.
-                let mut sink = [0u8; 4096];
-                while reader.read(&mut sink).unwrap_or(0) > 0 {}
+                    // A broken `open()` (bad path, decoder registry regression) returns
+                    // almost instantly via `PumpOutcome::Failed`, which would otherwise
+                    // report a suspiciously fast number for having decoded nothing —
+                    // the same check pump.rs's own tests make after every `pump::run`.
+                    assert!(matches!(outcome, PumpOutcome::Finished), "{outcome:?}");
 
-                outcome
+                    // Drain so the reader's thread-local state doesn't accumulate across
+                    // iterations; the ring itself is dropped with reader regardless.
+                    let mut sink = [0u8; 4096];
+                    while reader.read(&mut sink).unwrap_or(0) > 0 {}
+                }
+                total
             });
         });
     }
