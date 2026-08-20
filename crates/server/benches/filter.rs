@@ -111,6 +111,10 @@ fn bench_filter_chain(c: &mut Criterion) {
 
     group.bench_function(BenchmarkId::new("process", "no_filters"), |b| {
         let mut chain = FilterChain::new(&Filters::default(), CHANNELS);
+        // Hardening, not a live bug: confirms the baseline really is a no-op, so a
+        // future default change can't quietly turn this into a case that does work
+        // but gets compared as if it didn't.
+        debug_assert!(!chain.is_enabled(), "no_filters chain should be a no-op");
         let source = planar(CHANNELS, FRAMES);
         b.iter_batched(
             || source.clone(),
@@ -124,6 +128,10 @@ fn bench_filter_chain(c: &mut Criterion) {
 
     group.bench_function(BenchmarkId::new("process", "equalizer_only"), |b| {
         let mut chain = FilterChain::new(&equalizer_only(), CHANNELS);
+        // Hardening, not a live bug: catches a config that silently becomes neutral
+        // (see all_filters' doc comment below for the class of mistake this guards
+        // against) instead of quietly measuring an empty chain.
+        debug_assert!(chain.is_enabled(), "equalizer_only chain should not be a no-op");
         let source = planar(CHANNELS, FRAMES);
         b.iter_batched(
             || source.clone(),
@@ -137,6 +145,7 @@ fn bench_filter_chain(c: &mut Criterion) {
 
     group.bench_function(BenchmarkId::new("process", "all_filters"), |b| {
         let mut chain = FilterChain::new(&all_filters(), CHANNELS);
+        debug_assert!(chain.is_enabled(), "all_filters chain should not be a no-op");
         let source = planar(CHANNELS, FRAMES);
         b.iter_batched(
             || source.clone(),
@@ -163,6 +172,10 @@ fn bench_filter_stages(c: &mut Criterion) {
     for (name, filters) in single_filters() {
         group.bench_function(BenchmarkId::new("single", name), |b| {
             let mut chain = FilterChain::new(&filters, CHANNELS);
+            // Hardening: a future edit to single_filters() that accidentally lands on
+            // a neutral value for some filter would otherwise silently benchmark an
+            // empty chain for that stage instead of failing loudly.
+            debug_assert!(chain.is_enabled(), "{name} chain should not be a no-op");
             let source = planar(CHANNELS, FRAMES);
             b.iter_batched(
                 || source.clone(),
@@ -184,6 +197,7 @@ fn bench_filter_stages(c: &mut Criterion) {
         let filters = equalizer_bands(count);
         group.bench_function(BenchmarkId::new("equalizer_bands", count), |b| {
             let mut chain = FilterChain::new(&filters, CHANNELS);
+            debug_assert!(chain.is_enabled(), "equalizer_bands({count}) should not be a no-op");
             let source = planar(CHANNELS, FRAMES);
             b.iter_batched(
                 || source.clone(),
@@ -217,6 +231,11 @@ fn bench_filter_interleaved(c: &mut Criterion) {
     ] {
         group.bench_function(BenchmarkId::new("process", name), |b| {
             let mut chain = FilterChain::new(&filters, CHANNELS);
+            // filter_interleaved short-circuits the transpose entirely when the chain
+            // is disabled (pump.rs's filter_interleaved), so a neutralized config here
+            // wouldn't just under-measure the filter cost — it would silently switch
+            // which code path this group is benchmarking.
+            debug_assert!(chain.is_enabled(), "{name} chain should not be a no-op");
             // The pump's own scratch, reused across buffers (pump.rs's planar
             // and filtered), so this measures the transpose and not a per-buffer
             // allocation.
