@@ -162,6 +162,8 @@ docker run --rm -p 2333:2333 \
 
 No configuration or password is baked into the image. The runtime image does
 include `yt-dlp`, so its source managers work once enabled in the mounted file.
+The process runs as UID/GID `10001`; mounted configuration and local-source files
+must be readable by that user.
 
 ## Security notes
 
