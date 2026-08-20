@@ -1,7 +1,7 @@
 # lavalink-rs
 
 A Lavalink v4 compatible audio node, written in Rust — the wire protocol
-matches upstream exactly, everything else is rebuilt. See `CLAUDE.md` for
+matches upstream exactly, everything else is rebuilt. See `AGENTS.md` for
 architecture, `MAINTENANCE.md` for what's deliberately not implemented.
 
 ## Crates
