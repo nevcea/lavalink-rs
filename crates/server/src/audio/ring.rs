@@ -542,7 +542,7 @@ impl Read for RingReader {
         self.shared.advance_frames(take as i64);
         self.shared.refresh_position();
         drop(buffer);
-        self.shared.space.notify_all();
+        self.shared.space.notify_one();
 
         self.shared.frames.record_sent(take);
 

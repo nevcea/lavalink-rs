@@ -68,7 +68,7 @@ async fn stats_tick(state: AppState) {
         let (players, playing) = crate::stats::count(&rosters);
 
         // Sampled once for the whole node, then shared by every session.
-        let node = state.stats.sample(players, playing);
+        let node = state.stats.sample_async(players, playing).await;
         let now_ms = crate::player::now_epoch_ms();
         for (session, roster) in sessions.iter().zip(&rosters) {
             // Per session, not per node: the original's StatsCollector.retrieveStats

@@ -65,10 +65,9 @@ pub fn frame_stats(samples: impl Iterator<Item = (u32, u32, bool)>) -> Option<Fr
 
 /// How long a machine sample is reused before it is taken again.
 ///
-/// Refreshing reads /proc, and it happens under a lock on a runtime worker
-/// thread — fine on the 60s stats tick, but GET /v4/stats shares the same path and
-/// a client may poll it as fast as it likes. Without this, a busy poller blocks a
-/// worker on file I/O and serializes against the tick.
+/// Refreshing reads /proc under a lock. GET /v4/stats shares the same path and a
+/// client may poll it as fast as it likes, so the refresh runs on the blocking
+/// pool and this TTL prevents a busy poller from repeatedly doing OS I/O.
 ///
 /// A second is well under the tick interval, so the tick always takes a fresh
 /// sample and its numbers are unchanged. It is also above sysinfo's minimum useful
@@ -106,10 +105,11 @@ impl StatsCollector {
         }
     }
 
-    /// Samples the node. Called from the stats tick and from GET /v4/stats.
+    /// Samples the node.
     ///
     /// The player counts and the uptime are always live; only the machine half is
-    /// rate-limited (see SAMPLE_TTL).
+    /// rate-limited (see SAMPLE_TTL). This can refresh files exposed by the OS;
+    /// async callers should use [`Self::sample_async`].
     pub fn sample(&self, players: i32, playing_players: i32) -> StatsData {
         let (memory, cpu) = self.machine();
 
@@ -123,6 +123,14 @@ impl StatsCollector {
             memory,
             cpu,
         }
+    }
+
+    /// Samples without blocking a Tokio worker thread.
+    pub async fn sample_async(self: &Arc<Self>, players: i32, playing_players: i32) -> StatsData {
+        let collector = Arc::clone(self);
+        tokio::task::spawn_blocking(move || collector.sample(players, playing_players))
+            .await
+            .expect("the stats sampler does not panic")
     }
 
     fn machine(&self) -> (Memory, Cpu) {
@@ -233,19 +241,19 @@ mod tests {
 
     /// GET /v4/stats is client-driven at an unbounded rate and shares this path
     /// with the 60s tick, so a second call in quick succession must not go back to
-    /// /proc — that read happens under a lock, on a runtime worker thread.
+    /// /proc — that read happens under a lock on the blocking pool.
     ///
     /// Checks the recorded sample time rather than the reported numbers: two
     /// uncached refreshes taken microseconds apart would very likely report the same
     /// memory anyway, so equal output would not prove the cache did anything.
-    #[test]
-    fn a_second_sample_inside_the_ttl_does_not_refresh_again() {
-        let collector = StatsCollector::new(Instant::now());
+    #[tokio::test]
+    async fn a_second_sample_inside_the_ttl_does_not_refresh_again() {
+        let collector = Arc::new(StatsCollector::new(Instant::now()));
 
-        collector.sample(1, 1);
+        collector.sample_async(1, 1).await;
         let taken_at = crate::lock(&collector.machine).last.unwrap().0;
 
-        let second = collector.sample(2, 2);
+        let second = collector.sample_async(2, 2).await;
         assert_eq!(
             crate::lock(&collector.machine).last.unwrap().0,
             taken_at,

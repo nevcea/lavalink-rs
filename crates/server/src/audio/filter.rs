@@ -216,6 +216,7 @@ impl FilterChain {
             stages.push(Box::new(LowPassFilter::new(low_pass, channels)));
         }
 
+        stages.retain(|stage| stage.is_enabled());
         Self { stages }
     }
 
@@ -224,15 +225,13 @@ impl FilterChain {
     /// The original uses this to skip building a pipeline at all
     /// (FilterChain.kt:93).
     pub fn is_enabled(&self) -> bool {
-        self.stages.iter().any(|stage| stage.is_enabled())
+        !self.stages.is_empty()
     }
 
     /// Applies every enabled filter in place, in order.
     pub fn process(&mut self, channels: &mut [Vec<f32>]) {
         for stage in &mut self.stages {
-            if stage.is_enabled() {
-                stage.process(channels);
-            }
+            stage.process(channels);
         }
     }
 

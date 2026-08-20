@@ -18,7 +18,7 @@ use super::{SourceError, SourceLoad, SourceManager, SourceTrack};
 pub struct LocalSource;
 
 impl LocalSource {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 }
