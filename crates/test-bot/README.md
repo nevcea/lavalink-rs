@@ -92,6 +92,13 @@ port, and runs the bot in the foreground:
 scripts/dev.sh
 ```
 
+After both binaries have been built once, skip Cargo's checks for a faster
+restart. Rebuild normally after changing code:
+
+```bash
+scripts/dev.sh --no-build
+```
+
 It reads the repo-root `.env`. Pressing Ctrl+C stops the bot and the background
 node. The helper expects a simple `host:port` in `LAVALINK_HOST` and uses Bash's
 `/dev/tcp`; use the manual workflow on shells that do not provide it.
