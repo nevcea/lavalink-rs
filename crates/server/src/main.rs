@@ -216,3 +216,22 @@ async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<()>) {
     tracing::info!("shutting down");
     let _ = shutdown_tx.send(());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn specific_sources_precede_the_generic_http_source() {
+        let mut config = Config::default();
+        let sources = &mut config.lavalink.server.sources;
+        sources.local = true;
+        sources.http = true;
+        sources.getyarn = true;
+
+        let managers = source_managers(&config, None, None);
+        let names: Vec<_> = managers.iter().map(|manager| manager.name()).collect();
+
+        assert_eq!(names, ["local", "getyarn.io", "http"]);
+    }
+}
