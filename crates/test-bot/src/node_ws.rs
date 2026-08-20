@@ -117,6 +117,7 @@ async fn handle(
             tracing::debug!(
                 players = stats.players,
                 playing = stats.playing_players,
+                frame_stats = ?stats.frame_stats,
                 "stats"
             );
         }
@@ -154,6 +155,9 @@ fn log_event(event: EmittedEvent) {
             tracing::error!(
                 guild = %guild_id,
                 title = %track.info.title,
+                author = %track.info.author,
+                source = %track.info.source_name,
+                identifier = %track.info.identifier,
                 ?exception,
                 "TrackExceptionEvent"
             );
