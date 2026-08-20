@@ -520,7 +520,11 @@ impl Read for RingReader {
             let from_front = take.min(front.len());
             let mut written = 0;
             for source in [&front[..from_front], &back[..take - from_front]] {
-                for (chunk, sample) in out[written..].chunks_exact_mut(4).zip(source) {
+                for (chunk, sample) in out[written..]
+                    .as_chunks_mut::<4>().0
+                    .iter_mut()
+                    .zip(source)
+                {
                     chunk.copy_from_slice(&sample.to_le_bytes());
                 }
                 written += source.len() * 4;
@@ -600,8 +604,9 @@ mod tests {
         let mut bytes = vec![0u8; count * 4];
         let read = reader.read(&mut bytes).unwrap();
         bytes[..read]
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<4>().0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect()
     }
 
@@ -678,8 +683,9 @@ mod tests {
         let mut out = [0u8; 12];
         assert_eq!(reader.read(&mut out).unwrap(), 12);
         let samples: Vec<f32> = out
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<4>().0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect();
         assert_eq!(samples, vec![1.0, 2.0, 3.0]);
     }

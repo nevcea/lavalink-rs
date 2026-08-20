@@ -904,8 +904,9 @@ mod tests {
             }
             samples.extend(
                 buffer[..read]
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())),
+                    .as_chunks::<4>().0
+                    .iter()
+                    .map(|chunk| f32::from_le_bytes(*chunk)),
             );
         }
         samples
@@ -1555,8 +1556,9 @@ mod tests {
         let mut out = vec![0u8; capacity_samples * 4 + 64];
         let read = std::io::Read::read(&mut reader, &mut out).unwrap();
         let samples: Vec<f32> = out[..read]
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<4>().0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect();
         assert!(
             !samples.contains(&9.75),
