@@ -4,54 +4,46 @@
 //! sequence. Every message is logged because the test is concerned with everything
 //! the node sends.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use lavalink_protocol::{EmittedEvent, Message};
-use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+
+use crate::node::Node;
 
 /// Connects and reads until the socket closes, then retries.
 ///
 /// Reconnecting rather than exiting is what makes the bot usable while the node is
 /// being restarted, which during testing is most of the time. The session id is
-/// cleared on disconnect so a command cannot address a session the node has
-/// forgotten.
+/// retained so the next connection can ask the node to resume it; a fresh Ready
+/// replaces it when the node no longer has that session.
 pub async fn run(
-    host: String,
-    password: String,
+    node: Node,
     user_id: u64,
-    session: Arc<RwLock<Option<String>>>,
 ) {
     loop {
-        if let Err(error) = connect_once(&host, &password, user_id, &session).await {
+        if let Err(error) = connect_once(&node, user_id).await {
             tracing::warn!(%error, "node websocket dropped");
         }
-        *session.write().await = None;
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
 async fn connect_once(
-    host: &str,
-    password: &str,
+    node: &Node,
     user_id: u64,
-    session: &Arc<RwLock<Option<String>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut request = format!("ws://{host}/v4/websocket").into_client_request()?;
-    let headers = request.headers_mut();
-    headers.insert("Authorization", password.parse()?);
-    headers.insert("User-Id", user_id.to_string().parse()?);
-    // Request resumption only when the matching resume timeout is also configured.
-    headers.insert(
-        "Client-Name",
-        concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")).parse()?,
-    );
-
+    let session_id = node.current_session_id().await;
+    let request = websocket_request(
+        &node.host,
+        &node.password,
+        user_id,
+        session_id.as_deref(),
+    )?;
     let (mut stream, _) = tokio_tungstenite::connect_async(request).await?;
-    tracing::info!("connected to the node websocket");
+    tracing::info!(resuming = session_id.is_some(), "connected to the node websocket");
 
     while let Some(frame) = stream.next().await {
         let text = match frame? {
@@ -69,7 +61,7 @@ async fn connect_once(
         };
 
         match serde_json::from_str::<Message>(&text) {
-            Ok(message) => handle(message, session).await,
+            Ok(message) => handle(message, node).await?,
             // Not a warning to be tidy: a message this bot cannot parse is either a
             // node bug or a protocol gap, and the raw text is the evidence.
             Err(error) => tracing::error!(%error, raw = %text, "unparseable node message"),
@@ -79,11 +71,38 @@ async fn connect_once(
     Ok(())
 }
 
-async fn handle(message: Message, session: &Arc<RwLock<Option<String>>>) {
+fn websocket_request(
+    host: &str,
+    password: &str,
+    user_id: u64,
+    session_id: Option<&str>,
+) -> Result<
+    tokio_tungstenite::tungstenite::http::Request<()>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let mut request = format!("ws://{host}/v4/websocket").into_client_request()?;
+    let headers = request.headers_mut();
+    headers.insert("Authorization", password.parse()?);
+    headers.insert("User-Id", user_id.to_string().parse()?);
+    headers.insert(
+        "Client-Name",
+        concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")).parse()?,
+    );
+    if let Some(session_id) = session_id {
+        headers.insert("Session-Id", session_id.parse()?);
+    }
+    Ok(request)
+}
+
+async fn handle(
+    message: Message,
+    node: &Node,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match message {
         Message::Ready { resumed, session_id } => {
             tracing::info!(resumed, session_id, "ready");
-            *session.write().await = Some(session_id);
+            node.set_session_id(session_id.clone()).await;
+            node.enable_resuming(&session_id).await?;
         }
         Message::PlayerUpdate { state, guild_id } => {
             tracing::info!(
@@ -103,6 +122,7 @@ async fn handle(message: Message, session: &Arc<RwLock<Option<String>>>) {
         }
         Message::Event(event) => log_event(event),
     }
+    Ok(())
 }
 
 /// Events are logged at info with their distinguishing field spelled out, because
@@ -168,5 +188,22 @@ fn log_event(event: EmittedEvent) {
                 "WebSocketClosedEvent"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_known_session_is_requested_on_reconnect() {
+        let request = websocket_request("localhost:2333", "secret", 42, Some("session-1")).unwrap();
+        assert_eq!(request.headers()["Session-Id"], "session-1");
+    }
+
+    #[test]
+    fn a_first_connection_has_no_session_header() {
+        let request = websocket_request("localhost:2333", "secret", 42, None).unwrap();
+        assert!(!request.headers().contains_key("Session-Id"));
     }
 }

@@ -73,9 +73,7 @@ impl EventHandler for Handler {
             tracing::error!(%error, "failed to register slash commands");
         }
 
-        let session = self.node.session_slot();
-        let (host, password) = (self.node.host.clone(), self.node.password.clone());
-        tokio::spawn(node_ws::run(host, password, user_id, session));
+        tokio::spawn(node_ws::run(self.node.clone(), user_id));
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {

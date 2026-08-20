@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use lavalink_protocol::player::{Player, PlayerUpdate, Players};
-use lavalink_protocol::{Info, LoadResult, StatsData};
+use lavalink_protocol::{Info, LoadResult, Omissible, Session, SessionUpdate, StatsData};
 use reqwest::{Method, StatusCode};
 use tokio::sync::RwLock;
 
@@ -33,6 +33,7 @@ pub enum NodeError {
 ///
 /// The session ID arrives asynchronously over the WebSocket (op: "ready"), so it
 /// lives behind a lock shared by the WebSocket task and command handlers.
+#[derive(Clone)]
 pub struct Node {
     client: reqwest::Client,
     pub(crate) host: String,
@@ -50,13 +51,16 @@ impl Node {
         }
     }
 
-    /// Filled by the WebSocket task on ready.
-    pub fn session_slot(&self) -> Arc<RwLock<Option<String>>> {
-        Arc::clone(&self.session_id)
+    pub(crate) async fn current_session_id(&self) -> Option<String> {
+        self.session_id.read().await.clone()
+    }
+
+    pub(crate) async fn set_session_id(&self, session_id: String) {
+        *self.session_id.write().await = Some(session_id);
     }
 
     pub async fn session_id(&self) -> Result<String, NodeError> {
-        self.session_id.read().await.clone().ok_or(NodeError::NoSession)
+        self.current_session_id().await.ok_or(NodeError::NoSession)
     }
 
     /// Sends a request and checks the status, leaving the body's shape (or absence)
@@ -103,6 +107,20 @@ impl Node {
 
     pub async fn stats(&self) -> Result<StatsData, NodeError> {
         self.send(Method::GET, "/v4/stats", &[], NO_BODY).await
+    }
+
+    pub(crate) async fn enable_resuming(&self, session_id: &str) -> Result<Session, NodeError> {
+        let update = SessionUpdate {
+            resuming: Omissible::Present(true),
+            timeout_seconds: Omissible::Present(60),
+        };
+        self.send(
+            Method::PATCH,
+            &format!("/v4/sessions/{session_id}"),
+            &[],
+            Some(&update),
+        )
+        .await
     }
 
     /// GET /v4/loadtracks. The identifier is whatever the user typed — a URL, a

@@ -117,9 +117,10 @@ If `.env` contains the required values, the second terminal only needs
 
 Successful startup has three visible milestones: the bot logs into Discord,
 connects to the node websocket, and receives a ready message with a session ID.
-Command registration is silent unless it fails. A slash command issued before
-the websocket is ready may fail with "no session yet"; retry after the ready
-log.
+It enables a 60-second resume window automatically; after a brief node websocket
+disconnect, the next ready log should contain `resumed=true` and the same session
+ID. Command registration is silent unless it fails. A slash command issued before
+the first ready message may fail with "no session yet"; retry after the ready log.
 
 ## Commands
 
@@ -183,6 +184,8 @@ re-sends it when one filter changes.
    `/clearfilters`.
 7. Run `/play` again while a track is active, then `/stop` and `/leave`, and
    verify the event order below.
+8. Interrupt the node websocket for less than 60 seconds and verify the bot
+   reconnects with `resumed=true` without losing the player.
 
 For audio-pipeline work, repeat with the source/codec/container that changed.
 For concurrency work, use multiple guilds or bot instances and inspect
