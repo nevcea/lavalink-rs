@@ -550,7 +550,7 @@ impl PlayerActor {
                 });
 
                 self.emit(EmittedEvent::TrackStart {
-                    guild_id: self.guild_id_string(),
+                    guild_id: self.guild_id_str.clone(),
                     track: Box::new(track),
                 });
             }
@@ -573,7 +573,7 @@ impl PlayerActor {
                 self.model.connection = VoiceConnection::Disconnected;
                 self.model.ping_ms = -1;
                 self.emit(EmittedEvent::WebSocketClosed {
-                    guild_id: self.guild_id_string(),
+                    guild_id: self.guild_id_str.clone(),
                     code,
                     // The original forwards Discord's reason string; we do not get
                     // one from every path, so an empty string stands in — which is
@@ -601,7 +601,7 @@ impl PlayerActor {
                     return;
                 };
                 self.emit(EmittedEvent::TrackException {
-                    guild_id: self.guild_id_string(),
+                    guild_id: self.guild_id_str.clone(),
                     track: Box::new(track),
                     exception,
                 });
@@ -633,7 +633,7 @@ impl PlayerActor {
 
         self.stuck_reported = true;
         self.emit(EmittedEvent::TrackStuck {
-            guild_id: self.guild_id_string(),
+            guild_id: self.guild_id_str.clone(),
             track: Box::new(track),
             threshold_ms: self.stuck_threshold.as_millis() as i64,
         });
@@ -648,7 +648,7 @@ impl PlayerActor {
 
         if let Some(track) = track {
             self.emit(EmittedEvent::TrackEnd {
-                guild_id: self.guild_id_string(),
+                guild_id: self.guild_id_str.clone(),
                 track: Box::new(track),
                 reason,
             });
@@ -666,7 +666,7 @@ impl PlayerActor {
     fn emit_player_update(&self) {
         let _ = self.sink.send(Message::PlayerUpdate {
             state: self.model.wire_state(self.position(), now_epoch_ms()),
-            guild_id: self.guild_id_string(),
+            guild_id: self.guild_id_str.clone(),
         });
     }
 
@@ -678,10 +678,6 @@ impl PlayerActor {
         if let Err(SendError::Overflow) = self.sink.send(Message::Event(event)) {
             tracing::warn!(guild_id = %self.guild_id_str, "dropped an event: essential queue overflowed");
         }
-    }
-
-    fn guild_id_string(&self) -> String {
-        self.guild_id_str.clone()
     }
 }
 

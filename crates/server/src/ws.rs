@@ -380,17 +380,6 @@ mod tests {
         crate::session::SessionRegistry::new().open(1, None)
     }
 
-    /// sink is the session's own — matching AppState::player's production
-    /// wiring — so an event a spawned actor emits (here, the PlayerUpdate
-    /// Command::EmitUpdate triggers) lands where a test reading the
-    /// session's sink can see it.
-    fn dummy_pair(
-        guild_id: u64,
-        sink: std::sync::Arc<crate::sink::Sink>,
-    ) -> (crate::player::PlayerHandle, std::sync::Arc<crate::voice::VoiceConnection>) {
-        crate::testing::dummy_pair(guild_id, sink)
-    }
-
     /// The bug this guards: recv() already removed the message from the
     /// essential lane before a write that fails or times out ever runs, so
     /// without restoring it the message that was supposed to be delivered (or
@@ -431,10 +420,14 @@ mod tests {
     async fn resuming_emits_a_fresh_update_for_every_player() {
         let session = dummy_session();
         session
-            .get_or_create_player(1, || dummy_pair(1, std::sync::Arc::clone(&session.sink)))
+            .get_or_create_player(1, || {
+                crate::testing::dummy_pair(1, std::sync::Arc::clone(&session.sink))
+            })
             .unwrap();
         session
-            .get_or_create_player(2, || dummy_pair(2, std::sync::Arc::clone(&session.sink)))
+            .get_or_create_player(2, || {
+                crate::testing::dummy_pair(2, std::sync::Arc::clone(&session.sink))
+            })
             .unwrap();
 
         // A paused sink is what a real resume transitions out of; snapshots

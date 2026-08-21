@@ -162,6 +162,14 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_clip_urls_to_https_without_dropping_the_path() {
+        assert_eq!(
+            clip_url("http://www.getyarn.io/yarn-clip/abc-123?foo=bar").as_deref(),
+            Some("https://getyarn.io/yarn-clip/abc-123?foo=bar")
+        );
+    }
+
+    #[test]
     fn other_sites_are_not_ours() {
         let source = source();
         for identifier in [

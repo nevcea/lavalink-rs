@@ -705,13 +705,18 @@ mod tests {
         }
     }
 
+    fn listening_server() -> (TcpListener, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        (listener, url)
+    }
+
     /// A server that answers the first request with a body cut short of what
     /// Content-Length promised — as if the connection dropped mid-stream — and the
     /// second (the resume, identified by its Range header) with the rest, as 200
     /// or 206 depending on resume_status.
     fn spawn_dropping_server(full_body: &'static [u8], cut_at: usize) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (listener, url) = listening_server();
 
         std::thread::spawn(move || {
             for attempt in 0..2 {
@@ -744,7 +749,7 @@ mod tests {
             }
         });
 
-        format!("http://{addr}")
+        url
     }
 
     /// A server that answers the first request with the full body and Accept-Ranges,
@@ -752,8 +757,7 @@ mod tests {
     /// real server sends when the requested range starts at or past the resource's
     /// end.
     fn spawn_server_that_416s_past_eof(full_body: &'static [u8]) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (listener, url) = listening_server();
 
         std::thread::spawn(move || {
             for attempt in 0..2 {
@@ -779,7 +783,7 @@ mod tests {
             }
         });
 
-        format!("http://{addr}")
+        url
     }
 
     /// The bug this fix targets: symphonia 0.6's probe seeks near the end of a
@@ -816,8 +820,7 @@ mod tests {
         const BODY: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
         const CUT_AT: usize = 10;
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (listener, url) = listening_server();
 
         std::thread::spawn(move || {
             // One initial response plus every reconnect the retry budget allows.
@@ -846,7 +849,7 @@ mod tests {
             }
         });
 
-        let mut source = HttpMediaSource::open(&format!("http://{addr}"), None, None).unwrap();
+        let mut source = HttpMediaSource::open(&url, None, None).unwrap();
         assert_eq!(source.byte_len(), Some(BODY.len() as u64));
 
         let mut collected = Vec::new();
@@ -912,8 +915,7 @@ mod tests {
         const BODY: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
         const CUT_AT: usize = 10;
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (listener, url) = listening_server();
         let reconnected = Arc::new(AtomicBool::new(false));
         let reconnected_flag = Arc::clone(&reconnected);
 
@@ -940,7 +942,7 @@ mod tests {
 
         let interrupt = Arc::new(AtomicBool::new(false));
         let mut source = HttpMediaSource::open_with_timeouts(
-            &format!("http://{addr}"),
+            &url,
             None,
             None,
             CONNECT_TIMEOUT,
@@ -1068,8 +1070,7 @@ mod tests {
         const BODY: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
         const STALL_AT: usize = 10;
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (listener, url) = listening_server();
 
         std::thread::spawn(move || {
             for attempt in 0..2 {
@@ -1107,7 +1108,7 @@ mod tests {
         });
 
         let mut source = HttpMediaSource::open_with_timeouts(
-            &format!("http://{addr}"),
+            &url,
             None,
             None,
             CONNECT_TIMEOUT,
@@ -1144,8 +1145,7 @@ mod tests {
     /// what ends the read.
     #[test]
     fn a_silent_connection_is_bounded_by_the_request_ceiling_not_just_the_idle_gap() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (listener, url) = listening_server();
 
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1163,7 +1163,7 @@ mod tests {
         });
 
         let mut source = HttpMediaSource::open_with_timeouts(
-            &format!("http://{addr}"),
+            &url,
             None,
             None,
             CONNECT_TIMEOUT,
@@ -1201,8 +1201,7 @@ mod tests {
     /// its own rather than through the reconnect path.
     #[test]
     fn a_trickling_connection_fails_the_throughput_floor() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (listener, url) = listening_server();
 
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1220,7 +1219,7 @@ mod tests {
         });
 
         let mut source = HttpMediaSource::open_with_timeouts(
-            &format!("http://{addr}"),
+            &url,
             None,
             None,
             CONNECT_TIMEOUT,
@@ -1266,8 +1265,7 @@ mod tests {
     /// marker then arrives a full window later against a window_bytes of 0.
     #[test]
     fn a_clean_end_of_stream_is_not_charged_against_the_throughput_floor() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (listener, url) = listening_server();
 
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1285,7 +1283,7 @@ mod tests {
         });
 
         let mut source = HttpMediaSource::open_with_timeouts(
-            &format!("http://{addr}"),
+            &url,
             None,
             None,
             CONNECT_TIMEOUT,
@@ -1317,8 +1315,7 @@ mod tests {
     /// still surface as an error rather than retry forever.
     #[test]
     fn a_non_seekable_source_does_not_retry_on_a_dropped_connection() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (listener, url) = listening_server();
 
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1331,7 +1328,7 @@ mod tests {
             stream.write_all(b"short").unwrap();
         });
 
-        let mut source = HttpMediaSource::open(&format!("http://{addr}"), None, None).unwrap();
+        let mut source = HttpMediaSource::open(&url, None, None).unwrap();
         assert!(!source.is_seekable());
 
         let mut buffer = [0u8; 4096];
