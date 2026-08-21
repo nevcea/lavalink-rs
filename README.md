@@ -68,11 +68,20 @@ lavalink-protocol = { git = "https://github.com/nevcea/lavalink-rs", package = "
 - A C compiler and CMake, used to build the vendored Opus library
 - A C++ compiler and `libclang`, used by the timescale filter's
   `signalsmith-stretch` bindings
-- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) on `PATH`, optional
+- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) 2026.08.19 or newer on `PATH`, optional
 
 `yt-dlp` is detected once during startup. If it is missing, the four dependent
 sources are disabled and omitted from `/v4/info` instead of preventing the node
-from starting.
+from starting. For YouTube, keep a supported JavaScript runtime on `PATH`; Deno
+is yt-dlp's default and highest-priority runtime.
+
+After updating yt-dlp, verify a full download rather than relying on `--test`,
+which only fetches the beginning of the file:
+
+```sh
+yt-dlp --no-playlist -f "bestaudio[acodec=aac]/bestaudio[ext=m4a]/bestaudio[acodec!=opus]/bestaudio/best" \
+  -o '/tmp/ytdlp-check.%(ext)s' 'https://www.youtube.com/watch?v=S0G-sVyabT0'
+```
 
 ## Quick start
 

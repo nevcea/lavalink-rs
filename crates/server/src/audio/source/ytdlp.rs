@@ -145,10 +145,9 @@ impl YtDlp {
             return None;
         }
 
-        // yt-dlp versions are dates: 2024.08.06. Anything older than this is likely
-        // to fail against current sites, and saying so at startup beats a confusing
-        // extraction error later.
-        if version.as_str() < "2024.01.01" {
+        // yt-dlp versions are dates: 2026.08.19. Anything older than the verified
+        // baseline may resolve YouTube URLs that fail with 403 partway through.
+        if version.as_str() < "2026.08.19" {
             tracing::warn!(
                 version = %version,
                 "this yt-dlp is old and may fail to extract; consider updating"
