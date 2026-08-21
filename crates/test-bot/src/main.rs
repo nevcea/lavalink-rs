@@ -83,15 +83,37 @@ impl EventHandler for Handler {
 
         // Node REST calls can outlast the 3s Discord gives an initial response, so
         // acknowledge first and deliver the real answer as an edit.
-        if let Err(error) = command.defer(&ctx.http).await {
-            tracing::warn!(%error, "failed to defer interaction");
+        let deferred = match command.defer(&ctx.http).await {
+            Ok(()) => true,
+            Err(error) => {
+                let expired = is_unknown_interaction(&error);
+                tracing::warn!(
+                    command = %command.data.name,
+                    interaction = %command.id,
+                    expired,
+                    %error,
+                    "failed to defer interaction"
+                );
+                if !expired {
+                    return;
+                }
+                false
+            }
+        };
+
+        let reply = self.dispatch(&ctx, &command).await;
+        if !deferred {
+            if let Err(error) = reply {
+                tracing::warn!(
+                    command = %command.data.name,
+                    interaction = %command.id,
+                    %error,
+                    "command failed after interaction expired"
+                );
+            }
             return;
         }
-
-        let reply = self
-            .dispatch(&ctx, &command)
-            .await
-            .unwrap_or_else(|error| format!("`{error}`"));
+        let reply = reply.unwrap_or_else(|error| format!("`{error}`"));
 
         if let Err(error) =
             command.edit_response(&ctx.http, EditInteractionResponse::new().content(reply)).await
@@ -99,6 +121,18 @@ impl EventHandler for Handler {
             tracing::warn!(%error, "failed to edit interaction response");
         }
     }
+}
+
+fn is_unknown_interaction(error: &serenity::Error) -> bool {
+    matches!(
+        error,
+        serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response))
+            if is_unknown_interaction_code(response.error.code)
+    )
+}
+
+fn is_unknown_interaction_code(code: isize) -> bool {
+    code == 10062
 }
 
 impl Handler {
@@ -546,4 +580,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(%host, "starting; node websocket opens once Discord confirms login");
     client.start().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_expired_interaction_runs_without_a_response() {
+        assert!(is_unknown_interaction_code(10062));
+        assert!(!is_unknown_interaction_code(40060));
+    }
 }
