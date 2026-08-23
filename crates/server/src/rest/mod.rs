@@ -44,8 +44,16 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v4/routeplanner/free/all", post(route_planner_disabled));
 
-    Router::new()
-        .route("/version", get(info::version))
+    let mut root = Router::new().route("/version", get(info::version));
+    if state.config.metrics.prometheus.enabled {
+        let endpoint = match state.config.metrics.prometheus.endpoint.as_str() {
+            "" => "/metrics",
+            endpoint => endpoint,
+        };
+        root = root.route(endpoint, get(info::metrics));
+    }
+
+    root
         .merge(v4)
         // Both must come after every .route/.merge above: fallback only
         // covers paths that match nothing at all, and method_not_allowed_fallback
@@ -132,11 +140,124 @@ mod tests {
         )
     }
 
+    fn metrics_state(enabled: bool, endpoint: &str) -> AppState {
+        let mut config = crate::config::Config::default();
+        config.lavalink.server.password = "test".into();
+        config.metrics.prometheus.enabled = enabled;
+        config.metrics.prometheus.endpoint = endpoint.into();
+        crate::state::AppState::new(
+            config,
+            crate::loader::Loader::new(Vec::new()),
+            crate::audio::stream::StreamOpener::default(),
+            std::time::Instant::now(),
+            tokio::sync::watch::channel(()).1,
+        )
+    }
+
     async fn body_json(response: axum::response::Response) -> serde_json::Value {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn body_text(response: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn enabled_prometheus_endpoint_is_anonymous_and_filters_names() {
+        let app = router(metrics_state(true, "/prometheus"));
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/prometheus?name%5B%5D=lavalink_cpu_cores&name%5B%5D=unknown")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+        let body = body_text(response).await;
+        assert!(body.contains("# TYPE lavalink_cpu_cores gauge\n"));
+        assert!(!body.contains("lavalink_players_total"));
+        assert!(!body.contains("unknown"));
+
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/prometheus?name%5B%5D=")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.is_empty());
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/prometheus/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn configured_metrics_path_is_auth_exempt_even_when_disabled() {
+        let app = router(metrics_state(false, "/metrics"));
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(response).await["path"], "/metrics");
+    }
+
+    #[tokio::test]
+    async fn empty_metrics_endpoint_uses_metrics_route_without_auth_exemption() {
+        let app = router(metrics_state(true, ""));
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/metrics")
+                    .header(header::AUTHORIZATION, "test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// An unmatched path with no credentials must fail on auth before it ever

@@ -109,10 +109,11 @@ yt-dlp --no-playlist -f "bestaudio[acodec=aac]/bestaudio[ext=m4a]/bestaudio[acod
    curl -H "Authorization: youshallnotpass" http://localhost:2333/v4/info
    ```
 
-The default bind address is `0.0.0.0:2333`. REST endpoints live under `/v4/`,
+The default bind address is `0.0.0.0:2333`. API endpoints live under `/v4/`,
 the client websocket is `/v4/websocket`, and both use the `Authorization`
-header. Existing Lavalink v4 clients use the same connection details they use
-for an upstream node.
+header. The optional Prometheus path is anonymous, matching upstream. Existing
+Lavalink v4 clients use the same connection details they use for an upstream
+node.
 
 The server accepts the configuration path as its first argument and otherwise
 looks for `application.yml` in the current directory. Logging is controlled by
@@ -130,7 +131,7 @@ setting and the security implications of source options. The main groups are:
 | Setting | Meaning |
 |---|---|
 | `server.address`, `server.port` | Listen address and port. |
-| `lavalink.server.password` | Shared secret required on every route. It must not be empty. |
+| `lavalink.server.password` | Shared secret required outside the configured Prometheus path. It must not be empty. |
 | `lavalink.server.sources` | Source managers to enable. Enabled managers are registered in a fixed precedence order because the first matching source wins. |
 | `youtubeSearchEnabled`, `soundcloudSearchEnabled` | Whether the corresponding search prefixes are claimed. Direct URLs remain available when the source is enabled. |
 | `filters` | Filters advertised by `/v4/info` and accepted by player updates. |
@@ -140,6 +141,7 @@ setting and the security implications of source options. The main groups are:
 | `playerUpdateInterval` | Seconds between websocket `playerUpdate` messages. |
 | `httpConfig` | Optional proxy used by blocking HTTP requests and `yt-dlp`. |
 | `timeouts` | Connect and idle-read timeouts for media requests. |
+| `metrics.prometheus` | Optional anonymous Prometheus endpoint for the ten Lavalink-specific gauges. |
 
 Unknown upstream keys are accepted so an existing Lavalink configuration can
 be reused, but unimplemented keys have no effect. Check

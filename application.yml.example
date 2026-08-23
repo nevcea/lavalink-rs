@@ -1,5 +1,5 @@
 # Same keys as Lavalink v4's application.yml. Keys for features this node does not
-# ship (plugins, ratelimit, metrics, sentry, logback, bufferDurationMs,
+# ship (plugins, ratelimit, sentry, logback, bufferDurationMs,
 # opusEncodingQuality, soundcloudFilterOutPreviewTracks,
 # timeouts.connectionRequestTimeoutMs — see MAINTENANCE.md for why each is
 # unmodelled) are ignored rather than rejected, so an existing config file can be
@@ -75,6 +75,14 @@ lavalink:
       connectTimeoutMs: 3000
       socketTimeoutMs: 3000 # idle-read stall threshold, not an overall request timeout
       # connectionRequestTimeoutMs is not modelled — see MAINTENANCE.md.
+
+metrics:
+  prometheus:
+    enabled: false
+    # This exact configured path is anonymous, matching upstream. The endpoint
+    # exposes the ten portable lavalink_* gauges; JVM/GC/logback series do not
+    # exist on this Rust node. See MAINTENANCE.md.
+    endpoint: /metrics
 
 # Logging is controlled by RUST_LOG rather than by this file, e.g.
 #   RUST_LOG=info,lavalink_server=debug

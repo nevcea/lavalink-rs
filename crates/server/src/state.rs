@@ -20,13 +20,12 @@ const SEMVER: &str = env!("CARGO_PKG_VERSION");
 
 /// What /version and Info.version report. Clients gate on version.major < 4
 /// and refuse to connect below it, so this must track the Lavalink protocol this
-/// node speaks, not the crate's own version. Reported as an exact 4.0.0 rather
-/// than CARGO_PKG_VERSION: this node speaks the v4 wire protocol, but a
-/// pre-release-shaped string (e.g. 4.0.0-rs.0.1.0) sorts below 4.0.0 under
-/// semver, and a client checking >= 4.0.0 would reject it. 4.0.0 is the floor
-/// of the wire contract this node implements and claims nothing added by later
-/// 4.0.x releases.
-const PROTOCOL_VERSION: &str = "4.0.0";
+/// node speaks, not the crate's own version. Reported as the exact upstream
+/// compatibility baseline rather than CARGO_PKG_VERSION because a
+/// pre-release-shaped string (e.g. 4.2.2-rs.0.2.0) sorts below 4.2.2 under
+/// semver. This tracks the upstream compatibility baseline, not the crate's
+/// release cadence.
+const PROTOCOL_VERSION: &str = "4.2.2";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -189,10 +188,10 @@ mod tests {
     }
 
     #[test]
-    fn info_reports_the_v4_wire_protocol_not_the_crate_version() {
+    fn info_reports_the_compatibility_baseline_not_the_crate_version() {
         let state = state();
         // Clients gate on version.major < 4 and refuse to connect below it.
-        assert_eq!(state.info.version.semver, "4.0.0");
+        assert_eq!(state.info.version.semver, "4.2.2");
         assert_eq!(state.info.version.major, 4);
     }
 

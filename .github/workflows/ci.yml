@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - run: python3 benchmarks/compare/run.py --self-test
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
@@ -74,19 +75,17 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Ten advisories, none fixable by a version bump on our end. Eight are
-          # pulled in transitively through songbird 0.6.0 (tungstenite's rustls
-          # 0.22 -> old rustls-webpki), which is itself the newest songbird
-          # release — no newer compatible version to move to yet.
+          # Ten advisories, none fixable by a version bump on our end. Eight reach
+          # rustls-webpki 0.102 through tokio-tungstenite 0.21, required by
+          # serenity 0.12; the test bot also pins that websocket version to match.
+          # Songbird 0.6.0 is the newest release and integrates that same serenity,
+          # so there is no newer compatible stack to move to yet.
           #
           # The remaining two, both libcrux-aesgcm (RUSTSEC-2026-0211, -0209),
-          # come from `driver`'s unconditional davey (DAVE E2EE) dependency and
-          # *are* patched upstream (libcrux-aesgcm 0.0.9) — the block is one
-          # level up: hpke-rs 0.6.1 pins hpke-rs-libcrux to `^0.6.1`, which
-          # pins libcrux-aead to the exact `=0.0.7`, which pins libcrux-aesgcm
-          # to the exact `=0.0.7` in turn, so `cargo update` alone can't reach
-          # 0.0.9 no matter what songbird does. hpke-rs-libcrux 0.7.0 already
-          # requires the patched libcrux-aead; unblocking these two needs
-          # hpke-rs (not songbird) to pick that up. Re-run `cargo update` and
-          # drop entries here as songbird/serenity/hpke-rs catch up.
+          # remain in Cargo.lock through davey's hpke-rs 0.6.1 resolution; the
+          # libcrux backend is not in the active cargo tree, but audit-check scans
+          # every locked package. They are patched upstream in libcrux-aesgcm
+          # 0.0.9, but hpke-rs-libcrux 0.6.1 pins libcrux-aead =0.0.7, which pins
+          # libcrux-aesgcm =0.0.7, so `cargo update` cannot reach the fix. Re-run
+          # the dry-run and drop entries as serenity/hpke-rs catch up.
           ignore: "RUSTSEC-2026-0211,RUSTSEC-2026-0209,RUSTSEC-2026-0124,RUSTSEC-2026-0212,RUSTSEC-2026-0207,RUSTSEC-2026-0208,RUSTSEC-2026-0098,RUSTSEC-2026-0049,RUSTSEC-2026-0099,RUSTSEC-2026-0104"

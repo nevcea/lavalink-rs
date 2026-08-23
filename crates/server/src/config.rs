@@ -1,7 +1,7 @@
 //! application.yml — the original's keys, kept so an existing deployment's config
 //! file drops in unchanged.
 //!
-//! Keys belonging to features we do not ship (plugins, ratelimit, metrics, sentry,
+//! Keys belonging to features we do not ship (plugins, ratelimit, sentry,
 //! logback) are not modeled; unknown keys are ignored rather than rejected,
 //! because rejecting them would make a working Lavalink config fail to start here
 //! for no gain.
@@ -17,6 +17,7 @@ use serde::Deserialize;
 pub struct Config {
     pub server: HttpServer,
     pub lavalink: Lavalink,
+    pub metrics: Metrics,
 }
 
 impl Config {
@@ -101,6 +102,22 @@ impl Default for HttpServer {
 #[serde(default)]
 pub struct Lavalink {
     pub server: ServerConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Metrics {
+    pub prometheus: PrometheusMetrics,
+}
+
+/// `metrics.prometheus`. The empty endpoint default is intentional: upstream's
+/// controller falls back to `/metrics`, while its auth exemption checks this raw
+/// configured value and therefore does not exempt that fallback path.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PrometheusMetrics {
+    pub enabled: bool,
+    pub endpoint: String,
 }
 
 /// lavaplayer's AudioConfiguration.ResamplingQuality. Low is lavaplayer's own
@@ -330,8 +347,33 @@ lavalink:
 
     #[test]
     fn ignores_keys_for_features_we_dropped() {
-        let yaml = format!("{EXAMPLE}\nmetrics:\n  prometheus:\n    enabled: false\nsentry:\n  dsn: \"\"\n");
+        let yaml = format!("{EXAMPLE}\nsentry:\n  dsn: \"\"\n");
         assert!(serde_yaml::from_str::<Config>(&yaml).is_ok());
+    }
+
+    #[test]
+    fn prometheus_defaults_match_the_original_properties() {
+        let config = example();
+        assert!(!config.metrics.prometheus.enabled);
+        assert!(config.metrics.prometheus.endpoint.is_empty());
+    }
+
+    #[test]
+    fn parses_prometheus_settings() {
+        let yaml = format!(
+            "{EXAMPLE}\nmetrics:\n  prometheus:\n    enabled: true\n    endpoint: /prometheus\n"
+        );
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert!(config.metrics.prometheus.enabled);
+        assert_eq!(config.metrics.prometheus.endpoint, "/prometheus");
+    }
+
+    #[test]
+    fn shipped_example_configures_the_disabled_metrics_route() {
+        let config: Config = serde_yaml::from_str(include_str!("../../../application.yml.example"))
+            .unwrap();
+        assert!(!config.metrics.prometheus.enabled);
+        assert_eq!(config.metrics.prometheus.endpoint, "/metrics");
     }
 
     #[test]

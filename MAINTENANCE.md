@@ -4,6 +4,42 @@ Why this node's advertised feature set stops where it does. Each of these is a
 deliberate omission, checked at compile time or surfaced to clients honestly
 (`/v4/info`, a 400, or a 501) rather than approximated or stubbed silently.
 
+## Compatibility baseline
+
+Last reviewed on 2026-08-23 against upstream tag `4.2.2`. The observable
+changes since 4.0.8 are accounted for as follows; dependency-only, JVM image,
+Spring Cloud, and plugin-manager changes do not apply to this Rust node.
+
+| Upstream release | Observable change | This node |
+|---|---|---|
+| 4.0.8 | Non-allocating frames; clean shutdown | The pump/ring reuse their buffers, and shutdown closes websocket sessions. |
+| 4.1.0 | Cause stack, request timeouts, metrics, filter defaults, CPU polling, voice race | Implemented and covered by focused tests; the one unmappable pool timeout remains documented below. |
+| 4.1.2 | `beforeRequest` logging | Not modelled; request logging is controlled by `RUST_LOG`. |
+| 4.2.0 | DAVE `channelId`; SoundCloud preview filtering | DAVE and `channelId` are implemented; the unavailable yt-dlp preview signal is documented below. |
+| 4.1.1, 4.2.1, 4.2.2 | Voice-library fixes and DAVE library updates | Supplied by songbird 0.6; no additional wire or configuration shape. |
+
+## Performance evidence gate
+
+An optimization is not merged from profiling intuition alone. Use an existing
+Criterion benchmark, or add the smallest focused one when the changed path is
+not covered, then compare baseline and candidate independently three times on
+the same host, toolchain, lockfile, power settings, and input. All three
+comparisons must report `p < 0.05` and at least a 5% improvement in Criterion's
+median point estimate, with no statistically significant regression in related
+cases. Record the commands, environment, and all before/after medians in the PR;
+discard the optimization if it misses the gate.
+Audio-path changes additionally require a real `scripts/dev.sh` Discord voice
+check regardless of benchmark results.
+
+Release-level parity with upstream is measured separately by
+`benchmarks/compare/run.py` on a dedicated Linux host. `prepare` pins and
+verifies the Lavalink 4.2.2 JAR and builds deterministic WAV/FLAC/M4A fixtures;
+`all --server-cpus <set> --driver-cpus <set>` runs the paired audio, HTTP,
+deadline and RSS gate and writes raw JSON plus a Markdown summary under
+`target/compare`. Attach those files to the performance PR rather than committing
+machine-specific results. Shared CI runs only the runner's
+self-test, never the noisy comparison itself.
+
 ## Route planning / IP rotation — not implemented
 
 Route planning belongs to the IP-rotation feature, which is out of scope for
@@ -218,24 +254,29 @@ generates its FFI bindings at build time) on top of this crate's other build
 requirements — worth knowing before "why won't this compile on a fresh
 machine" turns into a longer search.
 
-## `/metrics` — not implemented
+## `/metrics` — Lavalink gauges implemented, JVM gauges unavailable
 
-Checked against upstream's `PrometheusMetrics.java`: it registers exactly three
-things — an `InstrumentedAppender` (logback event counters), Prometheus's own
-`DefaultExports.initialize()` (JVM hotspot: heap, GC, thread counts), and a
-histogram of GC pause times. **Zero Lavalink-specific series.** There is no JVM
-here, so every metric that endpoint would expose is unimplementable by
-definition — building a `/metrics` that instead exports `lavalink_players` or
-similar would be a new endpoint wearing upstream's name, not a port of it.
+Upstream 4.1.0 added `LavalinkStatsCollector`, invalidating this document's old
+conclusion that the endpoint had no Lavalink-specific series. This node now
+matches all ten portable `lavalink_*` gauge families for players, uptime,
+memory, and CPU, including Prometheus 0.0.4 text shape, `name[]` filtering, the
+configurable endpoint, and its auth behavior. The values come from the same
+`StatsCollector` snapshot as `/v4/stats`, so the two surfaces cannot drift.
 
-Upstream's default is `enabled: false`, `endpoint: ""`, and its auth exemption
-keys off the *configured endpoint string* — so a disabled upstream node also
-just 404s there. This node's unconfigured route falls through to the same
-Lavalink-shaped 404 (see the router fallback in `crates/server/src/rest/mod.rs`),
-which means the disabled case is already matched exactly, at zero code. The
-honest replacement for what an operator would actually want from `/metrics` is
-`/v4/stats`, which — since `frameStats` and `playingPlayers` are now wired up —
-carries every number a Rust node can produce truthfully.
+The rest of upstream's registry is still JVM-specific:
+`DefaultExports.initialize()` exposes HotSpot memory, GC, thread, classloader,
+and process data; `InstrumentedAppender` exposes logback events; and
+`GcNotificationListener` observes JVM GC pauses. Inventing those series for a
+Rust process would reuse upstream names with different semantics, so they stay
+absent rather than misleading operators.
+
+Two unusual defaults are preserved because clients and scrape configuration can
+observe them. The properties object defaults to `enabled: false`, `endpoint:
+""`, while the enabled controller falls back to `/metrics` when the endpoint is
+empty. The auth interceptor, however, exempts only the non-empty configured
+endpoint and does so regardless of `enabled`. Thus an enabled empty endpoint is
+served at `/metrics` but still requires the password, while a configured but
+disabled endpoint reaches the anonymous 404 fallback.
 
 ## `TrackEndReason::Cleanup` — refused, variant kept
 
@@ -270,12 +311,12 @@ upstream parity or already guarded elsewhere. Recorded so the next reviewer
 does not re-derive it.
 
 The trust boundary is the node password (`crate::auth::require_password`,
-applied to the whole router in `crates/server/src/rest/mod.rs`). Lavalink's
-threat model is a trusted operator running a node for a trusted bot; anything
-below is reachable only by someone who already holds that password, and
-upstream grants them the same reach. Adding a limit upstream does not have
-would be a wire divergence, which the governing rule in
-`crates/server/src/lib.rs` does not allow.
+applied to the whole router in `crates/server/src/rest/mod.rs`), except for the
+configured Prometheus path documented above. Lavalink's threat model is a
+trusted operator running a node for a trusted bot; anything below is reachable
+only by someone who already holds that password, and upstream grants them the
+same reach. Adding a limit upstream does not have would be a wire divergence,
+which the governing rule in `crates/server/src/lib.rs` does not allow.
 
 **No request, memory or cache byte budget.** There is no `DefaultBodyLimit`
 layer; axum's implicit 2 MiB inside `Json` (and so `ValidatedJson`) is the only

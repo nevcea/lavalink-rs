@@ -608,7 +608,7 @@ impl TimescaleFilter {
         let pitch_factor = finite(pitch_factor, 1.0).max(MIN_SPEED_FACTOR);
 
         let mut stretch =
-            signalsmith_stretch::Stretch::preset_default(channels as u32, SAMPLE_RATE as u32);
+            signalsmith_stretch::Stretch::preset_cheaper(channels as u32, SAMPLE_RATE as u32);
         if (pitch_factor - 1.0).abs() > f32::EPSILON {
             stretch.set_transpose_factor(pitch_factor, None);
         }

@@ -7,7 +7,8 @@
 //!
 //! Status codes follow the original exactly: a missing header is 401, a wrong one is
 //! 403. That is an unusual split — 403 normally means "authenticated but not
-//! allowed" — but clients distinguish them, so it stays.
+//! allowed" — but clients distinguish them, so it stays. The configured Prometheus
+//! path is anonymous even when its route is disabled, also matching the original.
 
 use axum::extract::{Request, State};
 use axum::http::{header::AUTHORIZATION, StatusCode};
@@ -23,6 +24,11 @@ pub async fn require_password(
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
+    let metrics_endpoint = &state.config.metrics.prometheus.endpoint;
+    if !metrics_endpoint.is_empty() && request.uri().path() == metrics_endpoint {
+        return Ok(next.run(request).await);
+    }
+
     let provided = request.headers().get(AUTHORIZATION);
 
     match provided {
