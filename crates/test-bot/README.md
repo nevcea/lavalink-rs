@@ -1,12 +1,11 @@
 # lavalink-test-bot
 
-A development-only Discord bot for answering the questions unit tests cannot:
-does the node complete a real Discord voice handshake, does audio arrive, and
-does the result sound right?
+A development-only Discord bot for testing voice handshakes, audible playback,
+and websocket behavior that unit tests cannot cover.
 
-The bot is an ordinary Lavalink v4 client. It loads tracks and updates players
-through REST, forwards Discord voice credentials to the node, and logs every
-node websocket message. It does not decode, mix, or transmit audio itself.
+It behaves like a Lavalink v4 client: REST loads and player updates, Discord
+voice credentials forwarded to the node, and every node websocket message
+logged. The bot never processes audio itself.
 
 ## How it fits together
 
@@ -21,42 +20,39 @@ Discord voice ◀──────────── RTP/Opus ─────�
 test bot ◀──────────── websocket events ──────────────┘
 ```
 
-The bot uses Songbird's gateway half to request a voice-channel move and
-correlate Discord's `token`, `endpoint`, and `sessionId`. It sends that triple
-to `PATCH /v4/sessions/{sessionId}/players/{guildId}`. The server uses
-Songbird's driver half and owns the voice connection from then on.
+The bot collects Discord's `token`, `endpoint`, and `sessionId`, then sends them
+to `PATCH /v4/sessions/{sessionId}/players/{guildId}`. The node owns the voice
+connection from that point.
 
 ## Prerequisites
 
 - A running lavalink-rs node and its password
 - A Discord application with a bot user
-- A private Discord server where you can invite the bot and join a voice
-  channel
+- A private Discord server with a voice channel
 - The same native build tools required by the workspace; see the
   [root README](../../README.md#requirements)
 
-Do not use a production bot token or public guild for routine testing. The bot
-registers development commands directly in one guild and logs node events.
+Use a dedicated token and private guild: the bot registers development
+commands directly in that guild and logs node events.
 
 ## Discord setup
 
 1. Create an application at the
    [Discord Developer Portal](https://discord.com/developers/applications),
    then add a bot user.
-2. Copy or reset the bot token. Store it only in your environment or a local
-   `.env`; never commit it.
+2. Copy or reset the bot token and store it only in the environment or a local
+   `.env`.
 3. Invite the bot with the `bot` and `applications.commands` scopes. Grant at
    least View Channel, Connect, and Speak in the test voice channel.
 4. Enable Discord Developer Mode, right-click the test server, and copy its ID.
    This is `TEST_GUILD_ID`.
 
-No privileged gateway intents are needed. Commands are registered to the test
-guild when the bot becomes ready, so they normally appear immediately.
+No privileged gateway intents are required. Guild commands are registered when
+the bot becomes ready and normally appear immediately.
 
 ## Environment
 
-The binary loads a `.env` from the current working directory before reading
-these variables:
+The binary loads `.env` from the current directory, then reads:
 
 | Variable | Required | Default | Purpose |
 |---|---:|---|---|
@@ -64,7 +60,7 @@ these variables:
 | `TEST_GUILD_ID` | yes | — | Guild where slash commands are registered. |
 | `LAVALINK_HOST` | no | `localhost:2333` | Node host and port, without an `http://` prefix. |
 | `LAVALINK_PASSWORD` | no | `youshallnotpass` | Value sent in the node's `Authorization` header. |
-| `RUST_LOG` | no | `info,lavalink_test_bot=debug` | Log filter. The default includes stats and non-text websocket frames from this crate. |
+| `RUST_LOG` | no | `info,lavalink_test_bot=debug` | Log filter. |
 
 A repo-root `.env` for local development can look like this:
 
@@ -76,32 +72,30 @@ LAVALINK_PASSWORD=youshallnotpass
 RUST_LOG=info
 ```
 
-The root `.gitignore` excludes `.env` and `application.yml`; still check staged
-files before committing.
+The root `.gitignore` excludes `.env` and `application.yml`.
 
 ## Running both processes
 
-From the repository root, first create `application.yml` and enable the source
-you plan to test. For example, `local: true` permits a file path and
-`youtube: true` permits YouTube URLs/searches when `yt-dlp` is installed.
+From the repository root, create `application.yml` and enable the source under
+test. For example, `local: true` permits file paths; `youtube: true` permits
+YouTube URLs and searches when `yt-dlp` is available.
 
-On Bash, the helper starts a release node in the background, waits for its TCP
-port, and runs the bot in the foreground:
+On Bash, the helper starts a release node, waits for its TCP port, and runs the
+bot:
 
 ```sh
 scripts/dev.sh
 ```
 
-After both binaries have been built once, skip Cargo's checks for a faster
-restart. Rebuild normally after changing code:
+After both binaries have been built, restart without rebuilding:
 
 ```bash
 scripts/dev.sh --no-build
 ```
 
-It reads the repo-root `.env`. Pressing Ctrl+C stops the bot and the background
-node. The helper expects a simple `host:port` in `LAVALINK_HOST` and uses Bash's
-`/dev/tcp`; use the manual workflow on shells that do not provide it.
+The helper reads the repo-root `.env`; Ctrl+C stops both processes. It expects
+`LAVALINK_HOST` as `host:port` and requires Bash's `/dev/tcp`. Use the manual
+workflow on other shells.
 
 ## Running each process manually
 
@@ -122,12 +116,10 @@ cargo run -p lavalink-test-bot
 If `.env` contains the required values, the second terminal only needs
 `cargo run -p lavalink-test-bot` from the repository root.
 
-Successful startup has three visible milestones: the bot logs into Discord,
-connects to the node websocket, and receives a ready message with a session ID.
-It enables a 60-second resume window automatically; after a brief node websocket
-disconnect, the next ready log should contain `resumed=true` and the same session
-ID. Command registration is silent unless it fails. A slash command issued before
-the first ready message may fail with "no session yet"; retry after the ready log.
+Startup is ready when the bot logs into Discord, connects to the node websocket,
+and receives a session ID. The bot enables a 60-second resume window; after a
+brief disconnect, the next ready message should show `resumed=true` with the
+same ID. Commands issued earlier may fail with `no session yet`.
 
 ## Commands
 
@@ -146,8 +138,8 @@ the first ready message may fail with "no session yet"; retry after the ready lo
 | `/np` | Shows this guild's current track and player state. |
 | `/players` | Lists every player in the current node session. |
 
-`/search` is the fastest way to isolate loading from Discord voice. If it
-fails, fix the source or node configuration before debugging `/join` or audio.
+Use `/search` to isolate source loading from Discord voice before debugging
+`/join` or playback.
 
 ### Filters
 
@@ -165,9 +157,8 @@ fails, fix the source or node configuration before debugging `/join` or audio.
 | `/filters` | Shows the filter state returned by the node. |
 | `/clearfilters` | Clears the complete filter chain. |
 
-Filters are cumulative in this bot. Lavalink replaces the complete filter
-object on each update, so the bot remembers the current per-guild chain and
-re-sends it when one filter changes.
+Filters are cumulative: because Lavalink replaces the full filter object on
+each update, the bot retains and resends the guild's current chain.
 
 ### Diagnostics
 
@@ -194,9 +185,9 @@ re-sends it when one filter changes.
 8. Interrupt the node websocket for less than 60 seconds and verify the bot
    reconnects with `resumed=true` without losing the player.
 
-For audio-pipeline work, repeat with the source/codec/container that changed.
-For concurrency work, use multiple guilds or bot instances and inspect
-`/players` plus `/stats`; one guild alone cannot expose cross-player stalls.
+Repeat audio checks with the changed source, codec, or container. For
+concurrency work, use multiple guilds or bot instances; one guild cannot expose
+cross-player stalls.
 
 ## Expected websocket events
 
@@ -214,8 +205,8 @@ The bot logs every node websocket text message. Useful checkpoints are:
 - Removing the bot from the voice channel produces `WebSocketClosedEvent`
   with code `4014`.
 
-An unparseable node message is logged at `error` with its raw text. Treat that
-as a protocol mismatch or node defect, not as harmless debug noise.
+Unparseable node messages are logged at `error` with their raw text and indicate
+a protocol mismatch or node defect.
 
 ## Troubleshooting
 
@@ -230,6 +221,5 @@ as a protocol mismatch or node defect, not as harmless debug noise.
 | Player position rises but nothing is audible | Check Discord output device/volume, server mute/deafen state, bot Speak permission, and node voice logs. |
 | Bot connects before the node | Leave it running; the websocket task retries. Commands need a ready node session before they can use REST player routes. |
 
-The bot's default filter already enables its own debug logs. Use
-`RUST_LOG=info,lavalink_server=debug` on the node when the normal node logs do
-not identify the failing boundary.
+The bot enables its own debug logs by default. If node logs are insufficient,
+run the node with `RUST_LOG=info,lavalink_server=debug`.

@@ -1,15 +1,14 @@
 # lavalink-rs
 
-A from-scratch Rust port of the Lavalink v4 audio node. The public contract —
-REST responses, websocket messages, status codes, field omission, and event
-ordering — follows upstream Lavalink, while the server, player model, and audio
-pipeline are native Rust.
+A from-scratch Rust port of the Lavalink v4 audio node. REST responses,
+websocket messages, status codes, omitted fields, and event order follow
+upstream; the server and audio pipeline are native Rust.
 
 This project is suitable for development and compatibility testing, but
 operators should review [the known and deliberate differences](MAINTENANCE.md)
 before treating it as a drop-in production node.
 
-## What is included
+## Features
 
 - Lavalink v4 REST and websocket APIs, including session resuming and the
   `encodedTrack` codec
@@ -17,15 +16,15 @@ before treating it as a drop-in production node.
   player destruction
 - All ten v4 filters: volume, equalizer, karaoke, timescale, tremolo, vibrato,
   distortion, rotation, channel mix, and low-pass
-- HTTP and local-file loading, plus getyarn.io clips
+- HTTP, local-file, and getyarn.io clip loading
 - YouTube, SoundCloud, Bandcamp, and Deezer loading through `yt-dlp`
 - Node/player statistics and Lavalink-shaped error responses
 - Graceful shutdown and per-track panic isolation
 
-Plugins, IP rotation/route planning, Twitch, Vimeo, Nico Nico Douga, and a few
-configuration keys are intentionally not implemented. Unsupported capabilities
-are not advertised in `/v4/info`; the rationale and exact observable behavior
-are recorded in [MAINTENANCE.md](MAINTENANCE.md).
+Plugins, route planning/IP rotation, Twitch, Vimeo, Nico Nico Douga, and some
+configuration keys are intentionally unsupported. Unsupported sources and
+filters are omitted from `/v4/info`; [MAINTENANCE.md](MAINTENANCE.md) records
+the exact behavior of every gap.
 
 ## Architecture
 
@@ -43,16 +42,16 @@ session registry ──▶ one actor per guild ──▶ player engine
                                       ring → mixer → Opus → Discord
 ```
 
-The CPU-bound audio pump decodes ahead into a bounded ring. The mixer consumes
-from that ring and advances the audible position. A guild actor owns player
-state and coordinates the pipeline without doing network or audio work itself.
-These boundaries keep a slow or failed track from blocking unrelated players.
+The CPU-bound pump decodes ahead into a bounded ring. The mixer consumes the
+ring and advances audible position. One actor per guild owns player state but
+does no network or audio work, isolating slow or failed tracks from other
+players.
 
 ## Workspace
 
 | Crate | Purpose |
 |---|---|
-| [`lavalink-protocol`](crates/protocol) | Wire DTOs and the lavaplayer `encodedTrack` codec. It has no server logic, async work, or I/O and can be used independently. |
+| [`lavalink-protocol`](crates/protocol) | Wire DTOs and the standalone lavaplayer `encodedTrack` codec. |
 | [`lavalink-server`](crates/server) | The REST/websocket node, sessions, players, sources, and audio pipeline. |
 | [`lavalink-test-bot`](crates/test-bot) | A small Discord client for live, end-to-end voice and event testing. |
 
@@ -65,15 +64,13 @@ lavalink-protocol = { git = "https://github.com/nevcea/lavalink-rs", package = "
 ## Requirements
 
 - Rust 1.95 or newer
-- A C compiler and CMake, used to build the vendored Opus library
-- A C++ compiler and `libclang`, used by the timescale filter's
-  `signalsmith-stretch` bindings
+- A C compiler and CMake for the vendored Opus library
+- A C++ compiler and `libclang` for the timescale filter
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) 2026.08.19 or newer on `PATH`, optional
 
-`yt-dlp` is detected once during startup. If it is missing, the four dependent
-sources are disabled and omitted from `/v4/info` instead of preventing the node
-from starting. For YouTube, keep a supported JavaScript runtime on `PATH`; Deno
-is yt-dlp's default and highest-priority runtime.
+`yt-dlp` is detected at startup. If missing, its four dependent sources are
+disabled and omitted from `/v4/info`. YouTube also needs a JavaScript runtime;
+Deno is yt-dlp's preferred default.
 
 After updating yt-dlp, verify a full download rather than relying on `--test`,
 which only fetches the beginning of the file:
@@ -91,8 +88,8 @@ yt-dlp --no-playlist -f "bestaudio[acodec=aac]/bestaudio[ext=m4a]/bestaudio[acod
    cp application.yml.example application.yml
    ```
 
-2. Change `lavalink.server.password`. The example value,
-   `youshallnotpass`, is for local development only.
+2. Change `lavalink.server.password`; `youshallnotpass` is for local
+   development only.
 
 3. Enable the sources you need under `lavalink.server.sources`. Only `http`
    is enabled in the example.
@@ -109,11 +106,9 @@ yt-dlp --no-playlist -f "bestaudio[acodec=aac]/bestaudio[ext=m4a]/bestaudio[acod
    curl -H "Authorization: youshallnotpass" http://localhost:2333/v4/info
    ```
 
-The default bind address is `0.0.0.0:2333`. API endpoints live under `/v4/`,
-the client websocket is `/v4/websocket`, and both use the `Authorization`
-header. The optional Prometheus path is anonymous, matching upstream. Existing
-Lavalink v4 clients use the same connection details they use for an upstream
-node.
+The node listens on `0.0.0.0:2333` by default. REST endpoints live under
+`/v4/`; the websocket is `/v4/websocket`. Both use the `Authorization` header.
+A configured, non-empty Prometheus path is anonymous, matching upstream.
 
 The server accepts the configuration path as its first argument and otherwise
 looks for `application.yml` in the current directory. Logging is controlled by
@@ -125,8 +120,8 @@ RUST_LOG=info,lavalink_server=debug cargo run -p lavalink-server -- application.
 
 ## Configuration
 
-[`application.yml.example`](application.yml.example) documents every supported
-setting and the security implications of source options. The main groups are:
+[`application.yml.example`](application.yml.example) is the configuration
+reference. The main settings are:
 
 | Setting | Meaning |
 |---|---|
@@ -141,7 +136,7 @@ setting and the security implications of source options. The main groups are:
 | `playerUpdateInterval` | Seconds between websocket `playerUpdate` messages. |
 | `httpConfig` | Optional proxy used by blocking HTTP requests and `yt-dlp`. |
 | `timeouts` | Connect and idle-read timeouts for media requests. |
-| `metrics.prometheus` | Optional anonymous Prometheus endpoint for the ten Lavalink-specific gauges. |
+| `metrics.prometheus` | Optional Prometheus endpoint for the ten Lavalink-specific gauges. |
 
 Unknown upstream keys are accepted so an existing Lavalink configuration can
 be reused, but unimplemented keys have no effect. Check
@@ -171,10 +166,9 @@ docker run --rm -p 2333:2333 \
   lavalink-rs
 ```
 
-No configuration or password is baked into the image. The runtime image does
-include `yt-dlp`, so its source managers work once enabled in the mounted file.
-The process runs as UID/GID `10001`; mounted configuration and local-source files
-must be readable by that user.
+The image includes `yt-dlp` but no configuration or password. It runs as
+UID/GID `10001`; mounted configuration and local-source files must be readable
+by that user.
 
 ## Security notes
 
@@ -192,7 +186,7 @@ must be readable by that user.
 The complete reasoning for these trust-boundary choices is in
 [MAINTENANCE.md](MAINTENANCE.md#post-auth-resource-limits-and-source-reach--deliberately-absent).
 
-## Development and verification
+## Development
 
 ```sh
 cargo build --workspace
@@ -212,15 +206,13 @@ Server benchmarks live under `crates/server/benches`:
 cargo bench -p lavalink-server --bench pipeline
 ```
 
-Unit tests cover protocol shapes, loading logic, DSP math, and pipeline
-coordination. They cannot verify audible playback, Discord voice handshakes,
-seek accuracy, or live multi-player behavior. Audio-path changes also need the
+Unit tests cannot verify audible playback, Discord voice handshakes, seek
+accuracy, or live multi-player behavior. Audio-path changes also require the
 [test bot](crates/test-bot/README.md) and a real Discord voice channel.
 
-This repository is deliberately hand-formatted. Do not run repository-wide
-`cargo fmt`; match the surrounding style and keep DSP tables comparable with
-their Java sources. Contributor conventions and compatibility constraints are
-summarized in [AGENTS.md](AGENTS.md).
+Do not run repository-wide `cargo fmt`; match the surrounding hand formatting
+and keep DSP tables comparable with their Java sources. See
+[AGENTS.md](AGENTS.md) for contributor rules.
 
 ## License
 
