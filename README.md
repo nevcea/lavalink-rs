@@ -155,21 +155,6 @@ active.
 | `bandcamp` | `yt-dlp` | Direct URL loading. |
 | `deezer` | `yt-dlp` for playback | Metadata comes from Deezer; playback substitutes a YouTube match. |
 
-## Docker
-
-Build the image and mount a configuration file at `/app/application.yml`:
-
-```sh
-docker build -t lavalink-rs .
-docker run --rm -p 2333:2333 \
-  -v "$(pwd)/application.yml:/app/application.yml:ro" \
-  lavalink-rs
-```
-
-The image includes `yt-dlp` but no configuration or password. It runs as
-UID/GID `10001`; mounted configuration and local-source files must be readable
-by that user.
-
 ## Security notes
 
 - Do not commit `application.yml`, `.env`, bot tokens, or production passwords.
