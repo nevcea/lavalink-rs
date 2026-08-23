@@ -1555,13 +1555,11 @@ mod tests {
         // afterward.
         let mut out = vec![0u8; capacity_samples * 4 + 64];
         let read = std::io::Read::read(&mut reader, &mut out).unwrap();
-        let samples: Vec<f32> = out[..read]
-            .as_chunks::<4>().0
-            .iter()
-            .map(|chunk| f32::from_le_bytes(*chunk))
-            .collect();
         assert!(
-            !samples.contains(&9.75),
+            !out[..read]
+                .as_chunks::<4>().0
+                .iter()
+                .any(|chunk| f32::from_le_bytes(*chunk) == 9.75),
             "stale pre-seek audio must not reappear after the ring was reset"
         );
     }

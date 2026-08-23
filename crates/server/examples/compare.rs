@@ -30,7 +30,6 @@ const LATENCY_BUCKETS: usize = 100_001;
 
 type AnyResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-#[derive(Clone)]
 struct Args {
     values: Vec<String>,
 }

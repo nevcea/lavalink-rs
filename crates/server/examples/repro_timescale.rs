@@ -59,23 +59,19 @@ fn main() {
         stretch.output_latency()
     );
 
-    let mut output: Vec<f32> = Vec::new();
-    let mut in_buf = vec![0.0_f32; CHUNK_FRAMES * CHANNELS as usize];
-    let mut out_buf = vec![0.0_f32; 0];
+    let mut output = Vec::new();
+    let mut out_buf = Vec::new();
 
     let mut total_process_time = std::time::Duration::ZERO;
     let mut chunks = 0u32;
 
     for chunk in input.chunks(CHUNK_FRAMES * CHANNELS as usize) {
-        in_buf.truncate(chunk.len());
-        in_buf.copy_from_slice(chunk);
-
-        let in_frames = in_buf.len() / CHANNELS as usize;
+        let in_frames = chunk.len() / CHANNELS as usize;
         let out_frames = ((in_frames as f32) / speed).round() as usize;
         out_buf.resize(out_frames * CHANNELS as usize, 0.0);
 
         let start = Instant::now();
-        stretch.process(&in_buf, out_buf.as_mut_slice());
+        stretch.process(chunk, out_buf.as_mut_slice());
         total_process_time += start.elapsed();
         chunks += 1;
 

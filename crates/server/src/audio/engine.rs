@@ -290,11 +290,11 @@ impl Engine for PipelineEngine {
         // panic destroys run's own State — see PumpConfig::produced.
         let produced = Arc::new(AtomicBool::new(false));
         let config = PumpConfig {
-            info: request.track.info.clone(),
+            info: request.track.info,
             start_position_ms: request.start_position_ms,
             end_time_ms: request.end_time_ms,
             volume: request.volume,
-            filters: request.filters.clone(),
+            filters: request.filters,
             opener: Arc::clone(&self.opener),
             resampling_quality: self.resampling_quality,
             interrupt,

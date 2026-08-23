@@ -1176,13 +1176,7 @@ mod tests {
 
         let mut buffer = [0u8; 4096];
         let started = Instant::now();
-        loop {
-            match source.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(_) => continue,
-                Err(_) => break,
-            }
-        }
+        while matches!(source.read(&mut buffer), Ok(read) if read != 0) {}
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "the 200ms request ceiling, not the 10s idle-gap timeout or the \

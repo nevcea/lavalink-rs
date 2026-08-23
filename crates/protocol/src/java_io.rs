@@ -147,33 +147,24 @@ impl DataOutput {
         encode_modified_utf8_into(value, &mut self.bytes);
 
         let len = self.bytes.len() - start - 2;
-        match u16::try_from(len) {
-            Ok(len) => {
-                self.bytes[start..start + 2].copy_from_slice(&len.to_be_bytes());
-                Ok(())
-            }
+        let Ok(encoded_len) = u16::try_from(len) else {
             // Roll back, or the half-written string stays in the buffer and every
             // field after it decodes as garbage. The error is recoverable for the
             // caller only if self is still usable.
-            Err(_) => {
-                self.bytes.truncate(start);
-                Err(JavaIoError::StringTooLong { len })
-            }
-        }
+            self.bytes.truncate(start);
+            return Err(JavaIoError::StringTooLong { len });
+        };
+        self.bytes[start..start + 2].copy_from_slice(&encoded_len.to_be_bytes());
+        Ok(())
     }
 
     /// lavaplayer DataFormatTools.writeNullableText.
     pub fn write_nullable_utf(&mut self, value: Option<&str>) -> Result<()> {
-        match value {
-            Some(text) => {
-                self.write_bool(true);
-                self.write_utf(text)
-            }
-            None => {
-                self.write_bool(false);
-                Ok(())
-            }
+        self.write_bool(value.is_some());
+        if let Some(text) = value {
+            self.write_utf(text)?;
         }
+        Ok(())
     }
 }
 
