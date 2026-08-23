@@ -251,8 +251,8 @@ fn play_once(
             break;
         }
 
-        for (sample, bytes) in pcm.iter_mut().zip(pcm_bytes.chunks_exact(4)) {
-            *sample = f32::from_le_bytes(bytes.try_into().expect("four-byte chunk"));
+        for (sample, bytes) in pcm.iter_mut().zip(pcm_bytes.as_chunks::<4>().0) {
+            *sample = f32::from_le_bytes(*bytes);
         }
         let encoded = encoder.encode_float(&pcm, &mut opus)?;
         let finished = Instant::now();
