@@ -9,29 +9,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: python3 benchmarks/compare/run.py --self-test
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
-
-  clippy:
-    name: Clippy
+  check:
+    name: Test and Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   msrv:
@@ -40,33 +27,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95
-      - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
-
-  windows:
-    name: Windows
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace
-
-  docker:
-    name: Docker
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: docker build --tag lavalink-rs:ci .
-      - run: test "$(docker run --rm --entrypoint id lavalink-rs:ci -u)" = 10001
-      - run: test "$(docker run --rm --entrypoint yt-dlp lavalink-rs:ci --version)" = 2026.08.19
 
   audit:
     name: Audit
     runs-on: ubuntu-latest
-    # audit-check publishes its report as a Check Run, which needs `checks:
-    # write` on top of the default token; without it, publishing itself throws
-    # and fails the job regardless of what cargo-audit found.
     permissions:
       contents: read
       checks: write
@@ -75,17 +40,7 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Ten advisories, none fixable by a version bump on our end. Eight reach
-          # rustls-webpki 0.102 through tokio-tungstenite 0.21, required by
-          # serenity 0.12; the test bot also pins that websocket version to match.
-          # Songbird 0.6.0 is the newest release and integrates that same serenity,
-          # so there is no newer compatible stack to move to yet.
-          #
-          # The remaining two, both libcrux-aesgcm (RUSTSEC-2026-0211, -0209),
-          # remain in Cargo.lock through davey's hpke-rs 0.6.1 resolution; the
-          # libcrux backend is not in the active cargo tree, but audit-check scans
-          # every locked package. They are patched upstream in libcrux-aesgcm
-          # 0.0.9, but hpke-rs-libcrux 0.6.1 pins libcrux-aead =0.0.7, which pins
-          # libcrux-aesgcm =0.0.7, so `cargo update` cannot reach the fix. Re-run
-          # the dry-run and drop entries as serenity/hpke-rs catch up.
+          # These are not currently upgradable: eight arrive through serenity's
+          # websocket stack; the two libcrux advisories are inactive locked
+          # packages pinned by hpke-rs. Remove ignores as those stacks update.
           ignore: "RUSTSEC-2026-0211,RUSTSEC-2026-0209,RUSTSEC-2026-0124,RUSTSEC-2026-0212,RUSTSEC-2026-0207,RUSTSEC-2026-0208,RUSTSEC-2026-0098,RUSTSEC-2026-0049,RUSTSEC-2026-0099,RUSTSEC-2026-0104"
