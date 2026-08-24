@@ -49,7 +49,7 @@ fn main() {
 
     let input = test_tone();
 
-    let mut stretch = Stretch::preset_default(CHANNELS, SAMPLE_RATE);
+    let mut stretch = Stretch::new(CHANNELS, 3_840, 2_400);
     if pitch_semitones != 0.0 {
         stretch.set_transpose_factor_semitones(pitch_semitones, None);
     }
