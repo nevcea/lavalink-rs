@@ -17,6 +17,7 @@ use reqwest::StatusCode;
 use symphonia::core::io::MediaSource;
 
 use super::source::http::accepts_ranges;
+use super::source::youtube;
 use super::source::ytdlp::{SourceKind, STREAM_USER_AGENT};
 use super::source::{SourceError, YtDlp};
 
@@ -186,7 +187,13 @@ impl StreamOpener {
                 })?;
                 // Resolved now, not at load time: a track queued hours ago would
                 // otherwise carry a dead URL.
-                let url = ytdlp.resolve_stream_url(&kind.playback_url(&info.identifier))?;
+                let page_url = match kind {
+                    SourceKind::YouTube => {
+                        youtube::playback_url(&info.identifier, info.uri.as_deref())
+                    }
+                    _ => kind.playback_url(&info.identifier),
+                };
+                let url = ytdlp.resolve_stream_url(&page_url)?;
                 // Fetched under the same User-Agent yt-dlp resolved it with —
                 // googlevideo.com 403s a mismatch. See STREAM_USER_AGENT.
                 self.open_http(&url, Some(STREAM_USER_AGENT), interrupt)

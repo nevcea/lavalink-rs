@@ -160,9 +160,13 @@ impl DataOutput {
 
     /// lavaplayer DataFormatTools.writeNullableText.
     pub fn write_nullable_utf(&mut self, value: Option<&str>) -> Result<()> {
+        let start = self.bytes.len();
         self.write_bool(value.is_some());
         if let Some(text) = value {
-            self.write_utf(text)?;
+            if let Err(error) = self.write_utf(text) {
+                self.bytes.truncate(start);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -323,6 +327,25 @@ mod tests {
         let mut input = DataInput::new(&out.bytes);
         assert_eq!(input.read_i32().unwrap(), 7);
         assert_eq!(input.read_utf().unwrap(), "ok");
+    }
+
+    #[test]
+    fn an_over_long_nullable_string_rolls_back_its_presence_flag() {
+        let mut out = DataOutput::new();
+        out.write_i32(7);
+        let before = out.bytes.clone();
+        let too_long = "\u{0080}".repeat(40_000);
+
+        assert!(matches!(
+            out.write_nullable_utf(Some(&too_long)),
+            Err(JavaIoError::StringTooLong { .. })
+        ));
+        assert_eq!(out.bytes, before, "the nullable flag must be rolled back too");
+
+        out.write_nullable_utf(Some("ok")).unwrap();
+        let mut input = DataInput::new(&out.bytes);
+        assert_eq!(input.read_i32().unwrap(), 7);
+        assert_eq!(input.read_nullable_utf().unwrap().as_deref(), Some("ok"));
     }
 
     #[test]

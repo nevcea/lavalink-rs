@@ -40,7 +40,8 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # These are not currently upgradable: eight arrive through serenity's
-          # websocket stack; the two libcrux advisories are inactive locked
-          # packages pinned by hpke-rs. Remove ignores as those stacks update.
+          # No compatible upstream updates exist yet. Four affect rustls-webpki
+          # 0.102 through serenity/songbird. Three libcrux packages are lockfile-only;
+          # the active SHA3/secrets advisories target APIs hpke-rs does not call.
+          # Remove each ignore as those upstream stacks update.
           ignore: "RUSTSEC-2026-0211,RUSTSEC-2026-0209,RUSTSEC-2026-0124,RUSTSEC-2026-0212,RUSTSEC-2026-0207,RUSTSEC-2026-0208,RUSTSEC-2026-0098,RUSTSEC-2026-0049,RUSTSEC-2026-0099,RUSTSEC-2026-0104"

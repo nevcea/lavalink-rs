@@ -134,17 +134,19 @@ precision loss slows and eventually freezes the LFO. `TremoloFilter` wraps the
 phase with `rem_euclid`, as vibrato already does. This changes audible output
 only after the upstream defect appears and does not change the wire contract.
 
-## `timescale` filter — a different algorithm family, not a port
+## `timescale` filter — SoundTouch version differs from upstream
 
-Upstream wraps SoundTouch, a C++ WSOLA time-stretcher with no Rust port. This
-node uses `signalsmith-stretch`, a phase-vocoder implementation selected by
-listening and CPU checks (`cargo run -p lavalink-server --release --example
-repro_timescale`). The algorithm differs, but the control semantics match:
-`combined_speed = speed * rate` and `combined_pitch = pitch * rate`.
+Upstream lavadsp 0.7.8 wraps SoundTouch 2.0.0. This node uses the safe Rust
+`soundtouch` wrapper with bundled SoundTouch 2.3.2, retaining upstream's one
+mono converter per channel and 4096-frame drain shape. The algorithm family,
+streaming model, and independent speed/pitch/rate controls match, but output is
+not expected to be sample-identical across SoundTouch versions.
 
 Unlike other filters, `timescale` can change the frame count. The pump therefore
 accepts resized filter output instead of assuming an in-place transform.
 Building it requires a C++ compiler and `libclang` for generated FFI bindings.
+The bundled library is LGPL-2.1; see `THIRD_PARTY_NOTICES.md` before distributing
+a binary.
 
 ## `/metrics` — Lavalink gauges implemented, JVM gauges unavailable
 

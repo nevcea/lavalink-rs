@@ -135,13 +135,14 @@ async fn run(
         }
     };
 
-    // ready is the first thing on the wire, before any queued replay: a
-    // resumed session's essential lane can already hold a backlog from the
-    // reconnect window, and plain send would put this behind it.
-    let _ = session.send_first(Message::Ready {
-        resumed,
-        session_id: session.id.clone(),
-    });
+    // claim_for_resume atomically queued a resumed Ready before unpausing the
+    // replay sink. A new session has no backlog, so it is inserted here.
+    if !resumed {
+        let _ = session.send_first(Message::Ready {
+            resumed: false,
+            session_id: session.id.clone(),
+        });
+    }
 
     if resumed {
         emit_fresh_updates(&session);

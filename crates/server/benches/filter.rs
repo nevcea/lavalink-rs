@@ -25,6 +25,10 @@ fn equalizer_only() -> Filters {
         .unwrap()
 }
 
+fn comparison_timescale() -> Filters {
+    serde_json::from_str(r#"{"timescale":{"speed":1.1,"pitch":1.05,"rate":1.0}}"#).unwrap()
+}
+
 /// Every implemented filter enabled at once — the worst case the chain can be
 /// asked to run per buffer.
 ///
@@ -227,6 +231,7 @@ fn bench_filter_interleaved(c: &mut Criterion) {
 
     for (name, filters) in [
         ("equalizer_only", equalizer_only()),
+        ("timescale_only", comparison_timescale()),
         ("all_filters", all_filters()),
     ] {
         group.bench_function(BenchmarkId::new("process", name), |b| {

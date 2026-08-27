@@ -17,22 +17,15 @@
 //! tremolo's depth is halved on the way in, the equalizer attenuates by 0.25 and
 //! restores by 4.0, player volume quantises through an integer multiplier.
 //!
-//! timescale is not a port
+//! timescale
 //!
-//! Every other filter here is a port of a specific lavaplayer/lavadsp
-//! implementation, coefficients and update-loop shape included. timescale cannot
-//! be: lavadsp's TimescalePcmAudioFilter is a JNI wrapper around SoundTouch, a
-//! large C++ WSOLA time-stretcher with no Rust port to diff against, and
-//! hand-rolling WSOLA from scratch (period detection, overlap-add, the works) is
-//! exactly the kind of "approximation that's easy to ship and hard to notice as
-//! wrong" this module's own history already has one example of.
-//!
-//! TimescaleFilter instead wraps signalsmith-stretch, a Rust binding (cc +
-//! bindgen, so it needs a C++ toolchain and libclang beyond this crate's other
-//! requirements) around Signalsmith's phase-vocoder stretcher — a different
-//! algorithm family than SoundTouch, not a port of it, chosen because it is the
-//! only actively-maintained Rust time/pitch stretcher available rather than because
-//! phase vocoders and WSOLA sound identical. Two things this trade leans on:
+//! TimescaleFilter wraps SoundTouch, the same WSOLA family as lavadsp's
+//! TimescalePcmAudioFilter. It deliberately follows upstream's streaming shape:
+//! one mono converter per channel and 4096-frame output segments. The bundled
+//! SoundTouch version is newer than lavadsp's, so this is not sample-for-sample
+//! identical, but its controls and buffering model now match upstream instead of
+//! approximating them with a phase vocoder. Two details matter to the rest of the
+//! pipeline:
 //!
 //! • It is the one filter whose process changes the number of frames per channel
 //!   rather than transforming them in place — speed/rate above 1.0 shrink the
@@ -40,12 +33,10 @@
 //!   this (each Vec<f32> can already be resized), but pump::filter_interleaved
 //!   is the one caller that has to stop assuming post-chain length equals
 //!   pre-chain length.
-//! • speed/pitch/rate combine the way SoundTouch's three independent knobs
-//!   do, since that is the wire contract regardless of which stretcher sits behind
-//!   it: rate scales both tempo and pitch together (as if the track were played
-//!   on a turntable at a different speed), speed changes tempo alone, pitch
-//!   changes pitch alone. combined_speed = speed * rate drives the output/input
-//!   frame ratio; combined_pitch = pitch * rate drives set_transpose_factor.
+//! • speed/pitch/rate are passed to SoundTouch's independent tempo, pitch and rate
+//!   controls. rate scales tempo and pitch together (as if the track were played
+//!   on a turntable at a different speed), speed changes tempo alone, and pitch
+//!   changes pitch alone.
 //!
 //! sin/cos per sample, left alone
 //!
@@ -82,6 +73,7 @@ use lavalink_protocol::filters::{
     Vibrato,
 };
 use lavalink_protocol::Omissible;
+use soundtouch::SoundTouch;
 
 /// What /v4/info advertises and what PATCH accepts.
 ///
@@ -170,6 +162,8 @@ trait AudioFilter: std::fmt::Debug {
 pub struct FilterChain {
     /// In the original's application order, which is part of how the audio sounds.
     stages: Vec<Box<dyn AudioFilter>>,
+    /// A lone timescale stage can consume the pump's interleaved PCM directly.
+    timescale_only: Option<TimescaleFilter>,
 }
 
 impl FilterChain {
@@ -194,9 +188,11 @@ impl FilterChain {
         if let Some(karaoke) = present(&filters.karaoke) {
             stages.push(Box::new(KaraokeFilter::new(karaoke)));
         }
-        if let Some(timescale) = present(&filters.timescale) {
-            stages.push(Box::new(TimescaleFilter::new(timescale, channels)));
-        }
+        stages.retain(|stage| stage.is_enabled());
+        let timescale_index = stages.len();
+        let timescale = present(&filters.timescale)
+            .map(|config| TimescaleFilter::new(config, channels))
+            .filter(|filter| filter.is_enabled());
         if let Some(tremolo) = present(&filters.tremolo) {
             stages.push(Box::new(TremoloFilter::new(tremolo, channels)));
         }
@@ -217,7 +213,18 @@ impl FilterChain {
         }
 
         stages.retain(|stage| stage.is_enabled());
-        Self { stages }
+        let timescale_only = match timescale {
+            Some(timescale) if stages.is_empty() => Some(timescale),
+            Some(timescale) => {
+                stages.insert(timescale_index, Box::new(timescale));
+                None
+            }
+            None => None,
+        };
+        Self {
+            stages,
+            timescale_only,
+        }
     }
 
     /// Whether any filter would actually change the audio.
@@ -225,18 +232,34 @@ impl FilterChain {
     /// The original uses this to skip building a pipeline at all
     /// (FilterChain.kt:93).
     pub fn is_enabled(&self) -> bool {
-        !self.stages.is_empty()
+        self.timescale_only.is_some() || !self.stages.is_empty()
     }
 
     /// Applies every enabled filter in place, in order.
     pub fn process(&mut self, channels: &mut [Vec<f32>]) {
+        if let Some(timescale) = &mut self.timescale_only {
+            timescale.process(channels);
+            return;
+        }
         for stage in &mut self.stages {
             stage.process(channels);
         }
     }
 
+    /// Processes the only chain shape whose DSP already consumes interleaved PCM.
+    pub(crate) fn process_interleaved(&mut self, samples: &[f32], out: &mut Vec<f32>) -> bool {
+        let Some(timescale) = &mut self.timescale_only else {
+            return false;
+        };
+        timescale.process_interleaved(samples, out);
+        true
+    }
+
     /// Forwards a landed seek to every stage — see AudioFilter::reset.
     pub fn reset(&mut self) {
+        if let Some(timescale) = &mut self.timescale_only {
+            timescale.reset();
+        }
         for stage in &mut self.stages {
             stage.reset();
         }
@@ -545,135 +568,166 @@ impl AudioFilter for KaraokeFilter {
     }
 }
 
-/// Wraps signalsmith_stretch::Stretch — see the module docs for why this is not a
-/// SoundTouch/WSOLA port, and for the speed/pitch/rate combination rule.
-///
-/// The one filter whose process changes frame count instead of transforming
-/// samples in place.
+/// SoundTouch's streaming WSOLA stretcher. Like upstream, each channel owns a
+/// mono converter and all converters are drained in lockstep.
 struct TimescaleFilter {
-    stretch: signalsmith_stretch::Stretch,
-    /// speed * rate: input frames divided by this is output frames.
+    converters: Vec<SoundTouch>,
+    channels: usize,
     speed_factor: f32,
+    pitch_factor: f32,
     enabled: bool,
-    /// Scratch buffers reused across calls so a warmed-up pump allocates nothing
-    /// here — the same pattern Resampler's frames buffer uses.
-    interleaved_in: Vec<f32>,
-    interleaved_out: Vec<f32>,
+    /// Interleaved-only input scratch and upstream-sized output segments. All are
+    /// reused after warm-up; planar chains feed their existing channel buffers.
+    input_segments: Vec<Vec<f32>>,
+    output_segments: Vec<Vec<f32>>,
 }
 
-// Stretch does not implement Debug (it is a cc/bindgen wrapper around an
-// opaque C++ object), so this is written by hand rather than derived.
 impl std::fmt::Debug for TimescaleFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TimescaleFilter")
             .field("speed_factor", &self.speed_factor)
+            .field("pitch_factor", &self.pitch_factor)
             .field("enabled", &self.enabled)
             .finish()
     }
 }
 
-/// Neither Filters::validate nor Timescale itself bounds speed/pitch/
-/// rate — they are unclamped f64s straight off the wire. speed_factor is a
-/// divisor of the per-call frame count below (in_frames / speed_factor), so a
-/// client-supplied speed/rate at or below zero would divide by zero or go
-/// negative, and anything just above zero still asks Stretch for an output
-/// buffer many minutes long from one ~20ms chunk. Vec::resize on that scale
-/// doesn't panic, it aborts the whole node on allocation failure — a class of
-/// crash engine.rs's catch_unwind cannot contain, unlike an ordinary panic.
-/// This is the same runaway-allocation risk pump.rs's SANE_SAMPLE_RATE_HZ
-/// guards against, from a filter request instead of a degenerate container.
-/// 1e-3 caps one call's stretch at 1000x — already an extreme slowdown, and far
-/// short of overflowing anything.
+/// A lower effective factor would let one ordinary decoder packet generate an
+/// effectively unbounded amount of audio. Roughly 1000x is already far beyond
+/// practical playback while keeping one bad authenticated request bounded.
 const MIN_SPEED_FACTOR: f32 = 1e-3;
+const TIMESCALE_BUFFER_SIZE: usize = 4_096;
 
 impl TimescaleFilter {
     fn new(config: Timescale, channels: usize) -> Self {
-        // Same non-finite guard as pitch_factor below, and for the same reason:
-        // .max on a +inf operand returns +inf, not the floor. An infinite
-        // speed_factor makes out_frames below (in_frames / speed_factor) round
-        // to 0, so the chain emits nothing at all for the rest of the track —
-        // the ring never fills, the pump spins through the whole source at
-        // decode speed, and the player looks like it is playing silence with
-        // no TrackStuckEvent to say otherwise (on_progress keeps firing).
-        // 1.0 is the neutral speed, the same fallback pitch_factor uses.
-        let speed_factor = (config.speed * config.rate) as f32;
-        let speed_factor = finite(speed_factor, 1.0).max(MIN_SPEED_FACTOR);
-        // pitch/rate are each individually in-range f64s, but their product can
-        // still overflow to infinity at multiplication time, and that would
-        // cross into Stretch::set_transpose_factor's C++ FFI unchecked. A
-        // non-finite product falls back to the neutral 1.0 (no pitch shift); a
-        // finite but non-positive one is floored like speed_factor, since a
-        // zero or negative multiplier is just as meaningless here.
-        let pitch_factor = (config.pitch * config.rate) as f32;
-        let pitch_factor = finite(pitch_factor, 1.0).max(MIN_SPEED_FACTOR);
+        let raw_speed = config.speed as f32;
+        let raw_pitch = config.pitch as f32;
+        let raw_rate = config.rate as f32;
+        let speed_factor = finite(raw_speed * raw_rate, 1.0).max(MIN_SPEED_FACTOR);
+        let pitch_factor = finite(raw_pitch * raw_rate, 1.0).max(MIN_SPEED_FACTOR);
 
-        // 80ms window/50ms interval, without preset_cheaper's split-computation overhead.
-        let mut stretch = signalsmith_stretch::Stretch::new(channels as u32, 3_840, 2_400);
-        if (pitch_factor - 1.0).abs() > f32::EPSILON {
-            stretch.set_transpose_factor(pitch_factor, None);
-        }
+        // Ordinary positive values keep SoundTouch's three independent controls.
+        // Degenerate inputs are expressed as their already-guarded effective
+        // factors with neutral rate, so no NaN/inf/non-positive value crosses FFI.
+        let direct = [raw_speed, raw_pitch, raw_rate]
+            .into_iter()
+            .all(|value| value.is_finite() && value > 0.0)
+            && (raw_speed * raw_rate).is_finite()
+            && (raw_pitch * raw_rate).is_finite()
+            && raw_speed * raw_rate >= MIN_SPEED_FACTOR
+            && raw_pitch * raw_rate >= MIN_SPEED_FACTOR;
+        let (speed, pitch, rate) = if direct {
+            (raw_speed, raw_pitch, raw_rate)
+        } else {
+            (speed_factor, pitch_factor, 1.0)
+        };
+
+        let converters = (0..channels)
+            .map(|_| {
+                let mut converter = SoundTouch::new();
+                converter
+                    .set_channels(1)
+                    .set_sample_rate(SAMPLE_RATE as u32)
+                    .set_tempo(speed as f64)
+                    .set_pitch(pitch as f64)
+                    .set_rate(rate as f64);
+                converter
+            })
+            .collect();
 
         Self {
-            stretch,
+            converters,
+            channels,
             speed_factor,
+            pitch_factor,
             enabled: (speed_factor - 1.0).abs() > f32::EPSILON
                 || (pitch_factor - 1.0).abs() > f32::EPSILON,
-            interleaved_in: Vec::new(),
-            interleaved_out: Vec::new(),
+            input_segments: vec![Vec::new(); channels],
+            output_segments: vec![vec![0.0; TIMESCALE_BUFFER_SIZE]; channels],
+        }
+    }
+
+    /// Fills every channel's output segment and returns their common frame count.
+    /// Different counts would desynchronise stereo permanently; failing this track
+    /// is safer than emitting stale samples from the shorter channel.
+    fn receive(&mut self) -> usize {
+        let mut written = None;
+        for (converter, segment) in self.converters.iter_mut().zip(&mut self.output_segments) {
+            let count = converter.receive_samples(segment, TIMESCALE_BUFFER_SIZE);
+            if let Some(expected) = written {
+                assert_eq!(count, expected, "SoundTouch channel output lost lockstep");
+            } else {
+                written = Some(count);
+            }
+        }
+        written.unwrap_or(0)
+    }
+
+    fn process_interleaved(&mut self, samples: &[f32], out: &mut Vec<f32>) {
+        let in_frames = samples.len() / self.channels;
+        for segment in &mut self.input_segments {
+            segment.clear();
+            segment.reserve(in_frames);
+        }
+        for frame in samples[..in_frames * self.channels].chunks_exact(self.channels) {
+            for (segment, sample) in self.input_segments.iter_mut().zip(frame) {
+                segment.push(*sample);
+            }
+        }
+        for (converter, segment) in self.converters.iter_mut().zip(&self.input_segments) {
+            converter.put_samples(segment, in_frames);
+        }
+
+        out.clear();
+        loop {
+            let written = self.receive();
+            if written == 0 {
+                break;
+            }
+            out.reserve(written * self.channels);
+            for frame in 0..written {
+                for segment in &self.output_segments {
+                    out.push(segment[frame]);
+                }
+            }
         }
     }
 }
 
 impl AudioFilter for TimescaleFilter {
-    /// speed/pitch/rate all default to 1.0 (a no-op combination); asking
-    /// for any other combination is the switch, matching KaraokeFilter.
     fn is_enabled(&self) -> bool {
         self.enabled
     }
 
     fn process(&mut self, channels: &mut [Vec<f32>]) {
-        let in_frames = channels[0].len();
-        if in_frames == 0 {
+        let Some(in_frames) = channels.first().map(Vec::len) else {
             return;
+        };
+        for (converter, channel) in self.converters.iter_mut().zip(channels.iter()) {
+            assert_eq!(channel.len(), in_frames, "timescale input channels lost lockstep");
+            converter.put_samples(channel, in_frames);
         }
-        let channel_count = channels.len();
-
-        self.interleaved_in.clear();
-        self.interleaved_in.reserve(in_frames * channel_count);
-        for frame in 0..in_frames {
-            for channel in channels.iter() {
-                self.interleaved_in.push(channel[frame]);
-            }
-        }
-
-        // Stretch::process takes whatever input/output lengths a call is given —
-        // the length mismatch between them is what creates the stretch — so a
-        // fixed-ratio-per-call request is exactly the streaming shape it wants.
-        // speed_factor is clamped to MIN_SPEED_FACTOR (> 0) in new, so this is
-        // always finite and non-negative — no .max(0.0) needed.
-        let out_frames = ((in_frames as f32) / self.speed_factor).round() as usize;
-        self.interleaved_out.clear();
-        self.interleaved_out.resize(out_frames * channel_count, 0.0);
-        self.stretch.process(&self.interleaved_in, self.interleaved_out.as_mut_slice());
-
         for channel in channels.iter_mut() {
             channel.clear();
         }
-        for frame in 0..out_frames {
-            for (channel_index, channel) in channels.iter_mut().enumerate() {
-                channel.push(self.interleaved_out[frame * channel_count + channel_index]);
+
+        loop {
+            let written = self.receive();
+            if written == 0 {
+                break;
+            }
+            for (channel, segment) in channels.iter_mut().zip(&self.output_segments) {
+                channel.extend_from_slice(&segment[..written]);
             }
         }
     }
 
-    /// Stretch buffers output_latency frames (tens of milliseconds) of
-    /// overlap-add state internally, unlike the single-sample IIR history the
-    /// other filters carry — left alone across a seek, that state would blend
-    /// pre-seek audio into the first stretch of post-seek playback. Matches
-    /// lavaplayer's own AudioFilter.seekPerformed — the original does not
-    /// rebuild its filter chain on seek either, it notifies each filter.
+    /// SoundTouch buffers tens of milliseconds internally. A landed seek must
+    /// discard it so pre-seek audio cannot leak into the new position.
     fn reset(&mut self) {
-        self.stretch.reset();
+        for converter in &mut self.converters {
+            converter.clear();
+        }
     }
 }
 
@@ -1703,27 +1757,67 @@ mod tests {
         assert!(!chain.is_enabled());
     }
 
-    /// speed above 1.0 shrinks the buffer — timescale is the one filter whose
+    /// speed above 1.0 shrinks the stream — timescale is the one filter whose
     /// process changes frame count instead of transforming samples in place.
     #[test]
     fn timescale_speed_changes_frame_count() {
         let mut chain = FilterChain::new(&filters(r#"{"timescale":{"speed":2.0}}"#), 2);
         assert!(chain.is_enabled());
 
-        let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
-        let in_frames = channels[0].len();
-        chain.process(&mut channels);
+        let mut out_frames = 0;
+        for _ in 0..16 {
+            let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+            chain.process(&mut channels);
+            assert_eq!(channels[0].len(), channels[1].len(), "channels must stay in lockstep");
+            out_frames += channels[0].len();
+        }
 
-        // Not an exact halving: Stretch carries internal FFT-block latency across
-        // calls, so a single 960-frame call sees only part of that settle out.
-        assert_ne!(channels[0].len(), in_frames);
-        assert_eq!(channels[0].len(), channels[1].len(), "channels must stay in lockstep");
+        assert!(out_frames > 0, "SoundTouch never left its startup latency");
+        assert!(out_frames < 16 * 960, "2x speed did not shrink the stream");
+    }
+
+    #[test]
+    fn timescale_interleaved_path_matches_planar_processing() {
+        let config = filters(r#"{"timescale":{"speed":1.1,"pitch":1.05,"rate":1.0}}"#);
+        let mut direct = FilterChain::new(&config, 2);
+        let mut planar = FilterChain::new(&config, 2);
+        let mut direct_out = Vec::new();
+
+        let mut produced = false;
+        for (round, frames) in [960, 480].into_iter().cycle().take(16).enumerate() {
+            let input: Vec<f32> = (0..frames * 2)
+                .map(|sample| ((((round * 1_920 + sample) * 37) % 1_000) as f32 / 500.0) - 1.0)
+                .collect();
+            assert!(direct.process_interleaved(&input, &mut direct_out));
+
+            let mut channels = vec![Vec::with_capacity(frames), Vec::with_capacity(frames)];
+            for frame in input.chunks_exact(2) {
+                channels[0].push(frame[0]);
+                channels[1].push(frame[1]);
+            }
+            planar.process(&mut channels);
+
+            let expected: Vec<f32> = (0..channels[0].len())
+                .flat_map(|frame| [channels[0][frame], channels[1][frame]])
+                .collect();
+            assert_eq!(direct_out, expected);
+            produced |= !direct_out.is_empty();
+        }
+        assert!(produced, "comparison never left SoundTouch's startup latency");
+
+        let mut mixed = FilterChain::new(
+            &filters(
+                r#"{"volume":1.2,"timescale":{"speed":1.1,"pitch":1.05,"rate":1.0}}"#,
+            ),
+            2,
+        );
+        assert!(!mixed.process_interleaved(&[0.0, 0.0], &mut direct_out));
     }
 
     /// rate moves speed and pitch together; speed/pitch alone leave the other
     /// at its neutral value. Exercised through is_enabled rather than the DSP
-    /// output, since the combination rule (not the stretcher's output samples) is
-    /// what this codebase owns — signalsmith-stretch owns the rest.
+    /// output, since the combination rule rather than SoundTouch's output samples
+    /// is what this codebase owns.
     #[test]
     fn timescale_rate_moves_speed_and_pitch_together() {
         let chain = FilterChain::new(&filters(r#"{"timescale":{"rate":1.5}}"#), 2);
@@ -1731,12 +1825,10 @@ mod tests {
     }
 
     /// Neither the protocol nor Filters::validate bounds speed/rate — a
-    /// client can send zero, negative, or a tiny positive value. speed_factor
-    /// is a divisor of the per-call frame count, so unclamped this would divide
-    /// by zero (or go negative) and ask Vec::resize for an enormous buffer,
-    /// which aborts the process rather than panicking — a crash engine.rs's
-    /// catch_unwind cannot contain. MIN_SPEED_FACTOR must keep this finite
-    /// and bounded regardless of what the client sends.
+    /// client can send zero, negative, or a tiny positive value. SoundTouch only
+    /// accepts positive controls, and an arbitrarily small effective speed can
+    /// still generate an arbitrarily large output stream. MIN_SPEED_FACTOR keeps
+    /// both the FFI input and output growth bounded.
     #[test]
     fn a_zero_or_negative_speed_does_not_blow_up_the_output_buffer() {
         for json in [
@@ -1748,45 +1840,39 @@ mod tests {
             let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
             chain.process(&mut channels);
 
-            assert!(channels[0].len() <= 960 * 1000, "runaway output buffer for {json}");
+            assert!(
+                channels[0].len() <= 960 * 1100,
+                "runaway output buffer of {} frames for {json}",
+                channels[0].len()
+            );
             assert_eq!(channels[0].len(), channels[1].len());
         }
     }
 
-    /// The mirror of a_non_finite_pitch_does_not_reach_the_stretcher below,
-    /// on the field that was still missing the guard: speed_factor went
-    /// through .max(MIN_SPEED_FACTOR) alone, and .max on a +inf operand
-    /// returns +inf rather than the floor. speed * rate overflowing f64
-    /// therefore left out_frames (in_frames / speed_factor) rounding to 0,
-    /// so the chain emitted nothing at all for the rest of the track — the ring
-    /// never filled, the pump raced through the whole source at decode speed,
-    /// and the player reported Playing with no TrackStuckEvent to
-    /// contradict it (on_progress keeps firing). A finite output length is
-    /// what pins it: not merely bounded above, as the zero/negative case
-    /// checks, but actually non-empty.
+    /// An overflowed effective speed falls back to neutral rather than crossing
+    /// FFI or silencing the track. SoundTouch has startup latency, so feed enough
+    /// buffers to distinguish that latency from permanent silence.
     #[test]
     fn a_non_finite_speed_still_produces_audio() {
         let mut chain =
             FilterChain::new(&filters(r#"{"timescale":{"rate":1.7e308,"speed":1.7e308}}"#), 2);
-        let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
-        chain.process(&mut channels);
-
-        assert!(
-            !channels[0].is_empty(),
-            "an overflowed speed must fall back to neutral, not silence the track"
-        );
-        assert!(channels[0].len() <= 960 * 1000, "runaway output buffer");
-        assert!(channels[0].iter().all(|sample| sample.is_finite()));
-        assert_eq!(channels[0].len(), channels[1].len());
+        let mut produced = false;
+        for _ in 0..16 {
+            let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+            chain.process(&mut channels);
+            produced |= !channels[0].is_empty();
+            assert!(channels[0].len() <= 960 * 1000, "runaway output buffer");
+            assert!(channels[0].iter().all(|sample| sample.is_finite()));
+            assert_eq!(channels[0].len(), channels[1].len());
+        }
+        assert!(produced, "an overflowed speed must fall back to neutral, not silence the track");
     }
 
     /// pitch_factor had no equivalent guard to speed_factor's
     /// MIN_SPEED_FACTOR. pitch/rate are each individually valid, in-range
     /// f64s (serde_json itself already refuses a literal like 1e309), but
-    /// their product can still overflow f64 to infinity at multiplication
-    /// time, and that infinity reached Stretch::set_transpose_factor's C++ FFI
-    /// unchecked. Constructing the filter (and processing through it) must not
-    /// panic or leave a non-finite factor in place of it.
+    /// their product can still overflow to infinity. Constructing the filter and
+    /// processing through it must not pass that value into SoundTouch.
     #[test]
     fn a_non_finite_pitch_does_not_reach_the_stretcher() {
         let mut chain =
@@ -1880,7 +1966,7 @@ mod tests {
 
     /// Mirrors lavaplayer's per-filter seekPerformed, not a chain rebuild —
     /// FilterChain::reset must reach every stage (TimescaleFilter's internal
-    /// Stretch buffering included) without panicking, and the chain must keep
+    /// SoundTouch buffering included) without panicking, and the chain must keep
     /// producing sane output afterward. What lands in pump::State::seek.
     #[test]
     fn reset_reaches_every_stage_and_leaves_the_chain_usable() {
@@ -1891,9 +1977,13 @@ mod tests {
 
         chain.reset();
 
-        let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
-        chain.process(&mut channels);
-        assert!(!channels[0].is_empty());
-        assert_eq!(channels[0].len(), channels[1].len());
+        let mut produced = false;
+        for _ in 0..16 {
+            let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+            chain.process(&mut channels);
+            produced |= !channels[0].is_empty();
+            assert_eq!(channels[0].len(), channels[1].len());
+        }
+        assert!(produced, "reset converter never left its startup latency");
     }
 }

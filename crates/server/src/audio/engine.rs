@@ -36,7 +36,7 @@ use tokio::sync::mpsc::Sender as AsyncSender;
 use super::pump::{self, PumpCommand, PumpConfig};
 use super::ring::{self, CHANNELS, SAMPLE_RATE};
 use super::stream::StreamOpener;
-use super::{Engine, EngineEvent, PlayRequest};
+use super::{Engine, EngineEvent, EngineReport, PlayRequest};
 use crate::config::ResamplingQuality;
 use crate::lock;
 use crate::player::EventSlot;
@@ -132,6 +132,13 @@ fn superseded_by_a_replacement(active: &Mutex<Option<Active>>) -> bool {
     lock(active).is_some()
 }
 
+/// Terminal delivery happens after the pump has stopped producing, so waiting
+/// for the actor is safe here and prevents a full report queue from wedging the
+/// player forever. Progress reports remain deliberately lossy.
+fn send_terminal(events: &AsyncSender<EngineReport>, report: EngineReport) {
+    let _ = events.blocking_send(report);
+}
+
 impl PipelineEngine {
     pub fn new(
         guild_id: u64,
@@ -169,13 +176,11 @@ impl PipelineEngine {
         }
     }
 
-    fn report(&self, event: EngineEvent) {
+    fn report(&self, generation: u64, event: EngineEvent) {
         let Some(events) = self.events.get().cloned() else {
             return;
         };
-        // try_send, not send: this runs on the pump thread, which must not block
-        // on a busy actor.
-        let _ = events.try_send(event);
+        let _ = events.try_send(EngineReport { generation, event });
     }
 
     /// Tears down whatever is playing.
@@ -213,12 +218,12 @@ impl Engine for PipelineEngine {
         Arc::clone(&self.frames)
     }
 
-    fn attach(&self, events: AsyncSender<EngineEvent>) {
+    fn attach(&self, events: AsyncSender<EngineReport>) {
         // Engine::attach's own contract: called once, at construction.
         let _ = self.events.set(events);
     }
 
-    fn play(&self, request: PlayRequest) {
+    fn play(&self, request: PlayRequest) -> u64 {
         self.stop_active();
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
 
@@ -248,11 +253,19 @@ impl Engine for PipelineEngine {
             let active = Arc::clone(&self.active);
             let guild_id = self.guild_id;
             self.runtime.spawn(async move {
-                let handle = voice.play(input).await;
+                let Some(handle) = voice
+                    .play_if(input, || is_current(&active, generation))
+                    .await
+                else {
+                    tracing::debug!(guild_id, "discarded a superseded input");
+                    return;
+                };
 
                 // Store the handle only if this track is still current — by the
-                // time the mixer takes the input, a newer play request may have
-                // replaced it.
+                // time the mixer returns its handle, a newer play request may
+                // have replaced it. play_if's earlier check also runs under the
+                // voice lock, so an older task can never replace a newer mixer
+                // input after losing the race for that lock.
                 //
                 // paused is read from current, not a snapshot captured at the top
                 // of play: Active::paused is the same field set_paused writes, so
@@ -332,7 +345,10 @@ impl Engine for PipelineEngine {
                         return;
                     }
                     if let Some(events) = &events {
-                        let _ = events.try_send(EngineEvent::Progress);
+                        let _ = events.try_send(EngineReport {
+                            generation,
+                            event: EngineEvent::Progress,
+                        });
                     }
                 };
 
@@ -341,10 +357,8 @@ impl Engine for PipelineEngine {
                 // move below so it survives the unwind: writer is consumed by
                 // pump::run and gone once it panics, but this clone (same
                 // Arc<Shared>) can still call finish() — the reader's only way to
-                // learn the track ended if the event below never reaches the actor.
-                // Engine events have their own queue now, so that is no longer the
-                // routine case it once was, but try_send can still fail and the
-                // reader must not be left waiting on a pump that no longer exists.
+                // learn the track ended if the actor has already gone away and the
+                // terminal report below therefore has nowhere to go.
                 let writer_after_panic = writer.clone();
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     pump::run(config, writer, pump_commands, position_ms, &on_progress)
@@ -380,21 +394,25 @@ impl Engine for PipelineEngine {
                     // whatever track replaced it.
                     if let Some(event) = event {
                         if is_current(&active, generation) {
-                            let _ = events.try_send(event);
+                            send_terminal(events, EngineReport { generation, event });
                         }
                     }
                 }
             });
 
         if let Err(error) = spawned {
-            self.report(EngineEvent::Failed {
-                exception: Exception::fault(
-                    format!("Could not start the audio pipeline: {error}"),
-                    error.to_string(),
-                ),
-                started: false,
-            });
+            self.report(
+                generation,
+                EngineEvent::Failed {
+                    exception: Exception::fault(
+                        format!("Could not start the audio pipeline: {error}"),
+                        error.to_string(),
+                    ),
+                    started: false,
+                },
+            );
         }
+        generation
     }
 
     fn stop(&self) {
@@ -558,6 +576,33 @@ mod tests {
         assert_ne!(second, first);
         assert!(!is_current(&active, first));
         assert!(is_current(&active, second));
+    }
+
+    #[test]
+    fn a_terminal_report_waits_for_queue_capacity() {
+        let (events, mut reports) = tokio::sync::mpsc::channel(1);
+        events
+            .try_send(EngineReport {
+                generation: 1,
+                event: EngineEvent::Progress,
+            })
+            .unwrap();
+
+        let sender = std::thread::spawn(move || {
+            send_terminal(
+                &events,
+                EngineReport {
+                    generation: 1,
+                    event: EngineEvent::Finished,
+                },
+            );
+        });
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(!sender.is_finished(), "terminal report was dropped from a full queue");
+
+        assert!(matches!(reports.blocking_recv().unwrap().event, EngineEvent::Progress));
+        sender.join().unwrap();
+        assert!(matches!(reports.blocking_recv().unwrap().event, EngineEvent::Finished));
     }
 
     /// The bug this guards: play used to hardcode started: true in the

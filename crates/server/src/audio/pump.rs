@@ -654,20 +654,19 @@ enum ControlFlow {
 /// length-changing filter — see filter.rs's module docs) can make the output a
 /// different number of frames than the input.
 ///
-/// planar is the transpose scratch, also reused across calls. The chain works on
-/// planar channels and the ring wants interleaved, so a buffer with any filter
-/// enabled pays two extra full passes on top of the DSP itself (three once
-/// timescale is active, for the same reason out exists at all). That transpose
-/// is the pump's cost, not the chain's, which is why this lives here rather than in
-/// filter.rs — and why it is free-standing and public rather than a method on
-/// State: benches/filter.rs measures the chain with the transpose around it,
-/// which is the only shape playback actually runs.
+/// planar is the transpose scratch, also reused across calls. Other filters are
+/// planar ports, so they pay a transpose in and out. A lone timescale filter
+/// already consumes interleaved PCM and bypasses both copies.
 pub fn filter_interleaved(
     chain: &mut FilterChain,
     samples: &[f32],
     planar: &mut [Vec<f32>],
     out: &mut Vec<f32>,
 ) {
+    if chain.process_interleaved(samples, out) {
+        return;
+    }
+
     out.clear();
     if !chain.is_enabled() {
         out.extend_from_slice(samples);

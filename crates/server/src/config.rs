@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 
+use axum::http::Uri;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -45,6 +46,29 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "lavalink.server.playerUpdateInterval must be at least 1 second".into(),
             ));
+        }
+        let endpoint = self.metrics.prometheus.endpoint.as_str();
+        if !endpoint.is_empty() {
+            let uri = endpoint.parse::<Uri>().ok();
+            let is_static_path = uri.as_ref().is_some_and(|uri| {
+                uri.scheme().is_none()
+                    && uri.authority().is_none()
+                    && uri.query().is_none()
+                    && uri.path() == endpoint
+                    && endpoint.starts_with('/')
+                    && !endpoint.contains(['{', '}', '*'])
+                    && !endpoint.split('/').any(|segment| segment.starts_with(':'))
+            });
+            if !is_static_path {
+                return Err(ConfigError::Invalid(
+                    "metrics.prometheus.endpoint must be an absolute static path".into(),
+                ));
+            }
+            if endpoint == "/version" || endpoint == "/v4" || endpoint.starts_with("/v4/") {
+                return Err(ConfigError::Invalid(
+                    "metrics.prometheus.endpoint must not overlap a server route".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -366,6 +390,31 @@ lavalink:
         let config: Config = serde_yaml::from_str(&yaml).unwrap();
         assert!(config.metrics.prometheus.enabled);
         assert_eq!(config.metrics.prometheus.endpoint, "/prometheus");
+    }
+
+    #[test]
+    fn invalid_or_reserved_prometheus_endpoints_are_rejected() {
+        for endpoint in [
+            "metrics",
+            "/metrics?x=1",
+            "/{path}",
+            "/:path",
+            "/version",
+            "/v4/info",
+        ] {
+            let mut config = example();
+            config.metrics.prometheus.endpoint = endpoint.into();
+            assert!(
+                matches!(config.validate(), Err(ConfigError::Invalid(_))),
+                "accepted {endpoint}"
+            );
+        }
+
+        for endpoint in ["", "/metrics", "/monitoring/prometheus"] {
+            let mut config = example();
+            config.metrics.prometheus.endpoint = endpoint.into();
+            assert!(config.validate().is_ok(), "rejected {endpoint}");
+        }
     }
 
     #[test]

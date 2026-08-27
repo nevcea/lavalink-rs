@@ -304,21 +304,19 @@ impl SessionRegistry {
     /// Session-Resumed handshake response header
     /// (HandshakeInterceptorImpl.kt's canResume check), which is read-only
     /// and happens before the socket the real claim needs even exists. Shares
-    /// Self::claim_for_resume's deadline condition exactly, so the header
+    /// Self::claim_for_resume's eligibility condition exactly, so the header
     /// never promises a resume that the claim moments later would refuse.
     pub fn can_resume(&self, id: &str, now: Instant) -> bool {
-        matches!(
-            self.lock().get(id).map(|entry| entry.state),
-            Some(SessionState::Resumable { deadline }) if deadline > now
-        )
+        self.lock()
+            .get(id)
+            .is_some_and(|entry| Self::is_resumable(entry, now))
     }
 
     /// Takes ownership of a resumable session, in one atomic step.
     ///
-    /// Returns None when the id is unknown, the session is currently open, or
-    /// its deadline has already passed — in the first two cases its resume
-    /// deadline, if any, is left running untouched; in the last, the entry is
-    /// left for sweep_expired to remove rather than raced against it here.
+    /// Returns None when the id is unknown, currently open, expired, or its
+    /// essential replay queue has no room for Ready. A rejected entry is left
+    /// for sweep_expired rather than raced against it here.
     /// Without this check, a resume landing between two sweep ticks (up to
     /// ticker::SWEEP_INTERVAL late) could succeed after the deadline the client
     /// was promised — sweep_expired only runs once a second, so it is not a
@@ -326,13 +324,18 @@ impl SessionRegistry {
     pub fn claim_for_resume(&self, id: &str, now: Instant) -> Option<Arc<Session>> {
         let mut sessions = self.lock();
         let entry = sessions.get_mut(id)?;
-        match entry.state {
-            SessionState::Resumable { deadline } if deadline > now => {}
-            _ => return None,
+        if !Self::is_resumable(entry, now) {
+            return None;
         }
-        entry.state = SessionState::Open;
         let session = Arc::clone(&entry.session);
-        session.sink.resume();
+        session
+            .sink
+            .resume_with_first(Message::Ready {
+                resumed: true,
+                session_id: session.id.clone(),
+            })
+            .ok()?;
+        entry.state = SessionState::Open;
         Some(session)
     }
 
@@ -449,18 +452,21 @@ impl SessionRegistry {
 
     /// Called from both passes of Self::sweep_expired with the registry lock
     /// held, and is_overflowing takes that session's sink lock — so this nests
-    /// sink inside registry. Self::claim_for_resume's sink.resume() and
+    /// sink inside registry. Self::claim_for_resume's sink.resume_with_first() and
     /// Self::on_disconnect's sink.pause() do the same nesting, all under
     /// this same order: nothing may take the registry lock while holding a sink
     /// lock. Sink's own methods never reach for the registry, which is what keeps
     /// the rule easy to hold to.
     fn is_expired(entry: &Entry, now: Instant) -> bool {
-        match entry.state {
-            SessionState::Resumable { deadline } => {
-                deadline <= now || entry.session.sink.is_overflowing()
-            }
-            SessionState::Open => false,
-        }
+        matches!(entry.state, SessionState::Resumable { .. })
+            && !Self::is_resumable(entry, now)
+    }
+
+    fn is_resumable(entry: &Entry, now: Instant) -> bool {
+        matches!(
+            entry.state,
+            SessionState::Resumable { deadline } if deadline > now
+        ) && !entry.session.sink.is_overflowing()
     }
 
     /// Unconditional removal, for an explicit close or shutdown.
@@ -631,6 +637,10 @@ mod tests {
         assert!(Arc::ptr_eq(&claimed, &session));
         assert_eq!(registry.state(&session.id), Some(SessionState::Open));
         assert!(!session.sink.is_paused());
+        assert!(matches!(
+            session.sink.try_recv(),
+            Some(Message::Ready { resumed: true, .. })
+        ));
     }
 
     /// can_resume backs the Session-Resumed handshake header — it must
@@ -782,16 +792,11 @@ mod tests {
         assert!(registry.get(&session.id).is_none());
     }
 
-    /// The race sweep_expired's two-phase split opens up: an overflowing
-    /// session (deadline still far off, so claim_for_resume has no reason of
-    /// its own to reject it) is decided expired by the scan phase, then
-    /// successfully claimed for resume — turning it Open — before the
-    /// matching removal runs. Unlike a deadline-expired session (whose claim
-    /// would fail on claim_for_resume's own deadline check), nothing else
-    /// protects an overflow-expired one, so the removal must re-check expiry
-    /// itself rather than trust the scan's now-stale verdict.
+    /// An overflowing replay queue has already lost an essential event and has
+    /// no room for Ready, so it must not be claimed between sweep's scan and
+    /// removal passes.
     #[test]
-    fn a_session_resumed_between_scan_and_removal_is_not_torn_down() {
+    fn an_overflowing_session_cannot_be_claimed() {
         use crate::testing::track;
         use lavalink_protocol::message::{EmittedEvent, Message};
 
@@ -819,16 +824,30 @@ mod tests {
             .get(&session.id)
             .is_some_and(|entry| SessionRegistry::is_expired(entry, now)));
 
-        // The claim that lands in the gap between scan and removal. Succeeds
-        // because the deadline itself is nowhere near now.
-        assert!(registry.claim_for_resume(&session.id, now).is_some());
-        assert_eq!(registry.state(&session.id), Some(SessionState::Open));
+        assert!(!registry.can_resume(&session.id, now));
+        assert!(registry.claim_for_resume(&session.id, now).is_none());
+        assert!(registry.remove_if_still_expired(&session.id, now).is_some());
+        assert!(registry.get(&session.id).is_none());
+    }
 
-        // The stale removal decision must see the session is Open now and
-        // leave it alone, instead of tearing down a session just resumed.
-        assert!(registry.remove_if_still_expired(&session.id, now).is_none());
-        assert!(registry.get(&session.id).is_some());
-        assert_eq!(registry.state(&session.id), Some(SessionState::Open));
+    #[test]
+    fn a_resume_with_one_free_slot_puts_ready_first() {
+        let registry = SessionRegistry::new();
+        let session = resumable_session(&registry);
+        let event = Message::Ready {
+            resumed: false,
+            session_id: "queued".into(),
+        };
+        for _ in 0..crate::sink::ESSENTIAL_CAPACITY - 1 {
+            session.sink.send(event.clone()).unwrap();
+        }
+
+        assert!(registry.can_resume(&session.id, Instant::now()));
+        registry.claim_for_resume(&session.id, Instant::now()).unwrap();
+        assert!(matches!(
+            session.sink.try_recv(),
+            Some(Message::Ready { resumed: true, .. })
+        ));
     }
 
     #[test]

@@ -152,6 +152,29 @@ impl Sink {
         Ok(())
     }
 
+    /// Resumes a detached session with an essential message at the head of its
+    /// replay queue. Capacity check, insertion and unpausing share one lock so
+    /// another producer cannot fill the final slot between those steps.
+    pub fn resume_with_first(&self, message: Message) -> Result<(), SendError> {
+        debug_assert!(
+            message.coalesce_key().is_none(),
+            "resume_with_first is for the essential lane only"
+        );
+        {
+            let mut inner = self.lock();
+            if inner.closed {
+                return Err(SendError::Closed);
+            }
+            if inner.essential.len() >= ESSENTIAL_CAPACITY {
+                return Err(SendError::Overflow);
+            }
+            inner.essential.push_front(message);
+            inner.paused = false;
+        }
+        self.notify.notify_one();
+        Ok(())
+    }
+
     /// Takes the next message to write, or None if there is nothing pending or the
     /// sink is paused or closed.
     pub fn try_recv(&self) -> Option<Message> {
@@ -302,6 +325,19 @@ mod tests {
         assert_eq!(sink.try_recv(), Some(event("ready")));
         assert_eq!(sink.try_recv(), Some(event("1")));
         assert_eq!(sink.try_recv(), Some(event("2")));
+    }
+
+    #[test]
+    fn resume_with_first_inserts_ready_before_unpausing() {
+        let sink = Sink::new();
+        sink.pause();
+        sink.send(event("queued")).unwrap();
+
+        sink.resume_with_first(event("ready")).unwrap();
+
+        assert!(!sink.is_paused());
+        assert_eq!(sink.try_recv(), Some(event("ready")));
+        assert_eq!(sink.try_recv(), Some(event("queued")));
     }
 
     #[test]

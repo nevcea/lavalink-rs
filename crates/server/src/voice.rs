@@ -157,6 +157,18 @@ impl VoiceConnection {
         self.state.lock().await.driver.play_only_input(input)
     }
 
+    /// Serializes the current-track check with mixer replacement. A superseded
+    /// input must not reach play_only_input, because that call stops the newer
+    /// track already in the mixer.
+    pub(crate) async fn play_if(
+        &self,
+        input: songbird::input::Input,
+        should_play: impl FnOnce() -> bool,
+    ) -> Option<songbird::tracks::TrackHandle> {
+        let mut state = self.state.lock().await;
+        should_play().then(|| state.driver.play_only_input(input))
+    }
+
     pub async fn stop(&self) {
         self.state.lock().await.driver.stop();
     }
@@ -240,6 +252,8 @@ pub type SharedVoice = Arc<VoiceConnection>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use songbird::input::RawAdapter;
+    use std::io::Cursor;
 
     fn voice_state(token: &str, endpoint: &str, session: &str, channel: &str) -> VoiceState {
         VoiceState {
@@ -252,6 +266,13 @@ mod tests {
 
     fn voice_updates() -> VoiceUpdateSlot {
         Arc::new(std::sync::OnceLock::new())
+    }
+
+    #[tokio::test]
+    async fn a_superseded_input_never_reaches_the_mixer() {
+        let connection = VoiceConnection::new(123, 456, voice_updates());
+        let input = RawAdapter::new(Cursor::new(Vec::<u8>::new()), 48_000, 2).into();
+        assert!(connection.play_if(input, || false).await.is_none());
     }
 
     // -- needs_reconnect --------------------------------------------------------

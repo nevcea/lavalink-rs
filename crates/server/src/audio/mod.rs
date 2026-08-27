@@ -72,10 +72,19 @@ pub enum EngineEvent {
     Failed { exception: Exception, started: bool },
 }
 
+/// An engine fact tagged with the play call that produced it. The actor checks
+/// the generation again when it consumes the report, closing the gap between a
+/// pump checking that it is current and the report reaching the actor.
+#[derive(Debug, Clone)]
+pub struct EngineReport {
+    pub generation: u64,
+    pub event: EngineEvent,
+}
+
 /// The pipeline, as the actor sees it.
 ///
 /// Every method returns immediately — the actor must not block, so anything slow is
-/// the implementation's job to defer. Results come back as EngineEvents.
+/// the implementation's job to defer. Results come back as EngineReports.
 pub trait Engine: Send + Sync + 'static {
     /// The shared playback position in milliseconds.
     ///
@@ -92,12 +101,12 @@ pub trait Engine: Send + Sync + 'static {
 
     /// Hands the engine a channel for reporting back. Called once, at construction.
     ///
-    /// Its own channel, not the actor's general command queue: a terminal event
-    /// that loses its slot to a burst of REST traffic is a player wedged forever
-    /// — see PlayerHandle::engine_events.
-    fn attach(&self, _events: mpsc::Sender<EngineEvent>) {}
+    /// Its own channel, not the actor's general command queue — see
+    /// PlayerHandle::engine_events.
+    fn attach(&self, _events: mpsc::Sender<EngineReport>) {}
 
-    fn play(&self, request: PlayRequest);
+    /// Starts a track and returns the generation its reports will carry.
+    fn play(&self, request: PlayRequest) -> u64;
     fn stop(&self);
     fn set_paused(&self, paused: bool);
     fn seek(&self, position_ms: i64);
@@ -124,13 +133,13 @@ pub use engine::PipelineEngine;
 
 #[cfg(test)]
 pub mod testing {
-    use std::sync::atomic::AtomicI64;
+    use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
     use lavalink_protocol::filters::Filters;
     use tokio::sync::mpsc;
 
-    use super::{Engine, EngineEvent, PlayRequest};
+    use super::{Engine, EngineReport, PlayRequest};
 
     /// A record of one call into an Engine.
     #[derive(Debug, Clone, PartialEq)]
@@ -163,7 +172,8 @@ pub mod testing {
     pub struct RecordingEngine {
         calls: Arc<Mutex<Vec<EngineCall>>>,
         position_ms: Arc<AtomicI64>,
-        events: Arc<Mutex<Option<mpsc::Sender<EngineEvent>>>>,
+        events: Arc<Mutex<Option<mpsc::Sender<EngineReport>>>>,
+        generation: Arc<AtomicU64>,
     }
 
     impl RecordingEngine {
@@ -181,8 +191,12 @@ pub mod testing {
 
         /// The channel back to the actor, for tests that want to inject an event
         /// the way a real pipeline would.
-        pub fn events(&self) -> Option<mpsc::Sender<EngineEvent>> {
+        pub fn events(&self) -> Option<mpsc::Sender<EngineReport>> {
             self.events.lock().unwrap().clone()
+        }
+
+        pub fn generation(&self) -> u64 {
+            self.generation.load(Ordering::Relaxed)
         }
 
         fn record(&self, call: EngineCall) {
@@ -195,16 +209,18 @@ pub mod testing {
             Arc::clone(&self.position_ms)
         }
 
-        fn attach(&self, events: mpsc::Sender<EngineEvent>) {
+        fn attach(&self, events: mpsc::Sender<EngineReport>) {
             *self.events.lock().unwrap() = Some(events);
         }
 
-        fn play(&self, request: PlayRequest) {
+        fn play(&self, request: PlayRequest) -> u64 {
+            let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
             self.record(EngineCall::Play {
                 identifier: request.track.info.identifier,
                 start_position_ms: request.start_position_ms,
                 paused: request.paused,
             });
+            generation
         }
 
         fn stop(&self) {

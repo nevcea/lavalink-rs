@@ -30,7 +30,7 @@ use lavalink_protocol::Omissible;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::audio::ring::FrameCounters;
-use crate::audio::{Engine, EngineEvent, PlayRequest};
+use crate::audio::{Engine, EngineEvent, EngineReport, PlayRequest};
 use crate::player::state::{PlayerModel, VoiceConnection};
 use crate::sink::{Sink, SendError};
 
@@ -204,7 +204,7 @@ impl PlayerHandle {
 /// once, at construction" comment on Engine::attach.
 type DeferredSlot<T> = Arc<std::sync::OnceLock<mpsc::Sender<T>>>;
 
-pub type EventSlot = DeferredSlot<EngineEvent>;
+pub type EventSlot = DeferredSlot<EngineReport>;
 /// DeferredSlot for voice transitions — VoiceConnection is built before the
 /// actor exists, same as the engine.
 pub type VoiceUpdateSlot = DeferredSlot<VoiceUpdate>;
@@ -228,11 +228,11 @@ pub struct PlayerActor {
     /// Also kept off commands, and for a sharper reason than voice: a dropped
     /// engine event is not a delayed one, it is a player wedged forever.
     ///
-    /// The pump thread must not block on a busy actor, so every report is a
-    /// try_send whose error the engine discards (engine.rs). Sharing the
-    /// 64-slot command queue with REST patches, snapshots and the global tick
-    /// meant a burst could take the slot EngineEvent::Finished needed — and
-    /// nothing else in the node notices a track ending. There is no
+    /// Progress uses try_send because the pump must not block while producing;
+    /// a terminal report is sent only after production ends and may wait for
+    /// capacity. Sharing the 64-slot command queue with REST patches, snapshots
+    /// and the global tick used to let a burst take the slot Finished needed —
+    /// and nothing else in the node notices a track ending. There is no
     /// TrackEvent::End handler on the voice side, and MAINTENANCE.md's
     /// TrackEndReason::Cleanup entry records that stuck detection is
     /// production-side only, so nothing polls for a player that stopped
@@ -244,8 +244,12 @@ pub struct PlayerActor {
     /// reason — the engine outlives nothing here, so this only closes if
     /// attach was never called (RecordingEngine in a test that does not want
     /// one).
-    engine_events: mpsc::Receiver<EngineEvent>,
+    engine_events: mpsc::Receiver<EngineReport>,
     engine_events_closed: bool,
+    /// Generation returned by the current play call. Reports are checked here,
+    /// at consumption time, because a superseded pump may have queued one after
+    /// its own earlier current-generation check.
+    active_generation: Option<u64>,
     /// See PlayerHandle::destroy's field of the same name. Receiving None
     /// here means every handle has been dropped, which is as final as an explicit
     /// destroy and is the only signal that survives a caller giving up mid-way.
@@ -287,7 +291,7 @@ impl PlayerActor {
         // Not from the engine: whether the player is playing is the actor's own
         // state, not the pipeline's.
         let playing_since_ms = Arc::new(AtomicI64::new(0));
-        // The engine reports back as EngineEvent, so it never needs a reference
+        // The engine reports back as EngineReport, so it never needs a reference
         // to the actor itself.
         engine.attach(engine_tx);
         let _ = voice_slot.set(voice_tx.clone());
@@ -309,6 +313,7 @@ impl PlayerActor {
             voice_updates_closed: false,
             engine_events: engine_rx,
             engine_events_closed: false,
+            active_generation: None,
             destroy: destroy_rx,
             position_ms,
             playing_since_ms,
@@ -359,8 +364,8 @@ impl PlayerActor {
                 }
                 event = self.engine_events.recv(), if !self.engine_events_closed => {
                     match event {
-                        Some(event) => {
-                            self.apply_engine_event(event);
+                        Some(report) => {
+                            self.apply_engine_report(report);
                             // Same resync every arm of handle gets, for the
                             // same reason: apply_engine_event can end a track.
                             self.sync_playing();
@@ -540,14 +545,14 @@ impl PlayerActor {
                 self.position_ms.store(position, Ordering::Relaxed);
                 self.stuck_reported = false;
 
-                self.engine.play(PlayRequest {
+                self.active_generation = Some(self.engine.play(PlayRequest {
                     track: track.clone(),
                     start_position_ms: position,
                     end_time_ms: end_time,
                     paused,
                     volume: self.model.volume,
                     filters: self.model.filters.clone(),
-                });
+                }));
 
                 self.emit(EmittedEvent::TrackStart {
                     guild_id: self.guild_id_str.clone(),
@@ -617,6 +622,12 @@ impl PlayerActor {
         }
     }
 
+    fn apply_engine_report(&mut self, report: EngineReport) {
+        if self.active_generation == Some(report.generation) {
+            self.apply_engine_event(report.event);
+        }
+    }
+
     fn check_stuck(&mut self, now: Instant) {
         if !self.model.playback.is_playing() || self.stuck_reported {
             return;
@@ -641,6 +652,7 @@ impl PlayerActor {
 
     /// Ends the current track, emitting TrackEndEvent only if there was one.
     fn stop_track(&mut self, reason: TrackEndReason) {
+        self.active_generation = None;
         self.engine.stop();
         let track = self.model.stop();
         self.position_ms.store(0, Ordering::Relaxed);
@@ -773,7 +785,16 @@ mod tests {
         /// Reports an engine event the way the real pipeline does — through the
         /// channel attach handed the engine, not through commands.
         async fn report(&self, event: EngineEvent) {
-            self.engine.events().unwrap().send(event).await.unwrap();
+            self.report_generation(self.engine.generation(), event).await;
+        }
+
+        async fn report_generation(&self, generation: u64, event: EngineEvent) {
+            self.engine
+                .events()
+                .unwrap()
+                .send(EngineReport { generation, event })
+                .await
+                .unwrap();
         }
     }
 
@@ -1290,6 +1311,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_superseded_generation_cannot_end_the_replacement_track() {
+        let harness = Harness::start();
+        harness.handle.patch(play(track("first"))).await.unwrap();
+        let first_generation = harness.engine.generation();
+
+        harness.handle.patch(play(track("second"))).await.unwrap();
+        harness
+            .report_generation(first_generation, EngineEvent::Finished)
+            .await;
+
+        let player = harness.handle.snapshot().await.unwrap();
+        assert_eq!(player.track.unwrap().info.title, "second");
+        assert!(!harness.events().iter().any(|event| matches!(
+            event,
+            EmittedEvent::TrackEnd {
+                reason: TrackEndReason::Finished,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
     async fn playing_since_is_set_while_playing_and_cleared_when_not() {
         let harness = Harness::start();
         assert_eq!(harness.handle.playing_since_ms(), 0);
@@ -1441,7 +1484,10 @@ mod tests {
             engine
                 .events()
                 .expect("attach should have filled the slot")
-                .try_send(EngineEvent::Finished)
+                .try_send(EngineReport {
+                    generation: 1,
+                    event: EngineEvent::Finished,
+                })
                 .is_ok(),
             "a full commands queue must not cost a track its terminal event"
         );

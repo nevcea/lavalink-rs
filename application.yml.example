@@ -38,9 +38,9 @@ lavalink:
     youtubePlaylistLoadLimit: 6 # pages of 100, same unit as the original
 
     # All ten filters are implemented. Setting one to false makes a request naming
-    # it a 400, and drops it from what /v4/info advertises. `timescale` uses
-    # signalsmith-stretch rather than the original's SoundTouch-through-JNI, so it
-    # is not sample-identical — see MAINTENANCE.md.
+    # it a 400, and drops it from what /v4/info advertises. `timescale` uses a newer
+    # bundled SoundTouch than upstream, so it is not sample-identical — see
+    # MAINTENANCE.md.
     filters:
       volume: true
       equalizer: true
