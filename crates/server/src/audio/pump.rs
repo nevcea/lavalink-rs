@@ -259,6 +259,7 @@ impl State {
         loop {
             match self.drain_commands(commands, writer) {
                 ControlFlow::Continue { .. } => {}
+                ControlFlow::Finished => return PumpOutcome::Finished,
                 ControlFlow::Stopped => return PumpOutcome::Stopped,
             }
 
@@ -269,11 +270,9 @@ impl State {
             // The configured end time is enforced against the playback position,
             // not the decode position, so the track ends when the listener reaches
             // it rather than when the pump does.
-            if let Some(end_time) = self.end_time_ms {
-                if position_ms.load(Ordering::Relaxed) >= end_time {
-                    writer.finish();
-                    return PumpOutcome::Finished;
-                }
+            if self.end_reached(position_ms) {
+                writer.finish();
+                return PumpOutcome::Finished;
             }
 
             let packet = match self.format.next_packet() {
@@ -433,12 +432,14 @@ impl State {
             self.apply_volume(&mut filtered);
 
             self.produced.store(true, Ordering::Relaxed);
-            let outcome = self.write_interruptibly(writer, &filtered, commands);
+            let outcome =
+                self.write_interruptibly(writer, &filtered, commands, position_ms, on_progress);
             self.filtered = filtered;
-            if let ControlFlow::Stopped = outcome {
-                return PumpOutcome::Stopped;
+            match outcome {
+                ControlFlow::Continue { .. } => {}
+                ControlFlow::Finished => return PumpOutcome::Finished,
+                ControlFlow::Stopped => return PumpOutcome::Stopped,
             }
-            on_progress();
         }
     }
 
@@ -456,12 +457,31 @@ impl State {
         writer: &RingWriter,
         samples: &[f32],
         commands: &Receiver<PumpCommand>,
+        position_ms: &AtomicI64,
+        on_progress: &(dyn Fn() + Sync),
     ) -> ControlFlow {
         let mut remaining = samples;
         loop {
+            match self.drain_commands(commands, writer) {
+                ControlFlow::Finished => return ControlFlow::Finished,
+                ControlFlow::Stopped => return ControlFlow::Stopped,
+                ControlFlow::Continue { reset: true } => {
+                    return ControlFlow::Continue { reset: true };
+                }
+                ControlFlow::Continue { reset: false } => {}
+            }
+
+            if self.end_reached(position_ms) {
+                writer.finish();
+                return ControlFlow::Finished;
+            }
+
             let (written, closed) = writer.try_write(remaining);
             if closed {
                 return ControlFlow::Stopped;
+            }
+            if written > 0 {
+                on_progress();
             }
             remaining = &remaining[written..];
             if remaining.is_empty() {
@@ -469,6 +489,7 @@ impl State {
             }
 
             match self.drain_commands(commands, writer) {
+                ControlFlow::Finished => return ControlFlow::Finished,
                 ControlFlow::Stopped => return ControlFlow::Stopped,
                 // A seek that landed already discarded the ring's stale
                 // buffered audio (RingWriter::reset, called from within
@@ -481,10 +502,20 @@ impl State {
                 ControlFlow::Continue { reset: false } => {}
             }
 
+            if self.end_reached(position_ms) {
+                writer.finish();
+                return ControlFlow::Finished;
+            }
+
             if !writer.wait_for_space(COMMAND_POLL) {
                 return ControlFlow::Stopped;
             }
         }
+    }
+
+    fn end_reached(&self, position_ms: &AtomicI64) -> bool {
+        self.end_time_ms
+            .is_some_and(|end_time| position_ms.load(Ordering::Relaxed) >= end_time)
     }
 
     /// Applies commands that arrived since the last packet.
@@ -645,6 +676,7 @@ enum ControlFlow {
     /// reset is set when a command in this batch was a seek that landed,
     /// discarding whatever the ring held before it.
     Continue { reset: bool },
+    Finished,
     Stopped,
 }
 
@@ -1501,7 +1533,13 @@ mod tests {
         // for space that will never come — it must instead see both commands
         // on its very first attempt and return immediately.
         let more_samples = vec![0.0; 10];
-        let flow = state.write_interruptibly(&writer, &more_samples, &commands_rx);
+        let flow = state.write_interruptibly(
+            &writer,
+            &more_samples,
+            &commands_rx,
+            &position,
+            &|| {},
+        );
 
         assert!(matches!(flow, ControlFlow::Stopped));
         assert_eq!(
@@ -1509,6 +1547,107 @@ mod tests {
             player_volume_multiplier(50),
             "SetVolume must be applied even though the ring never had room to write into"
         );
+    }
+
+    #[test]
+    fn a_partial_ring_write_reports_progress_before_the_whole_buffer_is_written() {
+        let wav = TempWav::new("pump-partial-progress", 48_000, 2, 0.1);
+        let config = config(wav.track());
+        let position = Arc::new(AtomicI64::new(0));
+        let buffer_ms = 20;
+        let (writer, reader) = super::super::ring::channel(
+            buffer_ms,
+            Arc::clone(&position),
+            Arc::new(super::super::ring::FrameCounters::default()),
+        );
+        let mut state = open(&config, &writer).unwrap();
+        let capacity_samples =
+            (super::super::ring::SAMPLE_RATE as usize * buffer_ms as usize / 1000) * CHANNELS;
+        let samples = vec![0.0; capacity_samples + CHANNELS];
+        let (_commands_tx, commands_rx) = std::sync::mpsc::channel();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+
+        let returned = Arc::new(AtomicBool::new(false));
+        let returned_after_progress = Arc::clone(&returned);
+        let close = std::thread::spawn(move || {
+            progress_rx.recv_timeout(Duration::from_secs(1)).unwrap_or_else(|error| {
+                reader.close();
+                panic!("the partial write reported no progress: {error}");
+            });
+            assert!(
+                !returned_after_progress.load(Ordering::Relaxed),
+                "progress must be reported after the first successful write, while the remainder is blocked"
+            );
+            reader.close();
+        });
+
+        let flow = state.write_interruptibly(
+            &writer,
+            &samples,
+            &commands_rx,
+            &position,
+            &|| {
+                progress_tx.send(()).unwrap();
+            },
+        );
+        returned.store(true, Ordering::Relaxed);
+        close.join().unwrap();
+        assert!(matches!(flow, ControlFlow::Stopped));
+    }
+
+    #[test]
+    fn end_time_reached_during_a_partial_write_finishes_without_writing_the_remainder() {
+        let wav = TempWav::new("pump-partial-end-time", 48_000, 2, 0.1);
+        let config = config(wav.track());
+        let position = Arc::new(AtomicI64::new(0));
+        let buffer_ms = 20;
+        let (writer, mut reader) = super::super::ring::channel(
+            buffer_ms,
+            Arc::clone(&position),
+            Arc::new(super::super::ring::FrameCounters::default()),
+        );
+        let mut state = open(&config, &writer).unwrap();
+        let capacity_samples =
+            (super::super::ring::SAMPLE_RATE as usize * buffer_ms as usize / 1000) * CHANNELS;
+        let samples = vec![0.0; capacity_samples + CHANNELS];
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
+
+        let drain = std::thread::spawn(move || {
+            progress_rx.recv_timeout(Duration::from_secs(1)).unwrap_or_else(|error| {
+                reader.close();
+                panic!("the partial write reported no progress: {error}");
+            });
+            commands_tx.send(PumpCommand::SetEndTime(Some(10))).unwrap();
+            let mut first_buffer = vec![0u8; capacity_samples * 4];
+            let expected = first_buffer.len();
+            assert_eq!(
+                std::io::Read::read(&mut reader, &mut first_buffer).unwrap(),
+                expected
+            );
+
+            assert!(done_rx.recv().unwrap(), "the write did not finish at endTime");
+            let mut remainder = [0u8; 16];
+            assert_eq!(
+                std::io::Read::read(&mut reader, &mut remainder).unwrap(),
+                0,
+                "samples beyond endTime must not be appended after the ring drains"
+            );
+        });
+
+        let flow = state.write_interruptibly(
+            &writer,
+            &samples,
+            &commands_rx,
+            &position,
+            &|| {
+                progress_tx.send(()).unwrap();
+            },
+        );
+        done_tx.send(matches!(flow, ControlFlow::Finished)).unwrap();
+        drain.join().unwrap();
+        assert!(matches!(flow, ControlFlow::Finished));
     }
 
     /// A seek that interrupts a blocked write discards the ring's stale
@@ -1546,7 +1685,13 @@ mod tests {
 
         // Stale audio decoded before the seek — must not survive the reset.
         let stale_remainder = vec![9.75; 10];
-        let flow = state.write_interruptibly(&writer, &stale_remainder, &commands_rx);
+        let flow = state.write_interruptibly(
+            &writer,
+            &stale_remainder,
+            &commands_rx,
+            &position,
+            &|| {},
+        );
         assert!(matches!(flow, ControlFlow::Continue { reset: true }));
 
         // The marker value must never surface: reset cleared the pre-seek

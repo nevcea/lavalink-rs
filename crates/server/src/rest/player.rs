@@ -187,13 +187,32 @@ pub async fn patch_player(
         }
     }
 
+    // The original gates these fields on the request not naming a track. A
+    // noReplace pre-check skips resolution by representing the track as None,
+    // but that must not make the actor mistake the request for a trackless patch.
+    let (paused, user_data, position, end_time) = if dropped_by_no_replace {
+        (
+            Omissible::Omitted,
+            Omissible::Omitted,
+            Omissible::Omitted,
+            Omissible::Omitted,
+        )
+    } else {
+        (
+            update.paused,
+            track_fields.user_data,
+            update.position,
+            update.end_time,
+        )
+    };
+
     let request = PatchRequest {
         voice: update.voice.into_option(),
-        paused: update.paused,
-        user_data: track_fields.user_data,
+        paused,
+        user_data,
         volume: update.volume,
-        position: update.position,
-        end_time: update.end_time,
+        position,
+        end_time,
         filters: update.filters,
         track,
         no_replace: query.no_replace,
@@ -435,16 +454,14 @@ mod tests {
     /// from "replaced", which is why the check compares by pointer instead — this
     /// exercises is_current_connection the same way patch_player does, without
     /// a live voice connection or HTTP round trip.
-    /// noReplace must stop a resolution attempt from ever starting, not just
-    /// discard its result: PlayerRestHandler.kt checks noReplace &&
-    /// player.track != null before calling decodeTrack/loadAudioItem at
-    /// all, so a client sending noReplace=true against a player that's
-    /// already playing gets 200 with the unchanged player even when the
-    /// identifier it sent would fail to resolve. test_state()'s loader has
-    /// no source managers registered, so any load_one call here would fail —
-    /// this only passes if resolution is skipped outright.
+    /// noReplace must stop resolution without turning the request into a
+    /// trackless patch. The original skips paused, userData, position and endTime
+    /// when a track field is present, even when noReplace later drops that track;
+    /// volume and filters still apply here, while voice is handled earlier.
+    /// test_state()'s loader has no source managers, so success also proves the
+    /// identifier was never resolved.
     #[tokio::test]
-    async fn no_replace_skips_resolution_entirely_when_already_playing() {
+    async fn no_replace_skips_resolution_and_track_scoped_fields() {
         let mut config = crate::config::Config::default();
         config.lavalink.server.password = "test".into();
         let state = crate::state::AppState::new(
@@ -457,8 +474,24 @@ mod tests {
         let session = state.sessions.open(1, None);
         let guild_id = 55;
 
+        let voice_updates: crate::player::VoiceUpdateSlot =
+            std::sync::Arc::new(std::sync::OnceLock::new());
+        let voice = std::sync::Arc::new(crate::voice::VoiceConnection::new(
+            guild_id,
+            1,
+            std::sync::Arc::clone(&voice_updates),
+        ));
+        let engine = crate::audio::testing::RecordingEngine::new();
+        let (actor, handle) = crate::player::PlayerActor::new(
+            guild_id,
+            Box::new(engine.clone()),
+            std::sync::Arc::clone(&session.sink),
+            std::time::Duration::from_secs(10),
+            voice_updates,
+        );
+        tokio::spawn(actor.run());
         session
-            .get_or_create_player(guild_id, || dummy_pair(guild_id))
+            .get_or_create_player(guild_id, || (handle, voice))
             .unwrap();
         let (handle, _) = state.player(&session, guild_id).unwrap();
         handle
@@ -468,8 +501,19 @@ mod tests {
             })
             .await
             .unwrap();
+        engine.clear();
 
-        let update: PlayerUpdate = serde_json::from_str(r#"{"identifier":"unresolvable"}"#).unwrap();
+        let update: PlayerUpdate = serde_json::from_str(
+            r#"{
+                "track":{"identifier":"unresolvable","userData":{"changed":true}},
+                "paused":true,
+                "position":42000,
+                "endTime":60000,
+                "volume":50,
+                "filters":{"volume":0.5}
+            }"#,
+        )
+        .unwrap();
         let result = patch_player(
             State(state.clone()),
             Ok(ValidatedPath((session.id.clone(), guild_id.to_string()))),
@@ -479,7 +523,21 @@ mod tests {
         .await
         .expect("a dropped noReplace request must not surface a resolution error");
 
-        assert_eq!(result.0.track.unwrap().info.title, "first");
+        let player = result.0;
+        let track = player.track.unwrap();
+        assert_eq!(track.info.title, "first");
+        assert!(track.user_data.is_empty());
+        assert!(!player.paused);
+        assert_eq!(player.state.position, 0);
+        assert_eq!(player.volume, 50);
+        assert_eq!(player.filters.volume.into_option(), Some(0.5));
+        assert_eq!(
+            engine.calls(),
+            vec![
+                crate::audio::testing::EngineCall::SetVolume { volume: 50 },
+                crate::audio::testing::EngineCall::SetFilters,
+            ]
+        );
     }
 
     #[tokio::test]

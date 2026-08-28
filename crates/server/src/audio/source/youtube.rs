@@ -57,11 +57,12 @@ impl SourceManager for YouTubeSource {
         }
 
         if let Some(query) = identifier.strip_prefix("ytsearch:") {
+            let query = query.trim();
             // matches already gates this on search_enabled in the ordinary
             // path; checked again here so a direct load call (as in a test, or
             // a future caller) cannot shell out to yt-dlp for a prefix this node
             // was configured not to serve.
-            if !self.search_enabled || query.trim().is_empty() {
+            if !self.search_enabled || query.is_empty() {
                 return Err(SourceError::NotFound);
             }
             return self
@@ -156,8 +157,9 @@ fn video_id_of(identifier: &str) -> Option<String> {
         first_segment(stripped)?
     };
 
-    // YouTube ids are 11 characters of a URL-safe alphabet. Checking guards against
-    // treating a malformed URL as a real id and shelling out for nothing.
+    // URL ids may carry extra path data without a separator. Lavaplayer takes the
+    // first 11 URL-safe characters; raw identifiers still have to be exactly 11.
+    let id = id.get(..11)?;
     if is_video_id(id) {
         Some(id.to_owned())
     } else {
@@ -203,7 +205,9 @@ fn is_video_id(id: &str) -> bool {
 }
 
 fn is_direct_playlist_id(id: &str) -> bool {
-    (id.starts_with("PL") || id.starts_with("UU"))
+    ["PL", "LL", "FL", "UU"]
+        .iter()
+        .any(|prefix| id.starts_with(prefix))
         && id.len() > 2
         && id.chars().all(is_url_safe)
 }
@@ -298,9 +302,17 @@ mod tests {
     #[test]
     fn a_malformed_id_is_rejected_rather_than_shelled_out_for() {
         assert_eq!(video_id_of("https://youtu.be/short"), None);
-        assert_eq!(video_id_of("https://youtu.be/waytoolongforanid"), None);
         assert_eq!(video_id_of("https://www.youtube.com/watch?v="), None);
         assert_eq!(video_id_of("https://www.youtube.com/watch"), None);
+    }
+
+    #[test]
+    fn url_video_ids_are_truncated_but_raw_ids_are_not() {
+        assert_eq!(
+            video_id_of("https://youtu.be/dQw4w9WgXcQextra").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(video_id_of("dQw4w9WgXcQextra"), None);
     }
 
     #[test]
@@ -350,6 +362,8 @@ mod tests {
             playlist_id_of("PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI").as_deref(),
             Some("PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI")
         );
+        assert_eq!(playlist_id_of("LLabcdefghijk").as_deref(), Some("LLabcdefghijk"));
+        assert_eq!(playlist_id_of("FLabcdefghijk").as_deref(), Some("FLabcdefghijk"));
         assert_eq!(playlist_id_of("UUabcdefghijk").as_deref(), Some("UUabcdefghijk"));
         assert!(source.matches(
             "https://www.youtube.com/watch_videos?video_ids=dQw4w9WgXcQ,9bZkp7q19f0"
