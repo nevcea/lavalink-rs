@@ -313,10 +313,30 @@ impl RingWriter {
         !self.shared.closed.load(Ordering::Relaxed)
     }
 
+    /// Waits until the reader has consumed every buffered sample, or until the
+    /// timeout expires. A true result means there is no audible tail left.
+    pub fn wait_for_drain(&self, timeout: Duration) -> bool {
+        let buffer = lock(&self.shared.buffer);
+        if buffer.is_empty() {
+            return true;
+        }
+        let (buffer, _) = self
+            .shared
+            .space
+            .wait_timeout(buffer, timeout)
+            .unwrap_or_else(|e| e.into_inner());
+        buffer.is_empty()
+    }
+
     /// The track is fully delivered. The reader drains what is left, then reports
     /// end of stream.
     pub fn finish(&self) {
         self.shared.finished.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub fn is_finished(&self) -> bool {
+        self.shared.finished.load(Ordering::Acquire)
     }
 
     /// Gives up this ring's claim on the shared position counter.
@@ -822,6 +842,16 @@ mod tests {
         writer.write(&[1.0; 100]);
         writer.finish();
         assert_eq!(read_samples(&mut reader, 100).len(), 100);
+    }
+
+    #[test]
+    fn drain_wait_only_completes_after_the_last_sample_is_read() {
+        let (writer, mut reader, _) = ring(1000);
+        writer.write(&[1.0, 2.0]);
+
+        assert!(!writer.wait_for_drain(Duration::from_millis(1)));
+        assert_eq!(read_samples(&mut reader, 2), vec![1.0, 2.0]);
+        assert!(writer.wait_for_drain(Duration::from_millis(1)));
     }
 
     #[test]

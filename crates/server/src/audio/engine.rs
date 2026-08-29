@@ -132,10 +132,10 @@ fn superseded_by_a_replacement(active: &Mutex<Option<Active>>) -> bool {
     lock(active).is_some()
 }
 
-/// Terminal delivery happens after the pump has stopped producing, so waiting
-/// for the actor is safe here and prevents a full report queue from wedging the
-/// player forever. Progress reports remain deliberately lossy.
-fn send_terminal(events: &AsyncSender<EngineReport>, report: EngineReport) {
+/// Reliable delivery happens off the actor thread, so waiting for the actor is
+/// safe here and prevents a full report queue from dropping ordered events.
+/// Progress reports remain deliberately lossy.
+fn send_reliable(events: &AsyncSender<EngineReport>, report: EngineReport) {
     let _ = events.blocking_send(report);
 }
 
@@ -380,22 +380,47 @@ impl Engine for PipelineEngine {
                 });
 
                 if let Some(events) = &events {
-                    let event = match outcome {
-                        super::PumpOutcome::Finished => Some(EngineEvent::Finished),
+                    match outcome {
+                        super::PumpOutcome::Finished => {
+                            if is_current(&active, generation) {
+                                send_reliable(events, EngineReport {
+                                    generation,
+                                    event: EngineEvent::Finished,
+                                });
+                            }
+                        }
                         super::PumpOutcome::Failed { exception, started } => {
-                            Some(EngineEvent::Failed { exception, started })
+                            // TrackException is immediate, but TrackEnd waits for
+                            // audio already in the ring. Upstream reports the same
+                            // order through its terminate-on-empty executor.
+                            if is_current(&active, generation) {
+                                send_reliable(events, EngineReport {
+                                    generation,
+                                    event: EngineEvent::Exception { exception },
+                                });
+                            }
+                            writer_after_panic.finish();
+                            while started
+                                && is_current(&active, generation)
+                                && !writer_after_panic.wait_for_drain(PROGRESS_INTERVAL)
+                            {
+                                if writer_after_panic.is_closed() {
+                                    break;
+                                }
+                            }
+                            if is_current(&active, generation) {
+                                send_reliable(events, EngineReport {
+                                    generation,
+                                    event: if started {
+                                        EngineEvent::Finished
+                                    } else {
+                                        EngineEvent::LoadFailed
+                                    },
+                                });
+                            }
                         }
                         // A stop was requested; the actor already knows.
-                        super::PumpOutcome::Stopped => None,
-                    };
-                    // A superseded pump can still be mid-next_packet when Stop is
-                    // sent, so it can reach EOF/error without ever seeing the
-                    // command. Reporting that outcome unconditionally would end
-                    // whatever track replaced it.
-                    if let Some(event) = event {
-                        if is_current(&active, generation) {
-                            send_terminal(events, EngineReport { generation, event });
-                        }
+                        super::PumpOutcome::Stopped => {}
                     }
                 }
             });
@@ -403,12 +428,11 @@ impl Engine for PipelineEngine {
         if let Err(error) = spawned {
             self.report(
                 generation,
-                EngineEvent::Failed {
+                EngineEvent::StartFailed {
                     exception: Exception::fault(
                         format!("Could not start the audio pipeline: {error}"),
                         error.to_string(),
                     ),
-                    started: false,
                 },
             );
         }
@@ -579,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_report_waits_for_queue_capacity() {
+    fn a_reliable_report_waits_for_queue_capacity() {
         let (events, mut reports) = tokio::sync::mpsc::channel(1);
         events
             .try_send(EngineReport {
@@ -589,7 +613,7 @@ mod tests {
             .unwrap();
 
         let sender = std::thread::spawn(move || {
-            send_terminal(
+            send_reliable(
                 &events,
                 EngineReport {
                     generation: 1,
@@ -598,7 +622,7 @@ mod tests {
             );
         });
         std::thread::sleep(Duration::from_millis(10));
-        assert!(!sender.is_finished(), "terminal report was dropped from a full queue");
+        assert!(!sender.is_finished(), "reliable report was dropped from a full queue");
 
         assert!(matches!(reports.blocking_recv().unwrap().event, EngineEvent::Progress));
         sender.join().unwrap();

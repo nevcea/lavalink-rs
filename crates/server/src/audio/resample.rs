@@ -15,7 +15,7 @@
 
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{
-    Async, FixedAsync, Resampler as RubatoResampler, SincInterpolationParameters,
+    Async, FixedAsync, Indexing, Resampler as RubatoResampler, SincInterpolationParameters,
     SincInterpolationType, WindowFunction,
 };
 
@@ -241,6 +241,14 @@ impl Resampler {
         self.cursor = cursor - dropped as f64;
     }
 
+    /// Emits the finite tail held by a windowed-sinc resampler at EOF.
+    pub fn finish_into(&mut self, out: &mut Vec<f32>) {
+        out.clear();
+        if let Some(sinc) = &mut self.sinc {
+            sinc.finish_into(out);
+        }
+    }
+
     /// Writes the first prologue frames of Self::prologue followed by input
     /// converted to stereo frames, into self.frames.
     fn fill_stereo_frames(&mut self, input: &[f32], prologue: usize) {
@@ -268,6 +276,10 @@ impl Resampler {
 /// owning Resampler needs to see anyway.
 struct SincEngine {
     resampler: Async<f32>,
+    ratio: f64,
+    input_frames: usize,
+    output_frames: usize,
+    delay_remaining: usize,
     /// Stereo frames already converted by Resampler::fill_stereo_frames,
     /// waiting for enough to submit one call to resampler
     /// (rubato::Resampler::input_frames_next frames, fixed for the engine's
@@ -307,9 +319,14 @@ impl SincEngine {
             Async::<f32>::new_sinc(ratio, 1.0, &params, 1024, CHANNELS, FixedAsync::Input)
                 .expect("static parameters and a positive ratio are always valid");
         let chunk = resampler.input_frames_next();
+        let delay_remaining = resampler.output_delay();
 
         Self {
             resampler,
+            ratio,
+            input_frames: 0,
+            output_frames: 0,
+            delay_remaining,
             pending: Vec::with_capacity(chunk),
             planar_in: (0..CHANNELS).map(|_| Vec::with_capacity(chunk)).collect(),
             planar_out: vec![Vec::new(); CHANNELS],
@@ -318,6 +335,9 @@ impl SincEngine {
 
     fn reset(&mut self) {
         RubatoResampler::reset(&mut self.resampler);
+        self.input_frames = 0;
+        self.output_frames = 0;
+        self.delay_remaining = self.resampler.output_delay();
         self.pending.clear();
     }
 
@@ -340,32 +360,87 @@ impl SincEngine {
                 }
             }
             consumed += chunk;
-
-            let out_frames = self.resampler.output_frames_next();
-            for lane in &mut self.planar_out {
-                lane.clear();
-                lane.resize(out_frames, 0.0);
-            }
-
-            let input_adapter = SequentialSliceOfVecs::new(&self.planar_in, CHANNELS, chunk)
-                .expect("planar_in holds exactly chunk frames per channel");
-            let mut output_adapter =
-                SequentialSliceOfVecs::new_mut(&mut self.planar_out, CHANNELS, out_frames)
-                    .expect("planar_out holds exactly out_frames frames per channel");
-            let (read, produced) = self
-                .resampler
-                .process_into_buffer(&input_adapter, &mut output_adapter, None)
-                .expect("input matches exactly what input_frames_next() asked for");
-            debug_assert_eq!(read, chunk);
-
-            for index in 0..produced {
-                for lane in &self.planar_out {
-                    out.push(lane[index]);
-                }
-            }
+            self.input_frames += chunk;
+            self.process_planar(chunk, None, None, out);
         }
 
         self.pending.drain(..consumed);
+    }
+
+    fn finish_into(&mut self, out: &mut Vec<f32>) {
+        out.clear();
+        let partial = self.pending.len();
+        if partial > 0 {
+            for lane in &mut self.planar_in {
+                lane.clear();
+            }
+            for frame in self.pending.drain(..) {
+                for (channel, lane) in self.planar_in.iter_mut().enumerate() {
+                    lane.push(frame[channel]);
+                }
+            }
+            self.input_frames += partial;
+            let expected = (self.ratio * self.input_frames as f64).ceil() as usize;
+            self.process_planar(
+                partial,
+                Some(Indexing::new().partial_len(partial)),
+                Some(expected),
+                out,
+            );
+        }
+
+        let expected = (self.ratio * self.input_frames as f64).ceil() as usize;
+        while self.output_frames < expected {
+            for lane in &mut self.planar_in {
+                lane.clear();
+            }
+            self.process_planar(
+                0,
+                Some(Indexing::new().partial_len(0)),
+                Some(expected),
+                out,
+            );
+        }
+    }
+
+    fn process_planar(
+        &mut self,
+        input_frames: usize,
+        indexing: Option<Indexing>,
+        output_limit: Option<usize>,
+        out: &mut Vec<f32>,
+    ) {
+        let out_frames = self.resampler.output_frames_next();
+        for lane in &mut self.planar_out {
+            lane.clear();
+            lane.resize(out_frames, 0.0);
+        }
+
+        let input_adapter = SequentialSliceOfVecs::new(&self.planar_in, CHANNELS, input_frames)
+            .expect("planar_in holds every submitted frame per channel");
+        let mut output_adapter =
+            SequentialSliceOfVecs::new_mut(&mut self.planar_out, CHANNELS, out_frames)
+                .expect("planar_out holds exactly out_frames frames per channel");
+        let (read, produced) = self
+            .resampler
+            .process_into_buffer(&input_adapter, &mut output_adapter, indexing.as_ref())
+            .expect("input matches the full or partial chunk submitted to rubato");
+        if indexing.is_none() {
+            debug_assert_eq!(read, input_frames);
+        }
+
+        let skip = self.delay_remaining.min(produced);
+        self.delay_remaining -= skip;
+        let available = produced - skip;
+        let take = output_limit
+            .map_or(available, |limit| limit.saturating_sub(self.output_frames).min(available));
+        out.reserve(take * CHANNELS);
+        for index in skip..skip + take {
+            for lane in &self.planar_out {
+                out.push(lane[index]);
+            }
+        }
+        self.output_frames += take;
     }
 }
 
@@ -434,6 +509,9 @@ mod tests {
         for block in input.chunks(chunk * channels) {
             out.extend(resampler.process(block));
         }
+        let mut tail = Vec::new();
+        resampler.finish_into(&mut tail);
+        out.extend(tail);
         out
     }
 
@@ -660,15 +738,22 @@ mod tests {
         for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
             let out = resample_sine_quality(44_100, 2, 2.0, 1024, quality);
             let frames = out.len() / CHANNELS;
-            // Sinc filters carry a startup/output delay (output_delay()) on top
-            // of the ordinary rate-ratio rounding a chunked accumulator adds, so
-            // this needs more slack than the Catmull-Rom version of this test —
-            // a couple of hundred frames at 48kHz is a few milliseconds.
-            assert!(
-                (frames as i64 - 2 * i64::from(SAMPLE_RATE)).abs() < 2000,
-                "{quality:?}: expected about {} frames, got {frames}",
-                2 * SAMPLE_RATE
-            );
+            let input_frames = 44_100usize * 2;
+            let expected =
+                (f64::from(SAMPLE_RATE) / 44_100.0 * input_frames as f64).ceil() as usize;
+            assert_eq!(frames, expected, "{quality:?}");
+        }
+    }
+
+    #[test]
+    fn sinc_finish_emits_a_short_final_chunk() {
+        for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
+            let mut resampler = Resampler::new(44_100, CHANNELS, quality);
+            assert!(resampler.process(&[0.5, -0.5]).is_empty());
+
+            let mut tail = Vec::new();
+            resampler.finish_into(&mut tail);
+            assert_eq!(tail.len() / CHANNELS, 2, "{quality:?}");
         }
     }
 
@@ -689,11 +774,7 @@ mod tests {
         for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
             let out = resample_sine_quality(96_000, 2, 0.5, 4096, quality);
             let frames = out.len() / CHANNELS;
-            let expected = (SAMPLE_RATE as f64 * 0.5) as i64;
-            assert!(
-                (frames as i64 - expected).abs() < 2000,
-                "{quality:?}: got {frames} frames"
-            );
+            assert_eq!(frames, SAMPLE_RATE as usize / 2, "{quality:?}");
         }
     }
 
@@ -701,8 +782,8 @@ mod tests {
     /// see chunking_does_not_change_the_result), SincEngine accumulates raw
     /// stereo frames across calls with no per-call boundary effects at all —
     /// rubato only ever sees fixed, buffer-call-independent chunks — so
-    /// chunking must reproduce the exact same output, not merely a close one,
-    /// up to whatever the final incomplete chunk holds back.
+    /// chunking must reproduce the exact same output, including the final partial
+    /// chunk emitted by finish_into.
     #[test]
     fn sinc_chunking_does_not_change_the_result() {
         for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {

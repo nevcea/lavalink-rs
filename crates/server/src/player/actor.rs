@@ -601,7 +601,7 @@ impl PlayerActor {
                 self.stuck_reported = false;
             }
             EngineEvent::Finished => self.stop_track(TrackEndReason::Finished),
-            EngineEvent::Failed { exception, started } => {
+            EngineEvent::Exception { exception } => {
                 let Some(track) = self.model.track.clone() else {
                     return;
                 };
@@ -610,14 +610,18 @@ impl PlayerActor {
                     track: Box::new(track),
                     exception,
                 });
-                // A track that never produced audio ended as LOAD_FAILED; one that
-                // died partway ended as FINISHED. Clients use this to decide whether
-                // to advance the queue.
-                self.stop_track(if started {
-                    TrackEndReason::Finished
-                } else {
-                    TrackEndReason::LoadFailed
+            }
+            EngineEvent::LoadFailed => self.stop_track(TrackEndReason::LoadFailed),
+            EngineEvent::StartFailed { exception } => {
+                let Some(track) = self.model.track.clone() else {
+                    return;
+                };
+                self.emit(EmittedEvent::TrackException {
+                    guild_id: self.guild_id_str.clone(),
+                    track: Box::new(track),
+                    exception,
                 });
+                self.stop_track(TrackEndReason::LoadFailed);
             }
         }
     }
@@ -1273,24 +1277,29 @@ mod tests {
         harness.handle.patch(play(track("first"))).await.unwrap();
 
         harness
-            .report(EngineEvent::Failed {
+            .report(EngineEvent::Exception {
                 exception: lavalink_protocol::Exception::common("nope", "cause"),
-                started: false,
             })
             .await;
+        harness.report(EngineEvent::LoadFailed).await;
         harness.snapshot_until(|player| player.track.is_none()).await;
 
         let events = harness.events();
-        assert!(events
+        let exception = events
             .iter()
-            .any(|event| matches!(event, EmittedEvent::TrackException { .. })));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            EmittedEvent::TrackEnd {
-                reason: TrackEndReason::LoadFailed,
-                ..
-            }
-        )));
+            .position(|event| matches!(event, EmittedEvent::TrackException { .. }))
+            .unwrap();
+        let ended = events
+            .iter()
+            .position(|event| matches!(
+                event,
+                EmittedEvent::TrackEnd {
+                    reason: TrackEndReason::LoadFailed,
+                    ..
+                }
+            ))
+            .unwrap();
+        assert!(exception < ended, "TrackException must precede TrackEnd");
     }
 
     #[tokio::test]

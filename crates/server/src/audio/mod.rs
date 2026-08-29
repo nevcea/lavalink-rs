@@ -67,9 +67,13 @@ pub enum EngineEvent {
     Progress,
     /// The track reached its end, or its configured endTime.
     Finished,
-    /// The track failed. started distinguishes "never produced audio"
-    /// (loadFailed) from "died partway through" (finished).
-    Failed { exception: Exception, started: bool },
+    /// The decoder failed. This is reported immediately, while any audio it
+    /// already produced is still allowed to drain from the ring.
+    Exception { exception: Exception },
+    /// The decoder failed before producing any audio.
+    LoadFailed,
+    /// The engine could not start a pump thread at all.
+    StartFailed { exception: Exception },
 }
 
 /// An engine fact tagged with the play call that produced it. The actor checks

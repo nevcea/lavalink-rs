@@ -141,6 +141,14 @@ trait AudioFilter: std::fmt::Debug {
 
     fn process(&mut self, channels: &mut [Vec<f32>]);
 
+    /// Emits any finite audio held internally at an end or hot-swap. Stateless
+    /// filters have nothing to emit.
+    fn flush(&mut self, channels: &mut [Vec<f32>]) {
+        for channel in channels {
+            channel.clear();
+        }
+    }
+
     /// Called after a seek lands, mirroring lavaplayer's AudioFilter.seekPerformed
     /// — the original does not rebuild its filter chain on seek either, it notifies
     /// each filter so it can discard whatever internal state assumed continuous
@@ -243,6 +251,25 @@ impl FilterChain {
         }
         for stage in &mut self.stages {
             stage.process(channels);
+        }
+    }
+
+    /// Emits the buffered tail of the one stateful stage that can hold more than
+    /// sample history, then routes it through every stage that followed it.
+    pub fn flush(&mut self, channels: &mut [Vec<f32>]) {
+        if let Some(timescale) = &mut self.timescale_only {
+            timescale.flush(channels);
+            return;
+        }
+
+        for index in 0..self.stages.len() {
+            self.stages[index].flush(channels);
+            if channels.first().is_some_and(|channel| !channel.is_empty()) {
+                for stage in &mut self.stages[index + 1..] {
+                    stage.process(channels);
+                }
+                return;
+            }
         }
     }
 
@@ -711,6 +738,31 @@ impl AudioFilter for TimescaleFilter {
             channel.clear();
         }
 
+        loop {
+            let written = self.receive();
+            if written == 0 {
+                break;
+            }
+            for (channel, segment) in channels.iter_mut().zip(&self.output_segments) {
+                channel.extend_from_slice(&segment[..written]);
+            }
+        }
+    }
+
+    fn flush(&mut self, channels: &mut [Vec<f32>]) {
+        for channel in channels.iter_mut() {
+            channel.clear();
+        }
+        if self
+            .converters
+            .first()
+            .is_none_or(|converter| converter.num_unprocessed_samples() == 0)
+        {
+            return;
+        }
+        for converter in &mut self.converters {
+            converter.flush();
+        }
         loop {
             let written = self.receive();
             if written == 0 {
@@ -1774,6 +1826,20 @@ mod tests {
 
         assert!(out_frames > 0, "SoundTouch never left its startup latency");
         assert!(out_frames < 16 * 960, "2x speed did not shrink the stream");
+    }
+
+    #[test]
+    fn timescale_flush_preserves_its_buffered_tail_once() {
+        let mut chain = FilterChain::new(&filters(r#"{"timescale":{"speed":1.1}}"#), 2);
+        let mut channels = vec![ramp(960).remove(0), ramp(960).remove(0)];
+        chain.process(&mut channels);
+
+        chain.flush(&mut channels);
+        assert!(!channels[0].is_empty(), "SoundTouch's buffered tail was dropped");
+        assert_eq!(channels[0].len(), channels[1].len());
+
+        chain.flush(&mut channels);
+        assert!(channels.iter().all(Vec::is_empty), "the same tail was emitted twice");
     }
 
     #[test]

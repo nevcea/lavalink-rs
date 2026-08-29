@@ -132,6 +132,9 @@ struct State {
     /// because timescale can make it a different length than its input — see
     /// filter.rs's module docs — so it can no longer be written back in place.
     filtered: Vec<f32>,
+    /// Audio SoundTouch releases when a filter chain is hot-swapped. Written
+    /// before the first sample processed by the replacement chain.
+    pending_filter_tail: Vec<f32>,
     /// Shared with the source: cleared here once a batch of commands has been
     /// fully drained, so a later, unrelated stall doesn't inherit a stale
     /// "give up early" signal from a command that was already applied.
@@ -232,6 +235,7 @@ fn open(config: &PumpConfig, writer: &RingWriter) -> Result<State, Exception> {
         pcm: Vec::new(),
         planar: vec![Vec::new(); CHANNELS],
         filtered: Vec::new(),
+        pending_filter_tail: Vec::new(),
         interrupt: Arc::clone(&config.interrupt),
     };
 
@@ -267,6 +271,12 @@ impl State {
                 return PumpOutcome::Stopped;
             }
 
+            match self.write_pending_filter_tail(writer, commands, position_ms, on_progress) {
+                ControlFlow::Continue { .. } => {}
+                ControlFlow::Finished => return PumpOutcome::Finished,
+                ControlFlow::Stopped => return PumpOutcome::Stopped,
+            }
+
             // The configured end time is enforced against the playback position,
             // not the decode position, so the track ends when the listener reaches
             // it rather than when the pump does.
@@ -278,8 +288,12 @@ impl State {
             let packet = match self.format.next_packet() {
                 Ok(Some(packet)) => packet,
                 Ok(None) => {
-                    writer.finish();
-                    return PumpOutcome::Finished;
+                    match self.finish_and_drain(writer, commands, position_ms, on_progress) {
+                        ControlFlow::Continue { reset: true } => continue,
+                        ControlFlow::Continue { reset: false } => unreachable!(),
+                        ControlFlow::Finished => return PumpOutcome::Finished,
+                        ControlFlow::Stopped => return PumpOutcome::Stopped,
+                    }
                 }
                 Err(SymphoniaError::ResetRequired) => {
                     // The stream changed format mid-flight (a chained Ogg segment is
@@ -431,7 +445,9 @@ impl State {
             // timescale), so this has to be the last thing that touches a sample.
             self.apply_volume(&mut filtered);
 
-            self.produced.store(true, Ordering::Relaxed);
+            if !filtered.is_empty() {
+                self.produced.store(true, Ordering::Relaxed);
+            }
             let outcome =
                 self.write_interruptibly(writer, &filtered, commands, position_ms, on_progress);
             self.filtered = filtered;
@@ -513,6 +529,94 @@ impl State {
         }
     }
 
+    /// Marks a clean EOF, then keeps the pump alive until the mixer has consumed
+    /// the buffered tail. A seek can still reopen the stream during that window,
+    /// matching lavaplayer's terminate-on-empty executor behavior.
+    fn finish_and_drain(
+        &mut self,
+        writer: &RingWriter,
+        commands: &Receiver<PumpCommand>,
+        position_ms: &AtomicI64,
+        on_progress: &(dyn Fn() + Sync),
+    ) -> ControlFlow {
+        self.resampler.finish_into(&mut self.pcm);
+        if !self.pcm.is_empty() {
+            let mut filtered = std::mem::take(&mut self.filtered);
+            filter_interleaved(&mut self.filters, &self.pcm, &mut self.planar, &mut filtered);
+            self.apply_volume(&mut filtered);
+            if !filtered.is_empty() {
+                self.produced.store(true, Ordering::Relaxed);
+            }
+            let outcome =
+                self.write_interruptibly(writer, &filtered, commands, position_ms, on_progress);
+            self.filtered = filtered;
+            if !matches!(outcome, ControlFlow::Continue { reset: false }) {
+                return outcome;
+            }
+        }
+
+        self.flush_filters_into_pending();
+        let outcome =
+            self.write_pending_filter_tail(writer, commands, position_ms, on_progress);
+        if !matches!(outcome, ControlFlow::Continue { reset: false }) {
+            return outcome;
+        }
+
+        writer.finish();
+        loop {
+            match self.drain_commands(commands, writer) {
+                ControlFlow::Continue { reset: true } => {
+                    return ControlFlow::Continue { reset: true };
+                }
+                ControlFlow::Continue { reset: false } => {}
+                terminal => return terminal,
+            }
+
+            if writer.wait_for_drain(COMMAND_POLL) {
+                return ControlFlow::Finished;
+            }
+            if writer.is_closed() {
+                return ControlFlow::Stopped;
+            }
+        }
+    }
+
+    fn write_pending_filter_tail(
+        &mut self,
+        writer: &RingWriter,
+        commands: &Receiver<PumpCommand>,
+        position_ms: &AtomicI64,
+        on_progress: &(dyn Fn() + Sync),
+    ) -> ControlFlow {
+        while !self.pending_filter_tail.is_empty() {
+            let tail = std::mem::take(&mut self.pending_filter_tail);
+            self.produced.store(true, Ordering::Relaxed);
+            match self.write_interruptibly(writer, &tail, commands, position_ms, on_progress) {
+                ControlFlow::Continue { reset: false } => {}
+                terminal => return terminal,
+            }
+        }
+        ControlFlow::Continue { reset: false }
+    }
+
+    fn flush_filters_into_pending(&mut self) {
+        self.filters.flush(&mut self.planar);
+        let frames = self.planar.first().map_or(0, Vec::len);
+        let start = self.pending_filter_tail.len();
+        self.pending_filter_tail.reserve(frames * CHANNELS);
+        for frame in 0..frames {
+            for channel in &self.planar {
+                assert_eq!(channel.len(), frames, "filter output channels lost lockstep");
+                self.pending_filter_tail.push(channel[frame]);
+            }
+        }
+        if (self.volume - 1.0).abs() >= f32::EPSILON {
+            for sample in &mut self.pending_filter_tail[start..] {
+                *sample = (*sample * self.volume).clamp(-1.0, 1.0);
+            }
+        }
+    }
+
     fn end_reached(&self, position_ms: &AtomicI64) -> bool {
         self.end_time_ms
             .is_some_and(|end_time| position_ms.load(Ordering::Relaxed) >= end_time)
@@ -578,6 +682,7 @@ impl State {
                     // the reported position must stay where it actually is too.
                     if self.seek(position_ms) {
                         writer.reset(position_ms);
+                        self.pending_filter_tail.clear();
                         reset = true;
                     } else {
                         // The engine's begin_seek already announced this target
@@ -589,6 +694,7 @@ impl State {
                     }
                 }
                 PumpCommand::SetFilters(filters) => {
+                    self.flush_filters_into_pending();
                     self.filters = FilterChain::new(&filters, CHANNELS);
                 }
                 PumpCommand::SetVolume(volume) => {
@@ -909,10 +1015,9 @@ mod tests {
 
     /// Decodes a whole track into the samples that reached the ring.
     ///
-    /// A big enough ring that the pump never blocks, so this stays single-threaded
-    /// (decode, then read) rather than needing play's reader thread — which makes
-    /// the output exactly reproducible across runs, as the tests that compare two
-    /// runs sample-for-sample need it to be.
+    /// A big enough ring that the pump never blocks. The reader starts only after
+    /// EOF is marked, so no starvation silence enters sample-exact comparisons;
+    /// it then drains concurrently because a clean pump now waits for that drain.
     fn decode_to_samples(config: PumpConfig) -> Vec<f32> {
         let position = Arc::new(AtomicI64::new(0));
         let (writer, mut reader) = super::super::ring::channel(
@@ -923,24 +1028,30 @@ mod tests {
 
         let mut state = open(&config, &writer).unwrap();
         let (_commands_tx, commands_rx) = std::sync::mpsc::channel();
+        let observer = writer.clone();
+        let reader = std::thread::spawn(move || {
+            while !observer.is_finished() {
+                std::thread::yield_now();
+            }
+            let mut samples = Vec::new();
+            let mut buffer = vec![0u8; super::super::ring::FRAME_SAMPLES * 4];
+            loop {
+                let read = std::io::Read::read(&mut reader, &mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                samples.extend(
+                    buffer[..read]
+                        .as_chunks::<4>().0
+                        .iter()
+                        .map(|chunk| f32::from_le_bytes(*chunk)),
+                );
+            }
+            samples
+        });
         let outcome = state.decode_loop(&writer, &commands_rx, &position, &|| {});
         assert!(matches!(outcome, PumpOutcome::Finished), "{outcome:?}");
-
-        let mut samples = Vec::new();
-        let mut buffer = vec![0u8; super::super::ring::FRAME_SAMPLES * 4];
-        loop {
-            let read = std::io::Read::read(&mut reader, &mut buffer).unwrap();
-            if read == 0 {
-                break;
-            }
-            samples.extend(
-                buffer[..read]
-                    .as_chunks::<4>().0
-                    .iter()
-                    .map(|chunk| f32::from_le_bytes(*chunk)),
-            );
-        }
-        samples
+        reader.join().unwrap()
     }
 
     fn config(info: TrackInfo) -> PumpConfig {
@@ -979,6 +1090,32 @@ mod tests {
         // can exceed it, because silence delivered during a starved moment is time
         // the listener really experienced.
         assert!(position >= 480, "expected at least 480ms, got {position}");
+    }
+
+    #[test]
+    fn clean_eof_does_not_finish_until_the_ring_tail_is_consumed() {
+        let wav = TempWav::new("pump-drain", 48_000, 2, 0.2);
+        let config = config(wav.track());
+        let position = Arc::new(AtomicI64::new(0));
+        let (writer, mut reader) = super::super::ring::channel(
+            1_000,
+            Arc::clone(&position),
+            Arc::new(super::super::ring::FrameCounters::default()),
+        );
+        let observer = writer.clone();
+        let (_commands_tx, commands_rx) = std::sync::mpsc::channel();
+        let pump = std::thread::spawn(move || {
+            run(config, writer, commands_rx, position, &|| {})
+        });
+
+        while !observer.is_finished() {
+            std::thread::yield_now();
+        }
+        assert!(!pump.is_finished(), "EOF discarded the still-buffered tail");
+
+        let mut buffer = vec![0u8; super::super::ring::FRAME_SAMPLES * 4];
+        while std::io::Read::read(&mut reader, &mut buffer).unwrap() != 0 {}
+        assert!(matches!(pump.join().unwrap(), PumpOutcome::Finished));
     }
 
     /// Both of to_interleaved's arms — the stereo one and the general one — have
@@ -1086,6 +1223,36 @@ mod tests {
         let (outcome, delivered, _) = play(config);
         assert!(matches!(outcome, PumpOutcome::Finished), "{outcome:?}");
         assert!(delivered > 0);
+    }
+
+    #[test]
+    fn replacing_timescale_queues_its_tail_before_the_new_chain() {
+        let wav = TempWav::new("pump-filter-tail", 48_000, 2, 0.1);
+        let mut config = config(wav.track());
+        config.filters = serde_json::from_str(r#"{"timescale":{"speed":1.1}}"#).unwrap();
+        let position = Arc::new(AtomicI64::new(0));
+        let (writer, _reader) = super::super::ring::channel(
+            1_000,
+            position,
+            Arc::new(super::super::ring::FrameCounters::default()),
+        );
+        let mut state = open(&config, &writer).unwrap();
+        let input = vec![0.25; 960 * CHANNELS];
+        let mut output = Vec::new();
+        assert!(state.filters.process_interleaved(&input, &mut output));
+
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        commands_tx
+            .send(PumpCommand::SetFilters(Box::default()))
+            .unwrap();
+        assert!(matches!(
+            state.drain_commands(&commands_rx, &writer),
+            ControlFlow::Continue { reset: false }
+        ));
+        assert!(
+            !state.pending_filter_tail.is_empty(),
+            "hot-swapping discarded SoundTouch's buffered tail"
+        );
     }
 
     /// Wraps a real format reader but always fails to seek — standing in for a
@@ -1205,7 +1372,7 @@ mod tests {
         let config = config(wav.track());
 
         let position = Arc::new(AtomicI64::new(0));
-        let (writer, _reader) = super::super::ring::channel(
+        let (writer, mut reader) = super::super::ring::channel(
             4096,
             Arc::clone(&position),
             Arc::new(super::super::ring::FrameCounters::default()),
@@ -1224,7 +1391,16 @@ mod tests {
         let (commands_tx, commands_rx) = std::sync::mpsc::channel();
         commands_tx.send(PumpCommand::SetVolume(50)).unwrap();
 
+        let observer = writer.clone();
+        let reader = std::thread::spawn(move || {
+            while !observer.is_finished() {
+                std::thread::yield_now();
+            }
+            let mut buffer = vec![0u8; super::super::ring::FRAME_SAMPLES * 4];
+            while std::io::Read::read(&mut reader, &mut buffer).unwrap() != 0 {}
+        });
         let outcome = state.decode_loop(&writer, &commands_rx, &position, &|| {});
+        reader.join().unwrap();
 
         assert!(matches!(outcome, PumpOutcome::Finished), "{outcome:?}");
         assert_eq!(
@@ -1352,18 +1528,25 @@ mod tests {
 
         // Kept alive so the drain sees Empty rather than Disconnected.
         let (_commands_tx, commands_rx) = std::sync::mpsc::channel();
+        let observer = writer.clone();
+        let reader = std::thread::spawn(move || {
+            while !observer.is_finished() {
+                std::thread::yield_now();
+            }
+            let mut delivered = 0;
+            let mut buffer = vec![0u8; super::super::ring::FRAME_SAMPLES * 4];
+            loop {
+                let read = std::io::Read::read(&mut reader, &mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                delivered += read / 4;
+            }
+            delivered
+        });
         let outcome = state.decode_loop(&writer, &commands_rx, &position, &|| {});
         assert!(matches!(outcome, PumpOutcome::Finished), "{outcome:?}");
-
-        let mut delivered = 0;
-        let mut buffer = vec![0u8; super::super::ring::FRAME_SAMPLES * 4];
-        loop {
-            let read = std::io::Read::read(&mut reader, &mut buffer).unwrap();
-            if read == 0 {
-                break;
-            }
-            delivered += read / 4;
-        }
+        let delivered = reader.join().unwrap();
 
         // 0.2s of 48kHz stereo, with a frame or two of slack for the
         // resampler's held-back tail. The uncorrected result is ~4x this.
