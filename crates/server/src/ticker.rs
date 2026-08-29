@@ -18,7 +18,7 @@ use crate::player::Command;
 use crate::state::AppState;
 
 /// The original's stats interval (SocketContext.kt:100).
-const STATS_INTERVAL: Duration = Duration::from_secs(60);
+const STATS_INTERVAL: Duration = Duration::from_mins(1);
 
 /// How often expired resume deadlines are collected. Fine-grained enough that a
 /// session is not kept alive noticeably past its timeout.

@@ -34,8 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_path = std::env::args()
         .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("application.yml"));
+        .map_or_else(|| PathBuf::from("application.yml"), PathBuf::from);
     let config = Config::load(&config_path)?;
 
     // Built once and cloned into every blocking client this node constructs — see

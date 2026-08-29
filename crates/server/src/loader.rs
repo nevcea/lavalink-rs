@@ -27,7 +27,7 @@ use tokio::sync::{broadcast, Semaphore};
 use crate::audio::source::{SourceError, SourceLoad, SourceManager, SourcePlaylist, SourceTrack};
 use crate::lock;
 
-const CACHE_TTL: Duration = Duration::from_secs(60);
+const CACHE_TTL: Duration = Duration::from_mins(1);
 
 /// Hard cap on distinct cached identifiers. sweep_expired only runs once per
 /// tick, so a burst of distinct identifiers between ticks would otherwise grow

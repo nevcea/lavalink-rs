@@ -235,7 +235,7 @@ fn disconnect_update(reason: Option<DisconnectReason>) -> VoiceUpdate {
         // 4014 in particular are what drive a client to re-send its voice state —
         // so it is forwarded rather than flattened.
         Some(DisconnectReason::WsClosed(code)) => VoiceUpdate::Closed {
-            code: code.map(|code| code as i32).unwrap_or(0),
+            code: code.map_or(0, |code| code as i32),
             by_remote: true,
         },
         // Everything else — requested, an ordinary teardown, a failed attempt — is

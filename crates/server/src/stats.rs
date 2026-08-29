@@ -159,7 +159,7 @@ impl StatsCollector {
         // this process take". Clients display these; none of them branch on the
         // relationship between the four.
         let total = system.total_memory() as i64;
-        let used = process.map(|process| process.memory() as i64).unwrap_or(0);
+        let used = process.map_or(0, |process| process.memory() as i64);
         let memory = Memory {
             free: (total - used).max(0),
             used,
@@ -170,13 +170,11 @@ impl StatsCollector {
         let cpu = Cpu {
             cores: self.cores,
             system_load: (system.global_cpu_usage() as f64 / 100.0).clamp(0.0, 1.0),
-            lavalink_load: process
-                .map(|process| {
-                    // sysinfo reports process CPU as a percentage of one core;
-                    // Lavalink's lavalinkLoad is a fraction of the whole machine.
-                    (process.cpu_usage() as f64 / 100.0 / self.cores.max(1) as f64).clamp(0.0, 1.0)
-                })
-                .unwrap_or(0.0),
+            lavalink_load: process.map_or(0.0, |process| {
+                // sysinfo reports process CPU as a percentage of one core;
+                // Lavalink's lavalinkLoad is a fraction of the whole machine.
+                (process.cpu_usage() as f64 / 100.0 / self.cores.max(1) as f64).clamp(0.0, 1.0)
+            }),
         };
 
         machine.last = Some((Instant::now(), memory, cpu));

@@ -56,7 +56,7 @@ pub use state::AppState;
 /// Every mutex in this crate guards a plain container with no invariant a panic
 /// could half-break, so carrying on beats taking the whole node down with it.
 pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Fixtures shared across this crate's test modules.
