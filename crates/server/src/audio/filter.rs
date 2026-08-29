@@ -1791,7 +1791,7 @@ mod tests {
             assert!(direct.process_interleaved(&input, &mut direct_out));
 
             let mut channels = vec![Vec::with_capacity(frames), Vec::with_capacity(frames)];
-            for frame in input.chunks_exact(2) {
+            for frame in input.as_chunks::<2>().0 {
                 channels[0].push(frame[0]);
                 channels[1].push(frame[1]);
             }
