@@ -196,6 +196,7 @@ impl Resampler {
             let base = cursor.floor();
             let index = base as usize;
             let t = (cursor - base) as f32;
+            let weights = catmull_rom_weights(t);
 
             if index == 0 {
                 // The one frame with no left-hand neighbor, so p0 repeats p1.
@@ -208,7 +209,7 @@ impl Resampler {
                         source[0][channel],
                         source[1][channel],
                         source[2][channel],
-                        t,
+                        &weights,
                     ));
                 }
             } else {
@@ -223,7 +224,7 @@ impl Resampler {
                         window[1][channel],
                         window[2][channel],
                         window[3][channel],
-                        t,
+                        &weights,
                     ));
                 }
             }
@@ -386,13 +387,19 @@ fn sinc_params(
 }
 
 /// Catmull-Rom spline through p1 and p2, using p0 and p3 for the slopes.
-fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+fn catmull_rom_weights(t: f32) -> [f32; 4] {
     let t2 = t * t;
     let t3 = t2 * t;
-    0.5 * ((2.0 * p1)
-        + (-p0 + p2) * t
-        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
-        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+    [
+        0.5 * (-t + 2.0 * t2 - t3),
+        0.5 * (2.0 - 5.0 * t2 + 3.0 * t3),
+        0.5 * (t + 4.0 * t2 - 3.0 * t3),
+        0.5 * (-t2 + t3),
+    ]
+}
+
+fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, weights: &[f32; 4]) -> f32 {
+    p0 * weights[0] + p1 * weights[1] + p2 * weights[2] + p3 * weights[3]
 }
 
 #[cfg(test)]
@@ -747,14 +754,35 @@ mod tests {
 
     #[test]
     fn catmull_rom_passes_through_its_control_points() {
-        assert!((catmull_rom(0.0, 1.0, 2.0, 3.0, 0.0) - 1.0).abs() < 1e-6);
-        assert!((catmull_rom(0.0, 1.0, 2.0, 3.0, 1.0) - 2.0).abs() < 1e-6);
+        assert!(
+            (catmull_rom(0.0, 1.0, 2.0, 3.0, &catmull_rom_weights(0.0)) - 1.0).abs() < 1e-6
+        );
+        assert!(
+            (catmull_rom(0.0, 1.0, 2.0, 3.0, &catmull_rom_weights(1.0)) - 2.0).abs() < 1e-6
+        );
     }
 
     #[test]
     fn catmull_rom_is_linear_on_a_straight_line() {
         // Interpolating a ramp must give the ramp back.
-        assert!((catmull_rom(0.0, 1.0, 2.0, 3.0, 0.5) - 1.5).abs() < 1e-6);
+        assert!(
+            (catmull_rom(0.0, 1.0, 2.0, 3.0, &catmull_rom_weights(0.5)) - 1.5).abs() < 1e-6
+        );
+    }
+
+    #[test]
+    fn shared_weights_match_the_direct_polynomial() {
+        let [p0, p1, p2, p3] = [-0.75, 0.25, 0.9, -0.4];
+        for t in [0.0, 0.1, 0.5, 0.9, 1.0] {
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let direct = 0.5 * ((2.0 * p1)
+                + (-p0 + p2) * t
+                + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+                + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
+            let shared = catmull_rom(p0, p1, p2, p3, &catmull_rom_weights(t));
+            assert!((shared - direct).abs() < 1e-6, "t={t}: {shared} != {direct}");
+        }
     }
 
     /// The clamp-inside-the-tap-read form the interpolation loop used to have.
@@ -786,7 +814,13 @@ mod tests {
                     let i = i.clamp(0, source.len() as isize - 1) as usize;
                     source[i][channel]
                 };
-                out.push(catmull_rom(at(-1), at(0), at(1), at(2), t));
+                out.push(catmull_rom(
+                    at(-1),
+                    at(0),
+                    at(1),
+                    at(2),
+                    &catmull_rom_weights(t),
+                ));
             }
             cursor += step;
         }
