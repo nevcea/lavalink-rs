@@ -13,6 +13,11 @@ use std::path::Path;
 use axum::http::Uri;
 use serde::Deserialize;
 
+const DEFAULT_FRAME_BUFFER_DURATION_MS: u32 = 5000;
+const MIN_FRAME_BUFFER_DURATION_MS: i32 = 200;
+const DEFAULT_TRACK_STUCK_THRESHOLD_MS: u64 = 10_000;
+const MIN_TRACK_STUCK_THRESHOLD_MS: i64 = 100;
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -165,9 +170,11 @@ pub struct ServerConfig {
     /// Absent names default to enabled, matching InfoRestHandler.kt:36-38.
     pub filters: BTreeMap<String, bool>,
     /// Milliseconds of decoded audio buffered per player.
+    #[serde(deserialize_with = "deserialize_frame_buffer_duration_ms")]
     pub frame_buffer_duration_ms: u32,
     pub resampling_quality: ResamplingQuality,
     /// How long a player may produce no audio before TrackStuckEvent.
+    #[serde(deserialize_with = "deserialize_track_stuck_threshold_ms")]
     pub track_stuck_threshold_ms: u64,
     /// Seconds between playerUpdate messages.
     pub player_update_interval: u64,
@@ -190,9 +197,9 @@ impl Default for ServerConfig {
             password: String::new(),
             sources: Sources::default(),
             filters: BTreeMap::new(),
-            frame_buffer_duration_ms: 5000,
+            frame_buffer_duration_ms: DEFAULT_FRAME_BUFFER_DURATION_MS,
             resampling_quality: ResamplingQuality::default(),
-            track_stuck_threshold_ms: 10_000,
+            track_stuck_threshold_ms: DEFAULT_TRACK_STUCK_THRESHOLD_MS,
             player_update_interval: 5,
             http_config: HttpConfig::default(),
             youtube_search_enabled: true,
@@ -201,6 +208,38 @@ impl Default for ServerConfig {
             timeouts: Timeouts::default(),
         }
     }
+}
+
+fn deserialize_frame_buffer_duration_ms<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = i32::deserialize(deserializer)?;
+    if value < MIN_FRAME_BUFFER_DURATION_MS {
+        tracing::warn!(
+            value,
+            default = DEFAULT_FRAME_BUFFER_DURATION_MS,
+            "frameBufferDurationMs is below 200ms; using the default"
+        );
+        return Ok(DEFAULT_FRAME_BUFFER_DURATION_MS);
+    }
+    Ok(value as u32)
+}
+
+fn deserialize_track_stuck_threshold_ms<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = i64::deserialize(deserializer)?;
+    if value < MIN_TRACK_STUCK_THRESHOLD_MS {
+        tracing::warn!(
+            value,
+            default = DEFAULT_TRACK_STUCK_THRESHOLD_MS,
+            "trackStuckThresholdMs is below 100ms; using the default"
+        );
+        return Ok(DEFAULT_TRACK_STUCK_THRESHOLD_MS);
+    }
+    Ok(value as u64)
 }
 
 /// lavalink.server.timeouts. Only the two keys that map onto something this
@@ -367,6 +406,29 @@ lavalink:
         assert!(config.lavalink.server.sources.http);
         assert!(!config.lavalink.server.sources.local);
         assert_eq!(config.lavalink.server.frame_buffer_duration_ms, 5000);
+    }
+
+    #[test]
+    fn undersized_audio_timings_fall_back_at_the_upstream_boundaries() {
+        for (frame, stuck, expected_frame, expected_stuck) in [
+            (-1, -1, 5000, 10_000),
+            (0, 0, 5000, 10_000),
+            (199, 99, 5000, 10_000),
+            (200, 100, 200, 100),
+        ] {
+            let yaml = format!(
+                "lavalink:\n  server:\n    frameBufferDurationMs: {frame}\n    trackStuckThresholdMs: {stuck}\n"
+            );
+            let config: Config = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(
+                config.lavalink.server.frame_buffer_duration_ms,
+                expected_frame
+            );
+            assert_eq!(
+                config.lavalink.server.track_stuck_threshold_ms,
+                expected_stuck
+            );
+        }
     }
 
     #[test]
