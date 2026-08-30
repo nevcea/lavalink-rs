@@ -18,7 +18,9 @@ pub(crate) fn safe_error(error: impl std::fmt::Display) -> String {
         redacted.push_str(&rest[..start]);
         let url_and_tail = &rest[start..];
         let end = url_and_tail
-            .find(|character: char| character.is_whitespace() || matches!(character, '<' | '>' | '"' | '\''))
+            .find(|character: char| {
+                character.is_whitespace() || matches!(character, '<' | '>' | '"' | '\'')
+            })
             .unwrap_or(url_and_tail.len());
         let token = &url_and_tail[..end];
         let core = token.trim_end_matches([')', ']', '}', ',', ';']);
