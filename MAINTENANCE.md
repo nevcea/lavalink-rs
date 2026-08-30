@@ -233,10 +233,11 @@ and versions are checked before slicing or allocating. Semantic fields such as
 `length`, `position`, `identifier`, and `uri` remain client-provided, matching
 upstream; the registered `sourceName` check is therefore required.
 
-**`frameStats.deficit` is approximate and may be negative.** It compares a
-fixed 3,000 expected frames with a skipped-tick timer rather than upstream's
-rolling `AudioLossCounter`. Late ticks and players starting mid-window can skew
-one report. See `crates/server/src/stats.rs`.
+**`frameStats.nulled` and `deficit` remain approximate on Opus passthrough.**
+Songbird exposes forwarded play time on its direct Opus path, but not actual null
+pulls, so `nulled` stays zero there and missing frames appear in `deficit` instead.
+As upstream does, `deficit` is not clamped and may be negative. See
+`crates/server/src/audio/engine.rs`.
 
 **`pluginFilters` has a different, unreachable shape.** Upstream places plugin
 filters as arbitrary top-level keys inside `filters`; this node nests them under

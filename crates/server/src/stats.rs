@@ -14,30 +14,14 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use crate::player::PlayerHandle;
 use crate::session::Session;
 
-/// Frames expected in one stats tick from a continuously-playing player: 50 fps
-/// (one FRAME_SAMPLES buffer is 20ms) times a 60s tick. Named for lavaplayer's
-/// own AudioLossCounter.EXPECTED_PACKET_COUNT_PER_MIN, which this equals because
-/// our tick interval (ticker::STATS_INTERVAL) is also 60s.
-const EXPECTED_FRAMES_PER_TICK: u64 = 3_000;
-
-/// How long a player must have been playing continuously before its frame counts
-/// are trusted for the aggregate — otherwise a track that started seconds before
-/// this tick reports a deficit that looks like near-total loss.
-///
-/// The original's AudioLossCounter.isDataUsable is more elaborate (a rolling
-/// per-minute window, plus a 100ms grace period across a track switch); this is
-/// the coarser equivalent that follows from tracking one playing_since
-/// timestamp per player rather than a minute-bucketed history. Both answer the
-/// same question: has this player been producing frames for the whole window the
-/// stats claim to cover?
-pub const FRAME_STATS_USABLE_AFTER_MS: i64 = 60_000;
+/// One completed minute of 20ms packets, matching AudioLossCounter.
+const EXPECTED_FRAMES_PER_MINUTE: u64 = 3_000;
 
 /// Averages frameStats over every "usable" player, the same way
 /// StatsCollector.retrieveStats does: usable players' sent/nulled counts are
 /// summed and divided by the usable player count, and deficit is how many of
 /// the expected frames per player never arrived, also averaged. Unusable players
-/// are excluded from the average entirely, but the caller must still have drained
-/// their counters (see crate::audio::ring::FrameCounters::take).
+/// are excluded from the average entirely.
 ///
 /// None when there are no usable players — the original does not divide by
 /// zero either, and a session with nothing playing has no frame data to report.
@@ -53,7 +37,7 @@ pub fn frame_stats(samples: impl Iterator<Item = (u32, u32, bool)>) -> Option<Fr
         return None;
     }
 
-    let expected = usable_players * EXPECTED_FRAMES_PER_TICK;
+    let expected = usable_players * EXPECTED_FRAMES_PER_MINUTE;
     let deficit = expected as i64 - (sent + nulled) as i64;
 
     Some(FrameStats {
@@ -201,7 +185,7 @@ pub fn rosters(sessions: &[Arc<Session>]) -> Vec<Vec<PlayerHandle>> {
 /// and crate::session::Session::counts from the guild map directly — and the
 /// two must never disagree about what the node is running.
 pub fn is_playing(player: &PlayerHandle) -> bool {
-    player.playing_since_ms() != 0
+    player.is_playing()
 }
 
 /// Total players, and of those the ones actually playing, from rosters the caller

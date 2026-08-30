@@ -19,7 +19,7 @@
 //!
 //! What is left is small enough to read as a transition table.
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -127,24 +127,22 @@ pub struct PlayerHandle {
     /// task, its pump thread and its voice connection with nothing left pointing
     /// at them.
     destroy: mpsc::Sender<oneshot::Sender<()>>,
-    /// Epoch ms when the current unbroken Playing period started, or 0 when not
-    /// playing. Written only by the actor, in PlayerActor::sync_playing; read
-    /// here without a lock.
-    playing_since_ms: Arc<AtomicI64>,
+    /// Written only by the actor, in PlayerActor::sync_playing; read here
+    /// without a lock for stats player counts.
+    playing: Arc<AtomicBool>,
     frames: Arc<FrameCounters>,
 }
 
 impl PlayerHandle {
-    /// 0 if not currently playing. Used both for /v4/stats' playingPlayers
-    /// and, gated by how long ago this was, for frameStats' usability.
-    pub fn playing_since_ms(&self) -> i64 {
-        self.playing_since_ms.load(Ordering::Relaxed)
+    pub fn is_playing(&self) -> bool {
+        self.playing.load(Ordering::Relaxed)
     }
 
-    /// Frames sent/nulled since the last call. Draining resets both to zero, so
-    /// call this at most once per stats tick per player.
-    pub fn take_frame_stats(&self) -> (u32, u32) {
-        self.frames.take()
+    /// The previous completed Unix-minute bucket and whether it covers a
+    /// continuous enough playback window to aggregate.
+    pub fn frame_stats_at(&self, now_ms: i64) -> (u32, u32, bool) {
+        let (sent, nulled, usable) = self.frames.stats_at(now_ms);
+        (sent, nulled, self.is_playing() && usable)
     }
 
     pub async fn send(&self, command: Command) -> Result<(), PlayerGone> {
@@ -255,7 +253,8 @@ pub struct PlayerActor {
     /// destroy and is the only signal that survives a caller giving up mid-way.
     destroy: mpsc::Receiver<oneshot::Sender<()>>,
     position_ms: Arc<AtomicI64>,
-    playing_since_ms: Arc<AtomicI64>,
+    playing: Arc<AtomicBool>,
+    frames: Arc<FrameCounters>,
     stuck_threshold: Duration,
     /// Set while a TrackStuckEvent has been emitted for the current track, so we
     /// report it once rather than every tick.
@@ -290,7 +289,7 @@ impl PlayerActor {
         let frames = engine.frame_counters();
         // Not from the engine: whether the player is playing is the actor's own
         // state, not the pipeline's.
-        let playing_since_ms = Arc::new(AtomicI64::new(0));
+        let playing = Arc::new(AtomicBool::new(false));
         // The engine reports back as EngineReport, so it never needs a reference
         // to the actor itself.
         engine.attach(engine_tx);
@@ -303,8 +302,8 @@ impl PlayerActor {
             commands: tx,
             voice_updates: voice_tx,
             destroy: destroy_tx,
-            playing_since_ms: Arc::clone(&playing_since_ms),
-            frames,
+            playing: Arc::clone(&playing),
+            frames: Arc::clone(&frames),
         };
         let actor = Self {
             model: PlayerModel::new(guild_id),
@@ -318,7 +317,8 @@ impl PlayerActor {
             active_generation: None,
             destroy: destroy_rx,
             position_ms,
-            playing_since_ms,
+            playing,
+            frames,
             stuck_threshold,
             stuck_reported: false,
             guild_id_str: guild_id.to_string(),
@@ -349,7 +349,9 @@ impl PlayerActor {
                 // life of the process.
                 reply = self.destroy.recv() => {
                     self.engine.stop();
-                    self.model.stop();
+                    if self.model.stop().is_some() {
+                        self.frames.track_ended_at(now_epoch_ms());
+                    }
                     if let Some(reply) = reply {
                         let _ = reply.send(());
                     }
@@ -415,20 +417,22 @@ impl PlayerActor {
         self.sync_playing();
     }
 
-    /// Keeps playing_since_ms in step with self.model.playback: stamped with
-    /// the current time on the transition into Playing, held steady for as long
-    /// as playback continues (so a burst of unrelated commands, e.g. repeated
-    /// EmitUpdate ticks, does not keep bumping it forward), and cleared to 0
-    /// the moment playback stops.
+    /// Keeps the lock-free player-count flag in step with actor-owned playback.
     fn sync_playing(&mut self) {
-        if self.model.playback.is_playing() {
-            if self.playing_since_ms.load(Ordering::Relaxed) == 0 {
-                self.playing_since_ms
-                    .store(now_epoch_ms(), Ordering::Relaxed);
-            }
-        } else {
-            self.playing_since_ms.store(0, Ordering::Relaxed);
+        self.playing
+            .store(self.model.playback.is_playing(), Ordering::Relaxed);
+    }
+
+    fn record_pause_transition(&self, paused: bool, now_ms: i64) {
+        if self.model.is_paused() != paused {
+            self.frames.paused_at(paused, now_ms);
         }
+    }
+
+    fn set_paused(&mut self, paused: bool, now: Instant, now_ms: i64) {
+        self.record_pause_transition(paused, now_ms);
+        self.model.set_paused(paused, now);
+        self.engine.set_paused(paused);
     }
 
     /// The order below is PlayerRestHandler.kt:143-226 and is wire-visible: it
@@ -436,6 +440,7 @@ impl PlayerActor {
     /// track or starts the new one at an offset.
     fn apply_patch(&mut self, request: PatchRequest) {
         let now = Instant::now();
+        let now_ms = now_epoch_ms();
 
         if let Some(voice) = request.voice {
             self.model.voice = voice;
@@ -446,8 +451,7 @@ impl PlayerActor {
         let track_untouched = request.track.is_none();
 
         if let Some(paused) = request.paused.take_if(track_untouched) {
-            self.model.set_paused(paused, now);
-            self.engine.set_paused(paused);
+            self.set_paused(paused, now, now_ms);
         }
 
         // Borrowed and cloned only where it is actually stored: userData is
@@ -522,10 +526,11 @@ impl PlayerActor {
                     Omissible::Present(paused) => paused,
                     Omissible::Omitted => false,
                 };
+                self.record_pause_transition(paused, now_ms);
 
                 let track = match track_change {
                     TrackChange::Clear => {
-                        self.stop_track(TrackEndReason::Stopped);
+                        self.stop_track(TrackEndReason::Stopped, now_ms);
                         self.model.set_paused(paused, now);
                         self.engine.set_paused(paused);
                         return;
@@ -536,7 +541,7 @@ impl PlayerActor {
                 // Anything already playing ends as REPLACED before the new track
                 // starts.
                 if self.model.track.is_some() {
-                    self.stop_track(TrackEndReason::Replaced);
+                    self.stop_track(TrackEndReason::Replaced, now_ms);
                 }
 
                 let position = clamp_start_position(request.position.into_option().unwrap_or(0));
@@ -560,6 +565,7 @@ impl PlayerActor {
                     filters: self.model.filters.clone(),
                 });
                 self.active_generation = Some(generation);
+                self.frames.track_started_at(now_ms);
                 tracing::info!(
                     guild_id = %self.guild_id_str,
                     generation,
@@ -629,7 +635,9 @@ impl PlayerActor {
                 self.model.last_progress = Some(Instant::now());
                 self.stuck_reported = false;
             }
-            EngineEvent::Finished => self.stop_track(TrackEndReason::Finished),
+            EngineEvent::Finished => {
+                self.stop_track(TrackEndReason::Finished, now_epoch_ms());
+            }
             EngineEvent::Exception { exception } => {
                 let Some(track) = self.model.track.clone() else {
                     return;
@@ -641,7 +649,9 @@ impl PlayerActor {
                     exception,
                 });
             }
-            EngineEvent::LoadFailed => self.stop_track(TrackEndReason::LoadFailed),
+            EngineEvent::LoadFailed => {
+                self.stop_track(TrackEndReason::LoadFailed, now_epoch_ms());
+            }
             EngineEvent::StartFailed { exception } => {
                 let Some(track) = self.model.track.clone() else {
                     return;
@@ -657,7 +667,7 @@ impl PlayerActor {
                     track: Box::new(track),
                     exception,
                 });
-                self.stop_track(TrackEndReason::LoadFailed);
+                self.stop_track(TrackEndReason::LoadFailed, now_epoch_ms());
             }
         }
     }
@@ -697,7 +707,7 @@ impl PlayerActor {
     }
 
     /// Ends the current track, emitting TrackEndEvent only if there was one.
-    fn stop_track(&mut self, reason: TrackEndReason) {
+    fn stop_track(&mut self, reason: TrackEndReason, now_ms: i64) {
         self.active_generation = None;
         self.engine.stop();
         let track = self.model.stop();
@@ -705,6 +715,7 @@ impl PlayerActor {
         self.stuck_reported = false;
 
         if let Some(track) = track {
+            self.frames.track_ended_at(now_ms);
             tracing::info!(
                 guild_id = %self.guild_id_str,
                 identifier = ?crate::logging::safe_identifier(&track.info.identifier),
@@ -1468,12 +1479,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playing_since_is_set_while_playing_and_cleared_when_not() {
+    async fn playing_flag_is_set_while_playing_and_cleared_when_not() {
         let harness = Harness::start();
-        assert_eq!(harness.handle.playing_since_ms(), 0);
+        assert!(!harness.handle.is_playing());
 
         harness.handle.patch(play(track("first"))).await.unwrap();
-        assert!(harness.handle.playing_since_ms() > 0);
+        assert!(harness.handle.is_playing());
 
         // Pausing stops it, even though the track is still loaded.
         harness
@@ -1484,7 +1495,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(harness.handle.playing_since_ms(), 0);
+        assert!(!harness.handle.is_playing());
 
         harness
             .handle
@@ -1494,7 +1505,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(harness.handle.playing_since_ms() > 0);
+        assert!(harness.handle.is_playing());
 
         harness
             .handle
@@ -1504,23 +1515,19 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(harness.handle.playing_since_ms(), 0);
+        assert!(!harness.handle.is_playing());
     }
 
-    /// An unrelated command mid-playback (the tick-driven EmitUpdate is the real
-    /// example) must not push playing_since_ms forward — otherwise a busy player
-    /// would never look "usable" for frameStats.
     #[tokio::test]
-    async fn playing_since_does_not_advance_on_an_unrelated_command() {
+    async fn a_quick_track_replacement_keeps_frame_stats_usable() {
         let harness = Harness::start();
         harness.handle.patch(play(track("first"))).await.unwrap();
-        let first = harness.handle.playing_since_ms();
+        harness.handle.patch(play(track("second"))).await.unwrap();
 
-        harness.handle.snapshot().await.unwrap();
-        harness.handle.send(Command::EmitUpdate).await.unwrap();
-        harness.handle.snapshot().await.unwrap();
+        let now_ms = now_epoch_ms();
+        let after_a_full_minute = (now_ms.div_euclid(60_000) + 2) * 60_000;
 
-        assert_eq!(harness.handle.playing_since_ms(), first);
+        assert!(harness.handle.frame_stats_at(after_a_full_minute).2);
     }
 
     /// A full queue that never drains (a wedged actor) must not hang send

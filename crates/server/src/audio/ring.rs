@@ -25,7 +25,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -37,6 +37,10 @@ pub const CHANNELS: usize = 2;
 
 /// One Discord frame: 20ms of stereo audio.
 pub const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize / 50) * CHANNELS;
+
+const MINUTE_MS: i64 = 60_000;
+const ACCEPTABLE_TRACK_SWITCH_MS: i64 = 100;
+const NEVER: i64 = i64::MAX;
 
 /// How long a producer waits for space before re-checking whether it was stopped.
 /// Only RingWriter::write uses it; the pump polls on its own COMMAND_POLL.
@@ -50,10 +54,25 @@ const PRODUCER_POLL: Duration = Duration::from_millis(100);
 /// (PipelineEngine::play) but the original's AudioLossCounter is a per-player
 /// counter that survives a track change — a quick switch between tracks does not
 /// reset it. Sharing one Arc across every ring a player creates reproduces that.
-#[derive(Debug, Default)]
+#[derive(Debug)]
+struct MinuteBucket {
+    minute: AtomicI64,
+    frames: AtomicU64,
+}
+
+impl Default for MinuteBucket {
+    fn default() -> Self {
+        Self {
+            minute: AtomicI64::new(-1),
+            frames: AtomicU64::new(0),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct FrameCounters {
-    sent: AtomicU32,
-    nulled: AtomicU32,
+    minutes: [MinuteBucket; 2],
+    rotation: Mutex<()>,
     /// Samples handed to record_sent/record_nulled that did not complete a
     /// whole FRAME_SAMPLES-sized frame by themselves — carried into the next
     /// call rather than truncated away, the same shape as Shared's own
@@ -63,44 +82,153 @@ pub struct FrameCounters {
     /// would report far more frames than the 20ms of audio it actually moved.
     sent_remainder: AtomicUsize,
     nulled_remainder: AtomicUsize,
+    playing_since_ms: AtomicI64,
+    last_track_started_ms: AtomicI64,
+    last_track_ended_ms: AtomicI64,
+}
+
+impl Default for FrameCounters {
+    fn default() -> Self {
+        Self {
+            minutes: [MinuteBucket::default(), MinuteBucket::default()],
+            rotation: Mutex::new(()),
+            sent_remainder: AtomicUsize::new(0),
+            nulled_remainder: AtomicUsize::new(0),
+            playing_since_ms: AtomicI64::new(NEVER),
+            last_track_started_ms: AtomicI64::new(NEVER / 2),
+            last_track_ended_ms: AtomicI64::new(NEVER),
+        }
+    }
 }
 
 impl FrameCounters {
     /// Records already-framed output from Songbird's direct path, which does not
     /// pass through RingReader and therefore cannot use record_sent(samples).
     pub(crate) fn record_sent_frames(&self, frames: u32) {
-        self.sent.fetch_add(frames, Ordering::Relaxed);
+        self.record_sent_frames_at(frames, crate::player::now_epoch_ms());
+    }
+
+    fn record_sent_frames_at(&self, frames: u32, now_ms: i64) {
+        self.minute(now_ms)
+            .frames
+            .fetch_add(u64::from(frames) << 32, Ordering::Relaxed);
     }
 
     /// Counts samples toward sent, in units of whole FRAME_SAMPLES frames,
     /// carrying any leftover forward.
     fn record_sent(&self, samples: usize) {
-        Self::record(&self.sent, &self.sent_remainder, samples);
+        self.record_sent_at(samples, crate::player::now_epoch_ms());
+    }
+
+    fn record_sent_at(&self, samples: usize, now_ms: i64) {
+        self.record(&self.sent_remainder, samples, now_ms, true);
     }
 
     /// As Self::record_sent, for silence handed back on a starved read.
     fn record_nulled(&self, samples: usize) {
-        Self::record(&self.nulled, &self.nulled_remainder, samples);
+        self.record_nulled_at(samples, crate::player::now_epoch_ms());
     }
 
-    fn record(counter: &AtomicU32, remainder: &AtomicUsize, samples: usize) {
+    fn record_nulled_at(&self, samples: usize, now_ms: i64) {
+        self.record(&self.nulled_remainder, samples, now_ms, false);
+    }
+
+    fn record(&self, remainder: &AtomicUsize, samples: usize, now_ms: i64, sent: bool) {
         let total = remainder.load(Ordering::Relaxed) + samples;
         if let Ok(frames) = u32::try_from(total / FRAME_SAMPLES) {
-            counter.fetch_add(frames, Ordering::Relaxed);
+            let frames = if sent {
+                u64::from(frames) << 32
+            } else {
+                u64::from(frames)
+            };
+            self.minute(now_ms).frames.fetch_add(frames, Ordering::Relaxed);
         }
         remainder.store(total % FRAME_SAMPLES, Ordering::Relaxed);
     }
 
-    /// Reads and resets both counters. /v4/stats ticks drain every player's
-    /// counters every tick regardless of whether that player's data ends up
-    /// "usable" for the aggregate — matching the original, which resets on
-    /// its own minute boundary independent of whether it was queried.
+    fn minute(&self, now_ms: i64) -> &MinuteBucket {
+        let minute = now_ms.div_euclid(MINUTE_MS);
+        let bucket = &self.minutes[minute.rem_euclid(2) as usize];
+        if bucket.minute.load(Ordering::Acquire) != minute {
+            let _rotation = crate::lock(&self.rotation);
+            if bucket.minute.load(Ordering::Relaxed) != minute {
+                bucket.frames.store(0, Ordering::Relaxed);
+                bucket.minute.store(minute, Ordering::Release);
+            }
+        }
+        bucket
+    }
+
+    pub(crate) fn stats_at(&self, now_ms: i64) -> (u32, u32, bool) {
+        let current_minute = now_ms.div_euclid(MINUTE_MS);
+        self.minute(now_ms);
+
+        let previous_minute = current_minute - 1;
+        let previous = &self.minutes[previous_minute.rem_euclid(2) as usize];
+        let frames = if previous.minute.load(Ordering::Acquire) == previous_minute {
+            previous.frames.load(Ordering::Relaxed)
+        } else {
+            0
+        };
+        let (sent, nulled) = unpack_frames(frames);
+        (sent, nulled, self.is_data_usable_at(now_ms))
+    }
+
+    pub(crate) fn track_started_at(&self, now_ms: i64) {
+        self.playback_started_at(now_ms);
+    }
+
+    pub(crate) fn track_ended_at(&self, now_ms: i64) {
+        self.last_track_ended_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    pub(crate) fn paused_at(&self, paused: bool, now_ms: i64) {
+        if paused {
+            self.track_ended_at(now_ms);
+        } else {
+            self.playback_started_at(now_ms);
+        }
+    }
+
+    fn playback_started_at(&self, now_ms: i64) {
+        self.last_track_started_ms.store(now_ms, Ordering::Relaxed);
+        let playing_since = self.playing_since_ms.load(Ordering::Relaxed);
+        let last_ended = self.last_track_ended_ms.load(Ordering::Relaxed);
+        if playing_since == NEVER
+            || (last_ended != NEVER
+                && now_ms.saturating_sub(last_ended) > ACCEPTABLE_TRACK_SWITCH_MS)
+        {
+            self.playing_since_ms.store(now_ms, Ordering::Relaxed);
+            self.last_track_ended_ms.store(NEVER, Ordering::Relaxed);
+        }
+    }
+
+    fn is_data_usable_at(&self, now_ms: i64) -> bool {
+        let last_started = self.last_track_started_ms.load(Ordering::Relaxed);
+        let last_ended = self.last_track_ended_ms.load(Ordering::Relaxed);
+        if last_ended != NEVER
+            && last_started.saturating_sub(last_ended) > ACCEPTABLE_TRACK_SWITCH_MS
+        {
+            return false;
+        }
+
+        let last_minute_start = (now_ms.div_euclid(MINUTE_MS) - 1).saturating_mul(MINUTE_MS);
+        self.playing_since_ms.load(Ordering::Relaxed) < last_minute_start
+    }
+
+    /// Reads and resets the current minute for isolated pipeline diagnostics.
+    /// Production frameStats uses stats_at, which never drains a bucket.
     pub fn take(&self) -> (u32, u32) {
-        (
-            self.sent.swap(0, Ordering::Relaxed),
-            self.nulled.swap(0, Ordering::Relaxed),
+        unpack_frames(
+            self.minute(crate::player::now_epoch_ms())
+                .frames
+                .swap(0, Ordering::Relaxed),
         )
     }
+}
+
+fn unpack_frames(frames: u64) -> (u32, u32) {
+    ((frames >> 32) as u32, frames as u32)
 }
 
 #[derive(Debug)]
@@ -816,6 +944,66 @@ mod tests {
 
         let (sent, nulled) = reader.take_frame_stats();
         assert_eq!((sent, nulled), (0, 1));
+    }
+
+    #[test]
+    fn frame_stats_report_only_the_previous_completed_minute_without_draining_it() {
+        let frames = FrameCounters::default();
+        frames.record_sent_frames_at(2, 59_999);
+        frames.record_nulled_at(FRAME_SAMPLES, 59_999);
+
+        assert_eq!(
+            frames.stats_at(59_999).0,
+            0,
+            "the current minute is incomplete"
+        );
+        let completed = frames.stats_at(60_000);
+        assert_eq!((completed.0, completed.1), (2, 1));
+
+        frames.record_sent_frames_at(4, 60_001);
+        assert_eq!(
+            frames.stats_at(60_001),
+            completed,
+            "reading again must neither include the current minute nor drain the previous one"
+        );
+    }
+
+    #[test]
+    fn a_100ms_track_switch_is_continuous_but_101ms_starts_a_new_window() {
+        let continuous = FrameCounters::default();
+        continuous.track_started_at(1);
+        continuous.track_ended_at(70_000);
+        continuous.track_started_at(70_100);
+        assert!(continuous.is_data_usable_at(120_000));
+
+        let interrupted = FrameCounters::default();
+        interrupted.track_started_at(1);
+        interrupted.track_ended_at(70_000);
+        interrupted.track_started_at(70_101);
+        assert!(!interrupted.is_data_usable_at(120_000));
+    }
+
+    #[test]
+    fn pause_and_resume_restart_the_usable_window() {
+        let frames = FrameCounters::default();
+        frames.track_started_at(1);
+        frames.paused_at(true, 70_000);
+        frames.paused_at(false, 70_101);
+
+        assert!(!frames.is_data_usable_at(120_000));
+        assert!(frames.is_data_usable_at(180_000));
+    }
+
+    #[test]
+    fn a_paused_track_replacement_uses_the_latest_track_end_for_resume() {
+        let frames = FrameCounters::default();
+        frames.track_started_at(1);
+        frames.paused_at(true, 10_000);
+        frames.track_ended_at(90_000);
+        frames.track_started_at(90_000);
+        frames.paused_at(false, 90_100);
+
+        assert!(frames.is_data_usable_at(120_000));
     }
 
     /// The bug this guards: a starved read used to hand back exactly

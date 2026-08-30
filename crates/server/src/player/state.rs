@@ -161,6 +161,10 @@ impl PlayerModel {
         }
     }
 
+    pub(crate) fn is_paused(&self) -> bool {
+        self.paused
+    }
+
     /// The original clamps volume to 0..=1000 rather than rejecting it.
     pub fn set_volume(&mut self, volume: i32) {
         self.volume = volume.clamp(0, 1000);

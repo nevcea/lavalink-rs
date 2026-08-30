@@ -74,16 +74,12 @@ async fn stats_tick(state: AppState) {
             // Per session, not per node: the original's StatsCollector.retrieveStats
             // takes a SocketContext and only aggregates that session's own players,
             // unlike players/playingPlayers/cpu/memory above, which are the same for
-            // everyone. Every player's counters are drained here regardless of
-            // usability (see FrameCounters::take's docs), so one sitting just under
-            // the usability threshold doesn't have frames silently pile up.
-            let frame_stats = crate::stats::frame_stats(roster.iter().map(|player| {
-                let (sent, nulled) = player.take_frame_stats();
-                let since = player.playing_since_ms();
-                let usable =
-                    since != 0 && since <= now_ms - crate::stats::FRAME_STATS_USABLE_AFTER_MS;
-                (sent, nulled, usable)
-            }));
+            // everyone. Each player returns the same previous completed Unix-minute
+            // bucket on repeated reads; only currently playing players whose
+            // transition history covers that whole minute are usable.
+            let frame_stats = crate::stats::frame_stats(
+                roster.iter().map(|player| player.frame_stats_at(now_ms)),
+            );
 
             // A paused session's sink drops every snapshot it's handed
             // (Sink::send's paused branch) — Stats included, since it coalesces
