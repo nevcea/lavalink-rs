@@ -84,5 +84,9 @@ metrics:
     # exist on this Rust node. See MAINTENANCE.md.
     endpoint: /metrics
 
-# Logging is controlled by RUST_LOG rather than by this file, e.g.
-#   RUST_LOG=info,lavalink_server=debug
+# Logging is controlled by RUST_LOG rather than by this file. Without it the
+# node logs its own DEBUG events and dependency INFO events. Output includes
+# targets, source locations and thread identity; request bodies, credentials,
+# voice tokens and URL query strings are deliberately never logged.
+#   RUST_LOG=info                         # quieter
+#   RUST_LOG=debug,songbird=debug         # dependency diagnostics too

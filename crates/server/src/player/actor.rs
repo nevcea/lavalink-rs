@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use lavalink_protocol::filters::Filters;
 use lavalink_protocol::message::{EmittedEvent, Message, TrackEndReason};
 use lavalink_protocol::player::{JsonObject, Player, Track, VoiceState};
-use lavalink_protocol::Omissible;
+use lavalink_protocol::{Exception, Omissible, Severity};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::audio::ring::FrameCounters;
@@ -294,7 +294,9 @@ impl PlayerActor {
         // The engine reports back as EngineReport, so it never needs a reference
         // to the actor itself.
         engine.attach(engine_tx);
-        let _ = voice_slot.set(voice_tx.clone());
+        if voice_slot.set(voice_tx.clone()).is_err() {
+            tracing::error!(guild_id, "voice update channel attached twice");
+        }
 
         let handle = PlayerHandle {
             guild_id,
@@ -545,14 +547,23 @@ impl PlayerActor {
                 self.position_ms.store(position, Ordering::Relaxed);
                 self.stuck_reported = false;
 
-                self.active_generation = Some(self.engine.play(PlayRequest {
+                let generation = self.engine.play(PlayRequest {
                     track: track.clone(),
                     start_position_ms: position,
                     end_time_ms: end_time,
                     paused,
                     volume: self.model.volume,
                     filters: self.model.filters.clone(),
-                }));
+                });
+                self.active_generation = Some(generation);
+                tracing::info!(
+                    guild_id = %self.guild_id_str,
+                    generation,
+                    identifier = ?crate::logging::safe_identifier(&track.info.identifier),
+                    position_ms = position,
+                    paused,
+                    "track started"
+                );
 
                 self.emit(EmittedEvent::TrackStart {
                     guild_id: self.guild_id_str.clone(),
@@ -564,17 +575,31 @@ impl PlayerActor {
 
     fn apply_voice(&mut self, update: VoiceUpdate) {
         match update {
-            VoiceUpdate::Connecting => self.model.connection = VoiceConnection::Connecting,
+            VoiceUpdate::Connecting => {
+                tracing::info!(guild_id = %self.guild_id_str, "voice connecting");
+                self.model.connection = VoiceConnection::Connecting;
+            }
             VoiceUpdate::Connected { ping_ms } => {
+                tracing::info!(guild_id = %self.guild_id_str, ping_ms, "voice connected");
                 self.model.connection = VoiceConnection::Connected;
                 self.model.ping_ms = ping_ms;
             }
-            VoiceUpdate::Reconnecting => self.model.connection = VoiceConnection::Reconnecting,
+            VoiceUpdate::Reconnecting => {
+                tracing::warn!(guild_id = %self.guild_id_str, "voice reconnecting");
+                self.model.connection = VoiceConnection::Reconnecting;
+            }
             VoiceUpdate::Disconnected => {
+                tracing::info!(guild_id = %self.guild_id_str, "voice disconnected");
                 self.model.connection = VoiceConnection::Disconnected;
                 self.model.ping_ms = -1;
             }
             VoiceUpdate::Closed { code, by_remote } => {
+                tracing::warn!(
+                    guild_id = %self.guild_id_str,
+                    code,
+                    by_remote,
+                    "voice websocket closed"
+                );
                 self.model.connection = VoiceConnection::Disconnected;
                 self.model.ping_ms = -1;
                 self.emit(EmittedEvent::WebSocketClosed {
@@ -605,6 +630,7 @@ impl PlayerActor {
                 let Some(track) = self.model.track.clone() else {
                     return;
                 };
+                log_track_exception(&self.guild_id_str, &track, &exception, "track failed");
                 self.emit(EmittedEvent::TrackException {
                     guild_id: self.guild_id_str.clone(),
                     track: Box::new(track),
@@ -616,6 +642,12 @@ impl PlayerActor {
                 let Some(track) = self.model.track.clone() else {
                     return;
                 };
+                log_track_exception(
+                    &self.guild_id_str,
+                    &track,
+                    &exception,
+                    "audio pipeline could not start",
+                );
                 self.emit(EmittedEvent::TrackException {
                     guild_id: self.guild_id_str.clone(),
                     track: Box::new(track),
@@ -647,6 +679,12 @@ impl PlayerActor {
         };
 
         self.stuck_reported = true;
+        tracing::warn!(
+            guild_id = %self.guild_id_str,
+            identifier = ?crate::logging::safe_identifier(&track.info.identifier),
+            threshold_ms = self.stuck_threshold.as_millis(),
+            "track is stuck"
+        );
         self.emit(EmittedEvent::TrackStuck {
             guild_id: self.guild_id_str.clone(),
             track: Box::new(track),
@@ -663,6 +701,12 @@ impl PlayerActor {
         self.stuck_reported = false;
 
         if let Some(track) = track {
+            tracing::info!(
+                guild_id = %self.guild_id_str,
+                identifier = ?crate::logging::safe_identifier(&track.info.identifier),
+                reason = ?reason,
+                "track ended"
+            );
             self.emit(EmittedEvent::TrackEnd {
                 guild_id: self.guild_id_str.clone(),
                 track: Box::new(track),
@@ -694,6 +738,32 @@ impl PlayerActor {
         if let Err(SendError::Overflow) = self.sink.send(Message::Event(event)) {
             tracing::warn!(guild_id = %self.guild_id_str, "dropped an event: essential queue overflowed");
         }
+    }
+}
+
+fn log_track_exception(guild_id: &str, track: &Track, exception: &Exception, event: &'static str) {
+    let identifier = crate::logging::safe_identifier(&track.info.identifier);
+    let message = crate::logging::safe_error(exception.message.as_deref().unwrap_or(""));
+    let cause = crate::logging::safe_error(&exception.cause);
+    match exception.severity {
+        Severity::Fault => tracing::error!(
+            guild_id,
+            event,
+            identifier = ?identifier,
+            severity = ?exception.severity,
+            exception_message = ?message,
+            exception_cause = ?cause,
+            "track exception"
+        ),
+        Severity::Common | Severity::Suspicious => tracing::warn!(
+            guild_id,
+            event,
+            identifier = ?identifier,
+            severity = ?exception.severity,
+            exception_message = ?message,
+            exception_cause = ?cause,
+            "track exception"
+        ),
     }
 }
 

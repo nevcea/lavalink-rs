@@ -174,6 +174,10 @@ impl Loader {
 
             let result = Arc::new(self.load_uncached(identifier).await);
 
+            if let LoadResult::Error(exception) = result.as_ref() {
+                log_load_error(identifier, exception);
+            }
+
             if !matches!(*result, LoadResult::Error(_)) {
                 let mut cache = lock(&self.cache);
                 if cache.len() >= MAX_CACHE_ENTRIES {
@@ -377,6 +381,28 @@ impl Loader {
         self.managers
             .iter()
             .any(|manager| manager.name() == source_name)
+    }
+}
+
+fn log_load_error(identifier: &str, exception: &Exception) {
+    let identifier = crate::logging::safe_identifier(identifier);
+    let message = crate::logging::safe_error(exception.message.as_deref().unwrap_or(""));
+    let cause = crate::logging::safe_error(&exception.cause);
+    match exception.severity {
+        Severity::Fault => tracing::error!(
+            identifier = ?identifier,
+            severity = ?exception.severity,
+            exception_message = ?message,
+            exception_cause = ?cause,
+            "track load failed"
+        ),
+        Severity::Common | Severity::Suspicious => tracing::warn!(
+            identifier = ?identifier,
+            severity = ?exception.severity,
+            exception_message = ?message,
+            exception_cause = ?cause,
+            "track load failed"
+        ),
     }
 }
 

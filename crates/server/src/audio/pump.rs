@@ -732,7 +732,12 @@ impl State {
         if let Err(error) = result {
             // Unseekable input: the original refuses too, and the track carries on
             // from where it was rather than dying.
-            tracing::debug!(%error, position_ms, "seek failed");
+            tracing::warn!(
+                error_debug = ?error,
+                error_display = %error,
+                position_ms,
+                "seek failed"
+            );
         }
 
         // Only on the path that actually moved. A failed seek left the decoder

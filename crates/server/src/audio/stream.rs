@@ -607,7 +607,8 @@ impl Read for HttpMediaSource {
 
                 self.reconnect_attempts += 1;
                 tracing::debug!(
-                    %last_error,
+                    error_debug = ?last_error,
+                    error_display = %last_error,
                     attempt = self.reconnect_attempts,
                     position = self.position,
                     "reconnecting after a mid-stream read error"

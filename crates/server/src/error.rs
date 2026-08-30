@@ -14,6 +14,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lavalink_protocol::http::Error as ErrorBody;
 use serde::de::DeserializeOwned;
+use tracing::Instrument;
 
 use crate::player::now_epoch_ms;
 
@@ -147,18 +148,59 @@ pub async fn fill_error_path(request: Request, next: Next) -> Response {
     // below ever reads it, so allocating the path here spent a String per request
     // to serve the responses that don't have one. http::Uri is Bytes-backed, so
     // keeping the whole thing is a refcount bump.
+    let method = request.method().clone();
     let uri = request.uri().clone();
     let trace_requested = wants_trace(uri.query());
-    let mut response = next.run(request).await;
+    let span = tracing::debug_span!("http.request", %method, path = uri.path());
+    let started = std::time::Instant::now();
+    let mut response = next.run(request).instrument(span.clone()).await;
 
     // Taken out rather than cloned: this is the outermost layer, so nothing after it
     // reads the extension, and the error owns a String that would be copied for no
     // one on every error response.
-    let Some(error) = response.extensions_mut().remove::<ApiError>() else {
-        return response;
-    };
+    let error = response.extensions_mut().remove::<ApiError>();
+    {
+        let _entered = span.enter();
+        log_response(response.status(), started.elapsed(), error.as_ref());
+    }
+    let Some(error) = error else { return response };
     let trace = trace_requested.then(|| error.message.clone());
     (error.status, Json(error.body(uri.path(), trace))).into_response()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseLogLevel {
+    Debug,
+    Warn,
+    Error,
+}
+
+fn response_log_level(status: StatusCode) -> ResponseLogLevel {
+    if status.is_server_error() {
+        ResponseLogLevel::Error
+    } else if status.is_client_error() {
+        ResponseLogLevel::Warn
+    } else {
+        ResponseLogLevel::Debug
+    }
+}
+
+fn log_response(status: StatusCode, elapsed: std::time::Duration, error: Option<&ApiError>) {
+    let error = error.map(|error| crate::logging::safe_error(format!("{error:?}")));
+    let level = response_log_level(status);
+    let status = status.as_u16();
+    let elapsed_ms = elapsed.as_millis();
+    match level {
+        ResponseLogLevel::Debug => {
+            tracing::debug!(status, elapsed_ms, error = ?error, "request completed")
+        }
+        ResponseLogLevel::Warn => {
+            tracing::warn!(status, elapsed_ms, error = ?error, "request completed")
+        }
+        ResponseLogLevel::Error => {
+            tracing::error!(status, elapsed_ms, error = ?error, "request completed")
+        }
+    }
 }
 
 /// axum::Json, but a malformed or wrongly-typed body becomes an ApiError
@@ -269,6 +311,19 @@ mod tests {
         assert!(wants_trace(Some("trace=true")));
         assert!(wants_trace(Some("identifier=foo&trace=true")));
         assert!(wants_trace(Some("trace=TRUE")));
+    }
+
+    #[test]
+    fn response_statuses_choose_an_operator_visible_level() {
+        assert_eq!(response_log_level(StatusCode::OK), ResponseLogLevel::Debug);
+        assert_eq!(
+            response_log_level(StatusCode::BAD_REQUEST),
+            ResponseLogLevel::Warn
+        );
+        assert_eq!(
+            response_log_level(StatusCode::INTERNAL_SERVER_ERROR),
+            ResponseLogLevel::Error
+        );
     }
 
     #[test]

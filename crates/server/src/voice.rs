@@ -231,7 +231,13 @@ impl EventHandler for ActorNotifier {
                 // unrelated transition happened to come along and correct it.
                 // Only a wedged actor (never draining anything) can still fill
                 // this one, which is what try_send still allows dropping.
-                let _ = voice_updates.try_send(update);
+                if let Err(error) = voice_updates.try_send(update) {
+                    tracing::warn!(
+                        error_debug = ?error,
+                        error_display = %error,
+                        "dropped a voice state transition"
+                    );
+                }
             }
         }
 

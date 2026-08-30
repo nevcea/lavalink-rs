@@ -455,13 +455,13 @@ fn run(program: &str, args: &[&str], timeout: Duration) -> Result<String, Source
     let mut stderr_pipe = child.stderr.take().expect("stderr is piped");
     let stdout_thread = std::thread::spawn(move || {
         let mut buf = String::new();
-        let _ = stdout_pipe.read_to_string(&mut buf);
-        buf
+        let result = stdout_pipe.read_to_string(&mut buf);
+        (buf, result)
     });
     let stderr_thread = std::thread::spawn(move || {
         let mut buf = String::new();
-        let _ = stderr_pipe.read_to_string(&mut buf);
-        buf
+        let result = stderr_pipe.read_to_string(&mut buf);
+        (buf, result)
     });
 
     let mut child = KillOnDrop(Some(child));
@@ -470,8 +470,9 @@ fn run(program: &str, args: &[&str], timeout: Duration) -> Result<String, Source
     loop {
         match child.0.as_mut().expect("child is present").try_wait() {
             Ok(Some(status)) => {
-                let stdout = stdout_thread.join().unwrap_or_default();
-                let stderr = stderr_thread.join().unwrap_or_default();
+                child.0.take();
+                let stdout = join_pipe("stdout", stdout_thread);
+                let stderr = join_pipe("stderr", stderr_thread);
 
                 if !status.success() {
                     return Err(classify(&stderr));
@@ -488,6 +489,30 @@ fn run(program: &str, args: &[&str], timeout: Duration) -> Result<String, Source
                 std::thread::sleep(Duration::from_millis(25));
             }
             Err(error) => return Err(SourceError::Internal(error.to_string())),
+        }
+    }
+}
+
+fn join_pipe(
+    pipe: &'static str,
+    thread: std::thread::JoinHandle<(String, std::io::Result<usize>)>,
+) -> String {
+    match thread.join() {
+        Ok((output, Ok(_))) => output,
+        Ok((output, Err(error))) => {
+            tracing::error!(
+                pipe,
+                error_debug = ?error,
+                error_display = %error,
+                "could not read yt-dlp output"
+            );
+            output
+        }
+        Err(_) => {
+            // The panic hook already recorded the payload and backtrace at the
+            // point of failure; this supplies the yt-dlp pipe context.
+            tracing::error!(pipe, "yt-dlp output reader panicked");
+            String::new()
         }
     }
 }
@@ -527,8 +552,20 @@ struct KillOnDrop(Option<Child>);
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if let Some(mut child) = self.0.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Err(error) = child.kill() {
+                tracing::warn!(
+                    error_debug = ?error,
+                    error_display = %error,
+                    "could not kill yt-dlp"
+                );
+            }
+            if let Err(error) = child.wait() {
+                tracing::warn!(
+                    error_debug = ?error,
+                    error_display = %error,
+                    "could not reap yt-dlp"
+                );
+            }
         }
     }
 }

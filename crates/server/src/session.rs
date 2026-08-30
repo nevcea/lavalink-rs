@@ -251,8 +251,26 @@ impl Session {
     /// task, its pump thread, its ring and its songbird driver — still streaming to
     /// Discord — unreachable for the life of the process.
     pub async fn shutdown(&self) {
-        let destroys = self.take_players().into_iter().map(|player| async move {
-            let _ = tokio::time::timeout(PLAYER_DESTROY_TIMEOUT, player.destroy()).await;
+        let session_id = self.id.clone();
+        let destroys = self.take_players().into_iter().map(|player| {
+            let session_id = session_id.clone();
+            async move {
+                match tokio::time::timeout(PLAYER_DESTROY_TIMEOUT, player.destroy()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => tracing::warn!(
+                        session = %session_id,
+                        error_debug = ?error,
+                        error_display = %error,
+                        "player actor closed before destroy completed"
+                    ),
+                    Err(error) => tracing::warn!(
+                        session = %session_id,
+                        error_debug = ?error,
+                        error_display = %error,
+                        "timed out destroying a player"
+                    ),
+                }
+            }
         });
         futures_util::future::join_all(destroys).await;
         self.sink.close();

@@ -163,7 +163,12 @@ pub async fn patch_player(
     // buried inside a CompletionException and the client sees something else.
     if let Omissible::Present(voice) = &update.voice {
         connection.connect(voice).await.map_err(|error| {
-            tracing::warn!(guild_id, %error, "voice connection failed");
+            tracing::warn!(
+                guild_id,
+                error_debug = ?error,
+                error_display = %error,
+                "voice connection failed"
+            );
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to connect to voice server",
@@ -264,7 +269,23 @@ pub async fn delete_player(
         // the result is already ignored (removal above is the teardown that
         // counts), so this wait is a courtesy, and an unbounded courtesy is a
         // hung request every time a client retries the DELETE.
-        let _ = tokio::time::timeout(PLAYER_DESTROY_TIMEOUT, handle.destroy()).await;
+        match tokio::time::timeout(PLAYER_DESTROY_TIMEOUT, handle.destroy()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(
+                session = %session_id,
+                guild_id,
+                error_debug = ?error,
+                error_display = %error,
+                "player actor closed before destroy completed"
+            ),
+            Err(error) => tracing::warn!(
+                session = %session_id,
+                guild_id,
+                error_debug = ?error,
+                error_display = %error,
+                "timed out destroying a player"
+            ),
+        }
     }
 
     // Deleting a player that is not there succeeds; the original's destroyPlayer

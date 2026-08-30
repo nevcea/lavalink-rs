@@ -1,5 +1,8 @@
+use std::backtrace::Backtrace;
+use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,24 +16,90 @@ use lavalink_server::loader::Loader;
 use lavalink_server::{rest, ticker, AppState};
 use tracing_subscriber::EnvFilter;
 
+// Symphonia's probe WARNs while successfully skipping ordinary ID3 padding, so
+// keep that one noisy target at ERROR while exposing this server's own DEBUG path.
+const DEFAULT_LOG_FILTER: &str =
+    "info,lavalink_server=debug,symphonia_core::formats::probe=error";
+
 /// Note the hand-built runtime rather than #[tokio::main].
 ///
 /// Source managers hold reqwest::blocking clients, and building one inside a tokio
 /// context panics — reqwest detects the runtime and refuses. So everything blocking
 /// is constructed first, and the runtime is entered afterwards.
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let started_at = Instant::now();
+fn main() -> ExitCode {
+    init_logging();
+    install_panic_hook();
+
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            log_error_chain(error.as_ref());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn init_logging() {
+    let filter = match EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(error) => {
+            if std::env::var_os(EnvFilter::DEFAULT_ENV).is_some() {
+                eprintln!(
+                    "invalid {} ({error:?}); using {DEFAULT_LOG_FILTER}",
+                    EnvFilter::DEFAULT_ENV
+                );
+            }
+            EnvFilter::new(DEFAULT_LOG_FILTER)
+        }
+    };
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            // symphonia's probe logs a WARN every time it skips a leading ID3 tag or
-            // padding before the first frame sync — its normal, successful detection
-            // path for a large fraction of real MP3s, not a sign anything is wrong
-            // with how this node opened the stream. error still surfaces an actual
-            // probe failure, just not this expected, per-track noise.
-            EnvFilter::new("info,symphonia_core::formats::probe=error")
-        }))
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .with_thread_names(true)
         .init();
+}
+
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let message = panic_message(info.payload());
+        let location = info.location();
+        let backtrace = Backtrace::force_capture();
+        tracing::error!(
+            panic_message = %message,
+            panic_file = location.map(std::panic::Location::file).unwrap_or("<unknown>"),
+            panic_line = location.map(std::panic::Location::line).unwrap_or(0),
+            panic_column = location.map(std::panic::Location::column).unwrap_or(0),
+            backtrace = %backtrace,
+            "thread panicked"
+        );
+    }));
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "<non-string panic payload>".to_owned())
+}
+
+fn log_error_chain(error: &(dyn Error + 'static)) {
+    tracing::error!(error = ?error, error_display = %error, "server terminated");
+    let mut source = error.source();
+    let mut depth = 1;
+    while let Some(error) = source {
+        tracing::error!(depth, error = ?error, error_display = %error, "caused by");
+        source = error.source();
+        depth += 1;
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let started_at = Instant::now();
 
     let config_path = std::env::args()
         .nth(1)
@@ -145,7 +214,11 @@ fn source_managers(
             match DeezerSource::new(proxy.clone()) {
                 Ok(source) => managers.push(Arc::new(source)),
                 Err(error) => {
-                    tracing::error!(%error, "could not start the deezer source; disabling it")
+                    tracing::error!(
+                        error_debug = ?error,
+                        error_display = %error,
+                        "could not start the deezer source; disabling it"
+                    )
                 }
             }
         }
@@ -160,7 +233,11 @@ fn source_managers(
         match GetyarnSource::new(proxy.clone()) {
             Ok(source) => managers.push(Arc::new(source)),
             Err(error) => {
-                tracing::error!(%error, "could not start the getyarn source; disabling it")
+                tracing::error!(
+                    error_debug = ?error,
+                    error_display = %error,
+                    "could not start the getyarn source; disabling it"
+                )
             }
         }
     }
@@ -169,7 +246,11 @@ fn source_managers(
             Ok(source) => managers.push(Arc::new(source)),
             // Advertising a source we could not build would be a lie in
             // /v4/info, so it is dropped rather than half-enabled.
-            Err(error) => tracing::error!(%error, "could not start the http source; disabling it"),
+            Err(error) => tracing::error!(
+                error_debug = ?error,
+                error_display = %error,
+                "could not start the http source; disabling it"
+            ),
         }
     }
 
@@ -188,7 +269,13 @@ fn source_managers(
 /// instead.
 async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<()>) {
     let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(
+                error_debug = ?error,
+                error_display = %error,
+                "could not listen for Ctrl-C"
+            );
+        }
     };
 
     #[cfg(unix)]
@@ -198,7 +285,11 @@ async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<()>) {
                 signal.recv().await;
             }
             Err(error) => {
-                tracing::error!(%error, "could not install a SIGTERM handler");
+                tracing::error!(
+                    error_debug = ?error,
+                    error_display = %error,
+                    "could not install a SIGTERM handler"
+                );
                 std::future::pending::<()>().await;
             }
         }
@@ -213,12 +304,31 @@ async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<()>) {
     }
 
     tracing::info!("shutting down");
-    let _ = shutdown_tx.send(());
+    if let Err(error) = shutdown_tx.send(()) {
+        tracing::debug!(
+            error_debug = ?error,
+            error_display = %error,
+            "no shutdown watchers remained"
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_logging_exposes_server_debug_without_dependency_debug_noise() {
+        assert!(DEFAULT_LOG_FILTER.contains("lavalink_server=debug"));
+        assert!(DEFAULT_LOG_FILTER.starts_with("info,"));
+    }
+
+    #[test]
+    fn panic_payloads_keep_the_original_message() {
+        assert_eq!(panic_message(&"boom"), "boom");
+        assert_eq!(panic_message(&"owned".to_owned()), "owned");
+        assert_eq!(panic_message(&123_u32), "<non-string panic payload>");
+    }
 
     #[test]
     fn specific_sources_precede_the_generic_http_source() {

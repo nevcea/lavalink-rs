@@ -15,7 +15,7 @@ Spring Cloud, and plugin-manager changes do not apply to this Rust node.
 |---|---|---|
 | 4.0.8 | Non-allocating frames; clean shutdown | The pump/ring reuse their buffers, and shutdown closes websocket sessions. |
 | 4.1.0 | Cause stack, request timeouts, metrics, filter defaults, CPU polling, voice race | Implemented and covered by focused tests; the one unmappable pool timeout remains documented below. |
-| 4.1.2 | `beforeRequest` logging | Not modelled; request logging is controlled by `RUST_LOG`. |
+| 4.1.2 | `beforeRequest` logging | Implemented as safer completion logs with status and latency; request bodies, credentials and URL queries are excluded. |
 | 4.2.0 | DAVE `channelId`; SoundCloud preview filtering | DAVE and `channelId` are implemented; the unavailable yt-dlp preview signal is documented below. |
 | 4.1.1, 4.2.1, 4.2.2 | Voice-library fixes and DAVE library updates | Supplied by songbird 0.6; no additional wire or configuration shape. |
 
@@ -37,6 +37,19 @@ deadline and RSS gate and writes raw JSON plus a Markdown summary under
 `target/compare`. Run `python3 benchmarks/compare/run.py --self-test` after
 changing the runner. Attach generated results to the PR; do not commit
 machine-specific output or run the noisy comparison in shared CI.
+
+## Diagnostics and logging
+
+The default filter is `info,lavalink_server=debug` with Symphonia's expected
+probe noise held at `error`; `RUST_LOG` remains authoritative. Text logs include
+the target, source location and thread identity. Successful requests are DEBUG,
+4xx responses and user-caused load/playback failures are WARN, and 5xx responses,
+faults and panics are ERROR. Panics always include a forced backtrace, including
+audio-pump panics recovered by `catch_unwind`.
+
+Logs never include request bodies, Authorization values, Discord voice tokens,
+proxy credentials, or URL query/fragment data. This redaction applies only to
+operator logs and does not change Lavalink response or event text.
 
 ## Route planning / IP rotation — not implemented
 

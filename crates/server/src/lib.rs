@@ -38,6 +38,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod loader;
+pub(crate) mod logging;
 pub mod player;
 pub mod rest;
 pub mod session;

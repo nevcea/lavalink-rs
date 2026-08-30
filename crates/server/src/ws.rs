@@ -138,10 +138,12 @@ async fn run(
     // claim_for_resume atomically queued a resumed Ready before unpausing the
     // replay sink. A new session has no backlog, so it is inserted here.
     if !resumed {
-        let _ = session.send_first(Message::Ready {
+        if let Err(error) = session.send_first(Message::Ready {
             resumed: false,
             session_id: session.id.clone(),
-        });
+        }) {
+            tracing::error!(session = %session.id, error = ?error, "could not queue Ready");
+        }
     }
 
     if resumed {
@@ -186,7 +188,7 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
         tokio::select! {
             _ = shutdown.changed() => {
                 tracing::info!(session = %session.id, "node is shutting down; closing the session");
-                let _ = tokio::time::timeout(
+                let result = tokio::time::timeout(
                     WRITE_TIMEOUT,
                     writer.send(WsMessage::Close(Some(CloseFrame {
                         code: CLOSE_GOING_AWAY,
@@ -194,6 +196,21 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
                     }))),
                 )
                 .await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => tracing::warn!(
+                        session = %session.id,
+                        error_debug = ?error,
+                        error_display = %error,
+                        "could not send the shutdown close frame"
+                    ),
+                    Err(error) => tracing::warn!(
+                        session = %session.id,
+                        error_debug = ?error,
+                        error_display = %error,
+                        "timed out sending the shutdown close frame"
+                    ),
+                }
                 return false;
             }
 
@@ -212,7 +229,12 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
                     // Ping/pong are handled by the transport.
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
-                        tracing::debug!(session = %session.id, %error, "websocket read failed");
+                        tracing::warn!(
+                            session = %session.id,
+                            error_debug = ?error,
+                            error_display = %error,
+                            "websocket read failed"
+                        );
                         break;
                     }
                 }
@@ -225,7 +247,11 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
                     Err(error) => {
                         // Serializing our own DTOs cannot fail in practice; if it
                         // does, dropping one message beats dropping the session.
-                        tracing::error!(%error, "could not serialize an outgoing message");
+                        tracing::error!(
+                            error_debug = ?error,
+                            error_display = %error,
+                            "could not serialize an outgoing message"
+                        );
                         continue;
                     }
                 };
@@ -236,7 +262,13 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
                 .await
                 {
                     Ok(Ok(())) => {}
-                    Ok(Err(_)) => {
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            session = %session.id,
+                            error_debug = ?error,
+                            error_display = %error,
+                            "websocket write failed"
+                        );
                         restore_undelivered(session, message);
                         break;
                     }
@@ -263,7 +295,7 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
                 session = %session.id,
                 "client is not draining events; closing the session"
             );
-            let _ = tokio::time::timeout(
+            let result = tokio::time::timeout(
                 WRITE_TIMEOUT,
                 writer.send(WsMessage::Close(Some(CloseFrame {
                     code: CLOSE_POLICY_VIOLATION,
@@ -271,6 +303,21 @@ async fn pump(state: &AppState, session: &Arc<Session>, socket: WebSocket) -> bo
                 }))),
             )
             .await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(
+                    session = %session.id,
+                    error_debug = ?error,
+                    error_display = %error,
+                    "could not send the overflow close frame"
+                ),
+                Err(error) => tracing::warn!(
+                    session = %session.id,
+                    error_debug = ?error,
+                    error_display = %error,
+                    "timed out sending the overflow close frame"
+                ),
+            }
             state.sessions.destroy(&session.id).await;
             return true;
         }
@@ -316,7 +363,13 @@ fn emit_fresh_updates(session: &Session) {
 /// moment later, and the next tick regenerates a fresher one regardless.
 fn restore_undelivered(session: &Session, message: Message) {
     if message.coalesce_key().is_none() {
-        let _ = session.sink.send_first(message);
+        if let Err(error) = session.sink.send_first(message) {
+            tracing::warn!(
+                session = %session.id,
+                error = ?error,
+                "could not restore an undelivered event"
+            );
+        }
     }
 }
 

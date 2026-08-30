@@ -33,7 +33,7 @@ use lavalink_protocol::filters::Filters;
 use lavalink_protocol::Exception;
 use songbird::events::{Event, EventContext, EventData, EventHandler, TrackEvent};
 use songbird::input::{Input, RawAdapter};
-use songbird::tracks::{PlayError, PlayMode, Track, TrackHandle, TrackState};
+use songbird::tracks::{PlayError, PlayMode, Track, TrackHandle, TrackResult, TrackState};
 use tokio::sync::mpsc::Sender as AsyncSender;
 
 use super::filter::player_volume_multiplier;
@@ -127,8 +127,21 @@ struct DirectState {
 /// cut short (a full reconnect wait for Stop, up to COMMAND_POLL for others).
 /// Centralized here so both call sites share one place that gets the order right,
 /// rather than each re-implementing it.
-fn signal_pump(commands: &Sender<PumpCommand>, interrupt: &AtomicBool, command: PumpCommand) {
-    let _ = commands.send(command);
+fn signal_pump(
+    commands: &Sender<PumpCommand>,
+    interrupt: &AtomicBool,
+    command: PumpCommand,
+    guild_id: u64,
+    generation: u64,
+) {
+    if let Err(error) = commands.send(command) {
+        tracing::warn!(
+            guild_id,
+            generation,
+            error = ?error,
+            "could not deliver a pump command"
+        );
+    }
     interrupt.store(true, Ordering::Relaxed);
 }
 
@@ -149,6 +162,35 @@ fn is_current(active: &Mutex<Option<Active>>, generation: u64) -> bool {
 /// synchronously, before it spawns anything.
 fn superseded_by_a_replacement(active: &Mutex<Option<Active>>) -> bool {
     lock(active).is_some()
+}
+
+fn log_track_control(
+    active: &Mutex<Option<Active>>,
+    guild_id: u64,
+    generation: u64,
+    action: &'static str,
+    result: TrackResult<()>,
+) {
+    let Err(error) = result else { return };
+    if is_current(active, generation) {
+        tracing::warn!(
+            guild_id,
+            generation,
+            action,
+            error_debug = ?error,
+            error_display = %error,
+            "track control failed"
+        );
+    } else {
+        tracing::debug!(
+            guild_id,
+            generation,
+            action,
+            error_debug = ?error,
+            error_display = %error,
+            "stale track control failed"
+        );
+    }
 }
 
 fn is_current_direct(active: &Mutex<Option<Active>>, generation: u64) -> bool {
@@ -172,7 +214,10 @@ fn direct_path_eligible(request: &PlayRequest) -> bool {
 /// safe here and prevents a full report queue from dropping ordered events.
 /// Progress reports remain deliberately lossy.
 fn send_reliable(events: &AsyncSender<EngineReport>, report: EngineReport) {
-    let _ = events.blocking_send(report);
+    let generation = report.generation;
+    if events.blocking_send(report).is_err() {
+        tracing::debug!(generation, "engine report receiver closed");
+    }
 }
 
 fn duration_ms(duration: Duration) -> i64 {
@@ -268,12 +313,16 @@ impl DirectTerminal {
 
     async fn send(&self, event: EngineEvent) {
         if let Some(events) = &self.events {
-            let _ = events
+            if events
                 .send(EngineReport {
                     generation: self.generation,
                     event,
                 })
-                .await;
+                .await
+                .is_err()
+            {
+                tracing::debug!(generation = self.generation, "engine report receiver closed");
+            }
         }
     }
 }
@@ -313,6 +362,7 @@ struct DirectEndTime {
     active: Arc<Mutex<Option<Active>>>,
     schedule: Arc<AtomicU64>,
     schedule_id: u64,
+    guild_id: u64,
     generation: u64,
 }
 
@@ -325,7 +375,13 @@ impl EventHandler for DirectEndTime {
             return None;
         }
         if let EventContext::Track(&[(_, handle)]) = context {
-            let _ = handle.stop();
+            log_track_control(
+                &self.active,
+                self.guild_id,
+                self.generation,
+                "end_time_stop",
+                handle.stop(),
+            );
         }
         None
     }
@@ -456,12 +512,24 @@ impl PipelineEngine {
 
             let Some((paused, volume, position, end_time, schedule, pending, serial)) = state
             else {
-                let _ = handle.stop();
+                log_track_control(
+                    &engine.active,
+                    guild_id,
+                    generation,
+                    "superseded_stop",
+                    handle.stop(),
+                );
                 tracing::debug!(guild_id, "discarded a superseded direct input");
                 return;
             };
 
-            let _ = handle.set_volume(player_volume_multiplier(volume));
+            log_track_control(
+                &engine.active,
+                guild_id,
+                generation,
+                "set_volume",
+                handle.set_volume(player_volume_multiplier(volume)),
+            );
             if position > 0 || serial > 0 {
                 engine.seek_direct(
                     handle.clone(),
@@ -475,7 +543,13 @@ impl PipelineEngine {
                 // the PCM pump filling its buffer while the mixer is paused.
                 let _ = handle.make_playable();
             } else {
-                let _ = handle.play();
+                log_track_control(
+                    &engine.active,
+                    guild_id,
+                    generation,
+                    "play",
+                    handle.play(),
+                );
             }
             engine.schedule_direct_end(handle, generation, end_time, position, schedule);
         });
@@ -492,6 +566,7 @@ impl PipelineEngine {
         pending_seek_ms.store(position_ms, Ordering::Relaxed);
         let active = Arc::clone(&self.active);
         let position = Arc::clone(&self.position_ms);
+        let guild_id = self.guild_id;
         self.runtime.spawn(async move {
             let result = handle
                 .seek_async(Duration::from_millis(position_ms.max(0) as u64))
@@ -509,14 +584,28 @@ impl PipelineEngine {
                 return;
             }
             pending_seek_ms.store(-1, Ordering::Relaxed);
-            if let Ok(actual) = result {
-                position.store(duration_ms(actual), Ordering::Relaxed);
+            match result {
+                Ok(actual) => position.store(duration_ms(actual), Ordering::Relaxed),
+                Err(error) => tracing::warn!(
+                    guild_id,
+                    generation,
+                    position_ms,
+                    error_debug = ?error,
+                    error_display = %error,
+                    "direct track seek failed"
+                ),
             }
             let paused = lock(&active)
                 .as_ref()
                 .is_some_and(|current| current.generation == generation && current.paused);
             if !paused {
-                let _ = handle.play();
+                log_track_control(
+                    &active,
+                    guild_id,
+                    generation,
+                    "play_after_seek",
+                    handle.play(),
+                );
             }
         });
     }
@@ -532,14 +621,21 @@ impl PipelineEngine {
         let schedule_id = schedule.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
         let Some(end_time_ms) = end_time_ms else { return };
         let delay = Duration::from_millis(end_time_ms.saturating_sub(position_ms).max(0) as u64);
-        let _ = handle.add_event(
-            Event::Delayed(delay),
-            DirectEndTime {
-                active: Arc::clone(&self.active),
-                schedule,
-                schedule_id,
-                generation,
-            },
+        log_track_control(
+            &self.active,
+            self.guild_id,
+            generation,
+            "schedule_end_time",
+            handle.add_event(
+                Event::Delayed(delay),
+                DirectEndTime {
+                    active: Arc::clone(&self.active),
+                    schedule,
+                    schedule_id,
+                    guild_id: self.guild_id,
+                    generation,
+                },
+            ),
         );
     }
 
@@ -613,11 +709,23 @@ impl PipelineEngine {
 
                 match should_pause {
                     Some(true) => {
-                        let _ = handle.pause();
+                        log_track_control(
+                            &active,
+                            guild_id,
+                            generation,
+                            "pause",
+                            handle.pause(),
+                        );
                     }
                     Some(false) => {}
                     None => {
-                        let _ = handle.stop();
+                        log_track_control(
+                            &active,
+                            guild_id,
+                            generation,
+                            "superseded_stop",
+                            handle.stop(),
+                        );
                         tracing::debug!(guild_id, "discarded a superseded input");
                     }
                 }
@@ -758,7 +866,9 @@ impl PipelineEngine {
             direct.request.paused = current.paused;
             (*direct.request).clone()
         };
-        let _ = self.start_pump(generation, request, true);
+        if !self.start_pump(generation, request, true) {
+            tracing::debug!(guild_id = self.guild_id, generation, "discarded a superseded PCM transition");
+        }
     }
 
     fn send_to_pump(&self, command: PumpCommand) {
@@ -771,7 +881,13 @@ impl PipelineEngine {
             else {
                 return;
             };
-            signal_pump(commands, interrupt, command);
+            signal_pump(
+                commands,
+                interrupt,
+                command,
+                self.guild_id,
+                active.generation,
+            );
             // In steady playback the ring is usually full (decode outruns real
             // time), so the pump is usually parked in wait_for_space rather than
             // between packets — without this, a command sent there sits unseen for
@@ -785,7 +901,19 @@ impl PipelineEngine {
         let Some(events) = self.events.get().cloned() else {
             return;
         };
-        let _ = events.try_send(EngineReport { generation, event });
+        match events.try_send(EngineReport { generation, event }) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => tracing::error!(
+                guild_id = self.guild_id,
+                generation,
+                "engine report queue is full"
+            ),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => tracing::debug!(
+                guild_id = self.guild_id,
+                generation,
+                "engine report receiver is closed"
+            ),
+        }
     }
 
     /// Tears down whatever is playing.
@@ -806,7 +934,13 @@ impl PipelineEngine {
                 interrupt,
                 ring,
             } => {
-                signal_pump(&commands, &interrupt, PumpCommand::Stop);
+                signal_pump(
+                    &commands,
+                    &interrupt,
+                    PumpCommand::Stop,
+                    self.guild_id,
+                    previous.generation,
+                );
                 drop(commands);
 
                 // Before the replacement ring exists, so the reader this one leaves behind
@@ -820,7 +954,13 @@ impl PipelineEngine {
         }
 
         if let Some(track) = previous.track {
-            let _ = track.stop();
+            log_track_control(
+                &self.active,
+                self.guild_id,
+                previous.generation,
+                "stop",
+                track.stop(),
+            );
         }
     }
 }
@@ -836,7 +976,9 @@ impl Engine for PipelineEngine {
 
     fn attach(&self, events: AsyncSender<EngineReport>) {
         // Engine::attach's own contract: called once, at construction.
-        let _ = self.events.set(events);
+        if self.events.set(events).is_err() {
+            tracing::error!(guild_id = self.guild_id, "engine event channel attached twice");
+        }
     }
 
     fn play(&self, request: PlayRequest) -> u64 {
@@ -850,7 +992,13 @@ impl Engine for PipelineEngine {
             }
         }
 
-        let _ = self.start_pump(generation, request, false);
+        if !self.start_pump(generation, request, false) {
+            tracing::error!(
+                guild_id = self.guild_id,
+                generation,
+                "could not install the PCM pipeline as the active track"
+            );
+        }
 
         generation
     }
@@ -894,7 +1042,7 @@ impl Engine for PipelineEngine {
     /// because the counter advances on consumption. All three follow from the one
     /// call.
     fn set_paused(&self, paused: bool) {
-        let (track, seek_pending) = {
+        let (track, seek_pending, generation) = {
             let mut active = lock(&self.active);
             let Some(current) = active.as_mut() else { return };
             current.paused = paused;
@@ -905,7 +1053,7 @@ impl Engine for PipelineEngine {
                 }
                 ActiveMode::Pump { .. } => false,
             };
-            (current.track.clone(), seek_pending)
+            (current.track.clone(), seek_pending, current.generation)
         };
         let Some(track) = track else { return };
 
@@ -913,7 +1061,13 @@ impl Engine for PipelineEngine {
             return;
         }
 
-        let _ = if paused { track.pause() } else { track.play() };
+        log_track_control(
+            &self.active,
+            self.guild_id,
+            generation,
+            if paused { "pause" } else { "play" },
+            if paused { track.pause() } else { track.play() },
+        );
     }
 
     fn seek(&self, position_ms: i64) {
@@ -974,15 +1128,24 @@ impl Engine for PipelineEngine {
                 }
                 ActiveMode::Direct(direct) | ActiveMode::Transitioning(direct) => {
                     direct.request.volume = volume;
-                    current.track.clone()
+                    current
+                        .track
+                        .clone()
+                        .map(|track| (track, current.generation))
                 }
             }
         };
         if pump {
             self.send_to_pump(PumpCommand::SetVolume(volume));
         }
-        if let Some(track) = track {
-            let _ = track.set_volume(player_volume_multiplier(volume));
+        if let Some((track, generation)) = track {
+            log_track_control(
+                &self.active,
+                self.guild_id,
+                generation,
+                "set_volume",
+                track.set_volume(player_volume_multiplier(volume)),
+            );
         }
     }
 
