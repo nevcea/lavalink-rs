@@ -153,10 +153,6 @@ impl VoiceConnection {
         })
     }
 
-    pub async fn play(&self, input: songbird::input::Input) -> songbird::tracks::TrackHandle {
-        self.state.lock().await.driver.play_only_input(input)
-    }
-
     /// Serializes the current-track check with mixer replacement. A superseded
     /// input must not reach play_only_input, because that call stops the newer
     /// track already in the mixer.

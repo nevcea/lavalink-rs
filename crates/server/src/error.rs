@@ -168,20 +168,13 @@ pub async fn fill_error_path(request: Request, next: Next) -> Response {
     (error.status, Json(error.body(uri.path(), trace))).into_response()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResponseLogLevel {
-    Debug,
-    Warn,
-    Error,
-}
-
-fn response_log_level(status: StatusCode) -> ResponseLogLevel {
+fn response_log_level(status: StatusCode) -> tracing::Level {
     if status.is_server_error() {
-        ResponseLogLevel::Error
+        tracing::Level::ERROR
     } else if status.is_client_error() {
-        ResponseLogLevel::Warn
+        tracing::Level::WARN
     } else {
-        ResponseLogLevel::Debug
+        tracing::Level::DEBUG
     }
 }
 
@@ -191,15 +184,13 @@ fn log_response(status: StatusCode, elapsed: std::time::Duration, error: Option<
     let status = status.as_u16();
     let elapsed_ms = elapsed.as_millis();
     match level {
-        ResponseLogLevel::Debug => {
-            tracing::debug!(status, elapsed_ms, error = ?error, "request completed")
-        }
-        ResponseLogLevel::Warn => {
-            tracing::warn!(status, elapsed_ms, error = ?error, "request completed")
-        }
-        ResponseLogLevel::Error => {
+        tracing::Level::ERROR => {
             tracing::error!(status, elapsed_ms, error = ?error, "request completed")
         }
+        tracing::Level::WARN => {
+            tracing::warn!(status, elapsed_ms, error = ?error, "request completed")
+        }
+        _ => tracing::debug!(status, elapsed_ms, error = ?error, "request completed"),
     }
 }
 
@@ -315,14 +306,14 @@ mod tests {
 
     #[test]
     fn response_statuses_choose_an_operator_visible_level() {
-        assert_eq!(response_log_level(StatusCode::OK), ResponseLogLevel::Debug);
+        assert_eq!(response_log_level(StatusCode::OK), tracing::Level::DEBUG);
         assert_eq!(
             response_log_level(StatusCode::BAD_REQUEST),
-            ResponseLogLevel::Warn
+            tracing::Level::WARN
         );
         assert_eq!(
             response_log_level(StatusCode::INTERNAL_SERVER_ERROR),
-            ResponseLogLevel::Error
+            tracing::Level::ERROR
         );
     }
 

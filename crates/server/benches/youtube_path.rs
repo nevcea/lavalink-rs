@@ -3,14 +3,13 @@
 //! for the candidate run.
 
 use std::fs::File;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::{mpsc, Arc};
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use lavalink_protocol::filters::Filters;
-use lavalink_protocol::player::TrackInfo;
 use lavalink_server::audio::pump::{self, PumpConfig};
 use lavalink_server::audio::ring;
 use lavalink_server::audio::stream::StreamOpener;
@@ -23,32 +22,11 @@ use songbird::input::core::audio::{AudioBuffer, Channels, SignalSpec};
 use songbird::input::core::io::MediaSource;
 use songbird::input::{AudioStream, LiveInput};
 
+mod common;
+use common::{track_info, write_wav};
+
 const SAMPLE_RATE: u32 = 44_100;
 const TRACK_SECONDS: usize = 5;
-
-fn write_wav(path: &std::path::Path) {
-    let mut file = File::create(path).unwrap();
-    let samples = SAMPLE_RATE as usize * TRACK_SECONDS * 2;
-    let data_bytes = samples * size_of::<i16>();
-    file.write_all(b"RIFF").unwrap();
-    file.write_all(&(36 + data_bytes as u32).to_le_bytes()).unwrap();
-    file.write_all(b"WAVEfmt ").unwrap();
-    file.write_all(&16u32.to_le_bytes()).unwrap();
-    file.write_all(&1u16.to_le_bytes()).unwrap();
-    file.write_all(&2u16.to_le_bytes()).unwrap();
-    file.write_all(&SAMPLE_RATE.to_le_bytes()).unwrap();
-    file.write_all(&(SAMPLE_RATE * 4).to_le_bytes()).unwrap();
-    file.write_all(&4u16.to_le_bytes()).unwrap();
-    file.write_all(&16u16.to_le_bytes()).unwrap();
-    file.write_all(b"data").unwrap();
-    file.write_all(&(data_bytes as u32).to_le_bytes()).unwrap();
-    for frame in 0..SAMPLE_RATE as usize * TRACK_SECONDS {
-        let sample = ((frame as f32 * 440.0 * std::f32::consts::TAU / SAMPLE_RATE as f32).sin()
-            * 8_000.0) as i16;
-        file.write_all(&sample.to_le_bytes()).unwrap();
-        file.write_all(&sample.to_le_bytes()).unwrap();
-    }
-}
 
 fn transcode(input: &std::path::Path, output: &std::path::Path, codec: &str) {
     let status = Command::new("ffmpeg")
@@ -59,22 +37,6 @@ fn transcode(input: &std::path::Path, output: &std::path::Path, codec: &str) {
         .status()
         .expect("ffmpeg is required for the YouTube path benchmark");
     assert!(status.success(), "ffmpeg could not create {output:?}");
-}
-
-fn track_info(path: &std::path::Path) -> TrackInfo {
-    TrackInfo {
-        identifier: path.to_string_lossy().into_owned(),
-        is_seekable: true,
-        author: "benchmark".into(),
-        length: (TRACK_SECONDS * 1000) as i64,
-        is_stream: false,
-        position: 0,
-        title: "benchmark".into(),
-        uri: None,
-        source_name: "local".into(),
-        artwork_url: None,
-        isrc: None,
-    }
 }
 
 fn run_pcm(path: &std::path::Path) {
@@ -95,7 +57,7 @@ fn run_pcm(path: &std::path::Path) {
     let (_commands, pump_commands) = mpsc::channel();
     let outcome = pump::run(
         PumpConfig {
-            info: track_info(path),
+            info: track_info(path, TRACK_SECONDS, "benchmark", "benchmark"),
             start_position_ms: 0,
             end_time_ms: None,
             volume: 100,
@@ -145,7 +107,10 @@ fn bench_youtube_path(c: &mut Criterion) {
     let wav = std::env::temp_dir().join(format!("{prefix}.wav"));
     let m4a = std::env::temp_dir().join(format!("{prefix}.m4a"));
     let webm = std::env::temp_dir().join(format!("{prefix}.webm"));
-    write_wav(&wav);
+    write_wav(&wav, SAMPLE_RATE, 2, TRACK_SECONDS, |frame| {
+        ((frame as f32 * 440.0 * std::f32::consts::TAU / SAMPLE_RATE as f32).sin()
+            * 8_000.0) as i16
+    });
     transcode(&wav, &m4a, "aac");
     transcode(&wav, &webm, "libopus");
 

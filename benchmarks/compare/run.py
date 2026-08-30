@@ -186,28 +186,6 @@ def invalid_measurement(return_code: int, marker_seen: bool, payload: dict | Non
     return return_code != 0 or not marker_seen or payload is None
 
 
-class RssMonitor(threading.Thread):
-    def __init__(self, pid: int, measuring: threading.Event):
-        super().__init__(daemon=True)
-        self.pid = pid
-        self.measuring = measuring
-        self.stop_event = threading.Event()
-        self.samples: list[int] = []
-
-    def run(self) -> None:
-        while not self.stop_event.wait(0.1):
-            if not self.measuring.is_set():
-                continue
-            try:
-                self.samples.append(proc_sample(self.pid)[1])
-            except (FileNotFoundError, ProcessLookupError):
-                return
-
-    def stop(self) -> None:
-        self.stop_event.set()
-        self.join(timeout=2)
-
-
 def run_measured(
     command: list[str],
     affinity: str,
@@ -223,7 +201,19 @@ def run_measured(
         )
         watched = observed_pid or process.pid
         measuring = threading.Event()
-        monitor = RssMonitor(watched, measuring)
+        stop_monitor = threading.Event()
+        rss_samples: list[int] = []
+
+        def sample_rss() -> None:
+            while not stop_monitor.wait(0.1):
+                if not measuring.is_set():
+                    continue
+                try:
+                    rss_samples.append(proc_sample(watched)[1])
+                except (FileNotFoundError, ProcessLookupError):
+                    return
+
+        monitor = threading.Thread(target=sample_rss, daemon=True)
         monitor.start()
         marker_seen = False
         observed_start = child_start = None
@@ -243,7 +233,8 @@ def run_measured(
         child_end = proc_sample(process.pid)[0] if Path(f"/proc/{process.pid}").exists() else None
         observed_end = proc_sample(watched)[0] if observed_pid is not None else child_end
         return_code = process.wait()
-        monitor.stop()
+        stop_monitor.set()
+        monitor.join(timeout=2)
     if invalid_measurement(return_code, marker_seen, payload):
         tail = log_path.read_text(errors="replace")[-4_000:]
         raise RuntimeError(f"workload failed ({return_code}); log={log_path}\n{tail}")
@@ -255,9 +246,9 @@ def run_measured(
     )
     if child_start is not None and child_end is not None:
         payload["driver_cpu_seconds"] = (child_end - child_start) / ticks_per_second
-    payload["peak_rss_kb"] = max(monitor.samples, default=0)
-    payload["steady_rss_kb"] = statistics.median(monitor.samples) if monitor.samples else 0
-    payload["rss_kb_samples"] = monitor.samples
+    payload["peak_rss_kb"] = max(rss_samples, default=0)
+    payload["steady_rss_kb"] = statistics.median(rss_samples) if rss_samples else 0
+    payload["rss_kb_samples"] = rss_samples
     payload["log"] = str(log_path.relative_to(ROOT))
     payload["command"] = command
     payload["cpu_affinity"] = affinity

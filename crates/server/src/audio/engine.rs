@@ -233,60 +233,8 @@ fn direct_exception(error: &PlayError) -> Exception {
     }
 }
 
-struct DirectProgress {
-    active: Arc<Mutex<Option<Active>>>,
-    events: Option<AsyncSender<EngineReport>>,
-    position_ms: Arc<AtomicI64>,
-    pending_seek_ms: Arc<AtomicI64>,
-    frames: Arc<ring::FrameCounters>,
-    counted_play_time_ms: Arc<AtomicU64>,
-    last_report_ms: AtomicU64,
-    generation: u64,
-}
-
-impl DirectProgress {
-    fn update(&self, state: &TrackState) {
-        if self.pending_seek_ms.load(Ordering::Relaxed) == -1 {
-            self.position_ms
-                .store(duration_ms(state.position), Ordering::Relaxed);
-        }
-
-        let now = state.play_time.as_millis() as u64;
-        let previous = self.counted_play_time_ms.swap(now, Ordering::Relaxed);
-        let frames = now.saturating_sub(previous) / 20;
-        if let Ok(frames) = u32::try_from(frames) {
-            self.frames.record_sent_frames(frames);
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl EventHandler for DirectProgress {
-    async fn act(&self, context: &EventContext<'_>) -> Option<Event> {
-        let EventContext::Track(&[(state, _)]) = context else {
-            return None;
-        };
-        if !is_current_direct(&self.active, self.generation) {
-            return Some(Event::Cancel);
-        }
-
-        self.update(state);
-        let now = state.play_time.as_millis() as u64;
-        let previous = self.last_report_ms.load(Ordering::Relaxed);
-        if now.saturating_sub(previous) >= PROGRESS_INTERVAL.as_millis() as u64 {
-            self.last_report_ms.store(now, Ordering::Relaxed);
-            if let Some(events) = &self.events {
-                let _ = events.try_send(EngineReport {
-                    generation: self.generation,
-                    event: EngineEvent::Progress,
-                });
-            }
-        }
-        None
-    }
-}
-
-struct DirectTerminal {
+#[derive(Clone)]
+struct DirectObserver {
     active: Arc<Mutex<Option<Active>>>,
     events: Option<AsyncSender<EngineReport>>,
     position_ms: Arc<AtomicI64>,
@@ -294,15 +242,15 @@ struct DirectTerminal {
     frames: Arc<ring::FrameCounters>,
     counted_play_time_ms: Arc<AtomicU64>,
     generation: u64,
-    on_error: bool,
 }
 
-impl DirectTerminal {
+impl DirectObserver {
     fn update(&self, state: &TrackState) {
         if self.pending_seek_ms.load(Ordering::Relaxed) == -1 {
             self.position_ms
                 .store(duration_ms(state.position), Ordering::Relaxed);
         }
+
         let now = state.play_time.as_millis() as u64;
         let previous = self.counted_play_time_ms.swap(now, Ordering::Relaxed);
         let frames = now.saturating_sub(previous) / 20;
@@ -327,31 +275,57 @@ impl DirectTerminal {
     }
 }
 
+enum DirectEvent {
+    Progress { last_report_ms: AtomicU64 },
+    Error,
+    End,
+}
+
+struct DirectHandler {
+    observer: DirectObserver,
+    event: DirectEvent,
+}
+
 #[async_trait::async_trait]
-impl EventHandler for DirectTerminal {
+impl EventHandler for DirectHandler {
     async fn act(&self, context: &EventContext<'_>) -> Option<Event> {
         let EventContext::Track(&[(state, _)]) = context else {
             return None;
         };
-        if !is_current_direct(&self.active, self.generation) {
+        if !is_current_direct(&self.observer.active, self.observer.generation) {
             return Some(Event::Cancel);
         }
 
-        self.update(state);
-        match (&state.playing, self.on_error) {
-            (PlayMode::Errored(error), true) => {
-                self.send(EngineEvent::Exception {
+        self.observer.update(state);
+        match &self.event {
+            DirectEvent::Progress { last_report_ms } => {
+                let now = state.play_time.as_millis() as u64;
+                let previous = last_report_ms.load(Ordering::Relaxed);
+                if now.saturating_sub(previous) >= PROGRESS_INTERVAL.as_millis() as u64 {
+                    last_report_ms.store(now, Ordering::Relaxed);
+                    if let Some(events) = &self.observer.events {
+                        let _ = events.try_send(EngineReport {
+                            generation: self.observer.generation,
+                            event: EngineEvent::Progress,
+                        });
+                    }
+                }
+            }
+            DirectEvent::Error if let PlayMode::Errored(error) = &state.playing => {
+                self.observer.send(EngineEvent::Exception {
                     exception: direct_exception(error),
                 })
                 .await;
-                self.send(if state.play_time.is_zero() {
+                self.observer.send(if state.play_time.is_zero() {
                     EngineEvent::LoadFailed
                 } else {
                     EngineEvent::Finished
                 })
                 .await;
             }
-            (PlayMode::End | PlayMode::Stop, false) => self.send(EngineEvent::Finished).await,
+            DirectEvent::End if matches!(&state.playing, PlayMode::End | PlayMode::Stop) => {
+                self.observer.send(EngineEvent::Finished).await
+            }
             _ => {}
         }
         None
@@ -416,6 +390,15 @@ impl PipelineEngine {
         let end_schedule = Arc::new(AtomicU64::new(0));
         let pending_seek_ms = Arc::new(AtomicI64::new(-1));
         let counted_play_time_ms = Arc::new(AtomicU64::new(0));
+        let observer = DirectObserver {
+            active: Arc::clone(&self.active),
+            events: self.events.get().cloned(),
+            position_ms: Arc::clone(&self.position_ms),
+            pending_seek_ms: Arc::clone(&pending_seek_ms),
+            frames: Arc::clone(&self.frames),
+            counted_play_time_ms,
+            generation,
+        };
 
         // Install controls before allowing the lazy source to produce its first
         // frame; a non-zero start position must never leak audio from time zero.
@@ -426,35 +409,25 @@ impl PipelineEngine {
         track.events.add_event(
             EventData::new(
                 Event::Periodic(DIRECT_POSITION_INTERVAL, None),
-                DirectProgress {
-                    active: Arc::clone(&self.active),
-                    events: self.events.get().cloned(),
-                    position_ms: Arc::clone(&self.position_ms),
-                    pending_seek_ms: Arc::clone(&pending_seek_ms),
-                    frames: Arc::clone(&self.frames),
-                    counted_play_time_ms: Arc::clone(&counted_play_time_ms),
-                    last_report_ms: AtomicU64::new(0),
-                    generation,
+                DirectHandler {
+                    observer: observer.clone(),
+                    event: DirectEvent::Progress {
+                        last_report_ms: AtomicU64::new(0),
+                    },
                 },
             ),
             Duration::ZERO,
         );
-        for (event, on_error) in [
-            (TrackEvent::Error, true),
-            (TrackEvent::End, false),
+        for (event, direct_event) in [
+            (TrackEvent::Error, DirectEvent::Error),
+            (TrackEvent::End, DirectEvent::End),
         ] {
             track.events.add_event(
                 EventData::new(
                     Event::Track(event),
-                    DirectTerminal {
-                        active: Arc::clone(&self.active),
-                        events: self.events.get().cloned(),
-                        position_ms: Arc::clone(&self.position_ms),
-                        pending_seek_ms: Arc::clone(&pending_seek_ms),
-                        frames: Arc::clone(&self.frames),
-                        counted_play_time_ms: Arc::clone(&counted_play_time_ms),
-                        generation,
-                        on_error,
+                    DirectHandler {
+                        observer: observer.clone(),
+                        event: direct_event,
                     },
                 ),
                 Duration::ZERO,
