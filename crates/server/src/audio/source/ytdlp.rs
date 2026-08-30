@@ -75,6 +75,12 @@ const DEFAULT_PLAYLIST_TRACK_LIMIT: usize = 600;
 /// track exists.
 const FORMAT: &str = "bestaudio[acodec=aac]/bestaudio[ext=m4a]/bestaudio[acodec!=opus]/bestaudio/best";
 
+/// Songbird can forward 20ms WebM/Opus packets directly to Discord when no
+/// Lavalink filter is active. Keep the old AAC selection as the fallback so a
+/// video without an Opus representation remains playable through Songbird's
+/// ordinary decode/mix path.
+const DIRECT_FORMAT: &str = "bestaudio[acodec=opus][ext=webm]/bestaudio[acodec=opus]/bestaudio[acodec=aac]/bestaudio[ext=m4a]/bestaudio[acodec!=opus]/bestaudio/best";
+
 /// Which site a track came from.
 ///
 /// Carries the two things that differ per site once yt-dlp has done the extraction:
@@ -188,10 +194,23 @@ impl YtDlp {
     /// Re-resolves a track's direct media URL. Called at playback time, not load
     /// time, because the URL expires.
     pub fn resolve_stream_url(&self, page_url: &str) -> Result<String, SourceError> {
+        self.resolve_stream_url_with_format(page_url, FORMAT)
+    }
+
+    /// Resolves the representation used by Songbird's unfiltered direct path.
+    pub fn resolve_direct_stream_url(&self, page_url: &str) -> Result<String, SourceError> {
+        self.resolve_stream_url_with_format(page_url, DIRECT_FORMAT)
+    }
+
+    fn resolve_stream_url_with_format(
+        &self,
+        page_url: &str,
+        format: &str,
+    ) -> Result<String, SourceError> {
         let mut args = vec![
             "--no-playlist",
             "-f",
-            FORMAT,
+            format,
             "--user-agent",
             STREAM_USER_AGENT,
         ];
@@ -522,6 +541,12 @@ mod tests {
     fn no_proxy_configured_means_no_proxy_args() {
         let backend = YtDlp::stub();
         assert!(backend.proxy_args().is_empty());
+    }
+
+    #[test]
+    fn direct_playback_prefers_webm_opus_but_keeps_the_pcm_fallbacks() {
+        assert!(DIRECT_FORMAT.starts_with("bestaudio[acodec=opus][ext=webm]"));
+        assert!(DIRECT_FORMAT.ends_with(FORMAT));
     }
 
     #[test]

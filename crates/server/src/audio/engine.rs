@@ -1,5 +1,7 @@
 //! The pipeline, assembled.
 //!
+//! unfiltered YouTube/WebM ────────────────────────────────▶ Opus passthrough
+//!
 //! pump thread                          ring                songbird mixer
 //! ───────────                          ────                ──────────────
 //! decode → resample → filter ──write──▶ ... ──RawAdapter──▶ pull every 20ms
@@ -9,9 +11,9 @@
 //!
 //! • The mixer pulls. There is no API for handing it finished frames; it reads
 //!   from a MediaSource on its own clock. So the ring's read end is what we expose.
-//! • The mixer encodes. Opus passthrough — forwarding a pre-encoded stream
-//!   untouched — requires track volume to be exactly 1.0, and volume is a filter
-//!   we have to support. So passthrough is off and encoding is songbird's.
+//! • Songbird forwards WebM/Opus untouched while there is one track at unity
+//!   volume. Other player volumes make Songbird decode temporarily; enabling a
+//!   Lavalink filter switches the track once to the PCM pump at its live position.
 //!
 //! Which leaves seeking as ours to implement, which is pump's job.
 //!
@@ -29,10 +31,12 @@ use std::time::{Duration, Instant};
 
 use lavalink_protocol::filters::Filters;
 use lavalink_protocol::Exception;
+use songbird::events::{Event, EventContext, EventData, EventHandler, TrackEvent};
 use songbird::input::{Input, RawAdapter};
-use songbird::tracks::TrackHandle;
+use songbird::tracks::{PlayError, PlayMode, Track, TrackHandle, TrackState};
 use tokio::sync::mpsc::Sender as AsyncSender;
 
+use super::filter::player_volume_multiplier;
 use super::pump::{self, PumpCommand, PumpConfig};
 use super::ring::{self, CHANNELS, SAMPLE_RATE};
 use super::stream::StreamOpener;
@@ -45,7 +49,9 @@ use crate::voice::SharedVoice;
 /// How often the pump reports that it is still producing. Throttled hard: this only
 /// has to beat trackStuckThresholdMs, and the actor's queue is small.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+const DIRECT_POSITION_INTERVAL: Duration = Duration::from_millis(20);
 
+#[derive(Clone)]
 pub struct PipelineEngine {
     guild_id: u64,
     position_ms: Arc<AtomicI64>,
@@ -68,24 +74,13 @@ pub struct PipelineEngine {
     /// count at 1 after every stop, letting a pump parked on a stalled source
     /// (still holding the old generation) pass is_current for a later,
     /// unrelated track that happens to reuse it.
-    next_generation: AtomicU64,
+    next_generation: Arc<AtomicU64>,
 }
 
 /// A running track.
 struct Active {
-    /// Commands to the pump thread. Dropping it stops the pump.
-    commands: Sender<PumpCommand>,
-    /// Set alongside every send on commands, so a pump stuck retrying a
-    /// stalled HTTP source (stream.rs's interrupt) notices a command is
-    /// waiting and gives up its remaining retry budget instead of making the
-    /// command wait out the whole thing.
-    interrupt: Arc<AtomicBool>,
     /// The songbird side, so pause and stop reach the mixer.
     track: Option<TrackHandle>,
-    /// A clone of the pump's ring writer, kept only so stop_active can revoke
-    /// this ring's claim on the shared position counter — see
-    /// ring::RingWriter::detach_position.
-    ring: ring::RingWriter,
     /// Bumped on every new track; checked by both the handle-storing task and the
     /// terminal-outcome dispatch (play, below) via is_current so a late
     /// outcome from a superseded pump is ignored rather than applied to whatever
@@ -96,6 +91,30 @@ struct Active {
     /// two runs last is what actually gets applied to the handle, instead of a
     /// value snapshotted before the handle existed.
     paused: bool,
+    mode: ActiveMode,
+}
+
+enum ActiveMode {
+    Pump {
+        /// Commands to the pump thread. Dropping it stops the pump.
+        commands: Sender<PumpCommand>,
+        /// Set alongside every command so stalled source I/O yields promptly.
+        interrupt: Arc<AtomicBool>,
+        /// Revokes this ring's claim on the shared position counter on stop.
+        ring: ring::RingWriter,
+    },
+    Direct(DirectState),
+    /// A filter was enabled and the exact Songbird position is being captured
+    /// before the existing PCM pump replaces the direct input.
+    Transitioning(DirectState),
+}
+
+#[derive(Clone)]
+struct DirectState {
+    request: Box<PlayRequest>,
+    end_schedule: Arc<AtomicU64>,
+    pending_seek_ms: Arc<AtomicI64>,
+    seek_serial: u64,
 }
 
 /// Sends a command to the pump and marks it interrupted, in that order.
@@ -132,11 +151,184 @@ fn superseded_by_a_replacement(active: &Mutex<Option<Active>>) -> bool {
     lock(active).is_some()
 }
 
+fn is_current_direct(active: &Mutex<Option<Active>>, generation: u64) -> bool {
+    lock(active).as_ref().is_some_and(|current| {
+        current.generation == generation
+            && matches!(current.mode, ActiveMode::Direct(_) | ActiveMode::Transitioning(_))
+    })
+}
+
+fn can_start_direct(active: &Mutex<Option<Active>>, generation: u64) -> bool {
+    lock(active).as_ref().is_some_and(|current| {
+        current.generation == generation && matches!(current.mode, ActiveMode::Direct(_))
+    })
+}
+
+fn direct_path_eligible(request: &PlayRequest) -> bool {
+    request.track.info.source_name == "youtube" && request.filters == Filters::default()
+}
+
 /// Reliable delivery happens off the actor thread, so waiting for the actor is
 /// safe here and prevents a full report queue from dropping ordered events.
 /// Progress reports remain deliberately lossy.
 fn send_reliable(events: &AsyncSender<EngineReport>, report: EngineReport) {
     let _ = events.blocking_send(report);
+}
+
+fn duration_ms(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
+
+fn direct_exception(error: &PlayError) -> Exception {
+    let message = error.to_string();
+    if matches!(error, PlayError::Decode(_)) {
+        Exception::fault(message.clone(), message)
+    } else {
+        Exception::common(message.clone(), message)
+    }
+}
+
+struct DirectProgress {
+    active: Arc<Mutex<Option<Active>>>,
+    events: Option<AsyncSender<EngineReport>>,
+    position_ms: Arc<AtomicI64>,
+    pending_seek_ms: Arc<AtomicI64>,
+    frames: Arc<ring::FrameCounters>,
+    counted_play_time_ms: Arc<AtomicU64>,
+    last_report_ms: AtomicU64,
+    generation: u64,
+}
+
+impl DirectProgress {
+    fn update(&self, state: &TrackState) {
+        if self.pending_seek_ms.load(Ordering::Relaxed) == -1 {
+            self.position_ms
+                .store(duration_ms(state.position), Ordering::Relaxed);
+        }
+
+        let now = state.play_time.as_millis() as u64;
+        let previous = self.counted_play_time_ms.swap(now, Ordering::Relaxed);
+        let frames = now.saturating_sub(previous) / 20;
+        if let Ok(frames) = u32::try_from(frames) {
+            self.frames.record_sent_frames(frames);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EventHandler for DirectProgress {
+    async fn act(&self, context: &EventContext<'_>) -> Option<Event> {
+        let EventContext::Track(&[(state, _)]) = context else {
+            return None;
+        };
+        if !is_current_direct(&self.active, self.generation) {
+            return Some(Event::Cancel);
+        }
+
+        self.update(state);
+        let now = state.play_time.as_millis() as u64;
+        let previous = self.last_report_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(previous) >= PROGRESS_INTERVAL.as_millis() as u64 {
+            self.last_report_ms.store(now, Ordering::Relaxed);
+            if let Some(events) = &self.events {
+                let _ = events.try_send(EngineReport {
+                    generation: self.generation,
+                    event: EngineEvent::Progress,
+                });
+            }
+        }
+        None
+    }
+}
+
+struct DirectTerminal {
+    active: Arc<Mutex<Option<Active>>>,
+    events: Option<AsyncSender<EngineReport>>,
+    position_ms: Arc<AtomicI64>,
+    pending_seek_ms: Arc<AtomicI64>,
+    frames: Arc<ring::FrameCounters>,
+    counted_play_time_ms: Arc<AtomicU64>,
+    generation: u64,
+    on_error: bool,
+}
+
+impl DirectTerminal {
+    fn update(&self, state: &TrackState) {
+        if self.pending_seek_ms.load(Ordering::Relaxed) == -1 {
+            self.position_ms
+                .store(duration_ms(state.position), Ordering::Relaxed);
+        }
+        let now = state.play_time.as_millis() as u64;
+        let previous = self.counted_play_time_ms.swap(now, Ordering::Relaxed);
+        let frames = now.saturating_sub(previous) / 20;
+        if let Ok(frames) = u32::try_from(frames) {
+            self.frames.record_sent_frames(frames);
+        }
+    }
+
+    async fn send(&self, event: EngineEvent) {
+        if let Some(events) = &self.events {
+            let _ = events
+                .send(EngineReport {
+                    generation: self.generation,
+                    event,
+                })
+                .await;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EventHandler for DirectTerminal {
+    async fn act(&self, context: &EventContext<'_>) -> Option<Event> {
+        let EventContext::Track(&[(state, _)]) = context else {
+            return None;
+        };
+        if !is_current_direct(&self.active, self.generation) {
+            return Some(Event::Cancel);
+        }
+
+        self.update(state);
+        match (&state.playing, self.on_error) {
+            (PlayMode::Errored(error), true) => {
+                self.send(EngineEvent::Exception {
+                    exception: direct_exception(error),
+                })
+                .await;
+                self.send(if state.play_time.is_zero() {
+                    EngineEvent::LoadFailed
+                } else {
+                    EngineEvent::Finished
+                })
+                .await;
+            }
+            (PlayMode::End | PlayMode::Stop, false) => self.send(EngineEvent::Finished).await,
+            _ => {}
+        }
+        None
+    }
+}
+
+struct DirectEndTime {
+    active: Arc<Mutex<Option<Active>>>,
+    schedule: Arc<AtomicU64>,
+    schedule_id: u64,
+    generation: u64,
+}
+
+#[async_trait::async_trait]
+impl EventHandler for DirectEndTime {
+    async fn act(&self, context: &EventContext<'_>) -> Option<Event> {
+        if self.schedule.load(Ordering::Relaxed) != self.schedule_id
+            || !is_current_direct(&self.active, self.generation)
+        {
+            return None;
+        }
+        if let EventContext::Track(&[(_, handle)]) = context {
+            let _ = handle.stop();
+        }
+        None
+    }
 }
 
 impl PipelineEngine {
@@ -160,73 +352,198 @@ impl PipelineEngine {
             events,
             active: Arc::new(Mutex::new(None)),
             frames: Arc::new(ring::FrameCounters::default()),
-            next_generation: AtomicU64::new(1),
+            next_generation: Arc::new(AtomicU64::new(1)),
         }
     }
 
-    fn send_to_pump(&self, command: PumpCommand) {
-        if let Some(active) = lock(&self.active).as_ref() {
-            signal_pump(&active.commands, &active.interrupt, command);
-            // In steady playback the ring is usually full (decode outruns real
-            // time), so the pump is usually parked in wait_for_space rather than
-            // between packets — without this, a command sent there sits unseen for
-            // up to COMMAND_POLL (100ms), which for Seek means up to 100ms of
-            // playerUpdates reporting the pre-seek position before it catches up.
-            active.ring.wake();
+    fn start_direct(&self, generation: u64, request: PlayRequest, input: Input) {
+        let end_schedule = Arc::new(AtomicU64::new(0));
+        let pending_seek_ms = Arc::new(AtomicI64::new(-1));
+        let counted_play_time_ms = Arc::new(AtomicU64::new(0));
+
+        // Install controls before allowing the lazy source to produce its first
+        // frame; a non-zero start position must never leak audio from time zero.
+        let mut track = Track::from(input)
+            .volume(player_volume_multiplier(request.volume))
+            .pause();
+
+        track.events.add_event(
+            EventData::new(
+                Event::Periodic(DIRECT_POSITION_INTERVAL, None),
+                DirectProgress {
+                    active: Arc::clone(&self.active),
+                    events: self.events.get().cloned(),
+                    position_ms: Arc::clone(&self.position_ms),
+                    pending_seek_ms: Arc::clone(&pending_seek_ms),
+                    frames: Arc::clone(&self.frames),
+                    counted_play_time_ms: Arc::clone(&counted_play_time_ms),
+                    last_report_ms: AtomicU64::new(0),
+                    generation,
+                },
+            ),
+            Duration::ZERO,
+        );
+        for (event, on_error) in [
+            (TrackEvent::Error, true),
+            (TrackEvent::End, false),
+        ] {
+            track.events.add_event(
+                EventData::new(
+                    Event::Track(event),
+                    DirectTerminal {
+                        active: Arc::clone(&self.active),
+                        events: self.events.get().cloned(),
+                        position_ms: Arc::clone(&self.position_ms),
+                        pending_seek_ms: Arc::clone(&pending_seek_ms),
+                        frames: Arc::clone(&self.frames),
+                        counted_play_time_ms: Arc::clone(&counted_play_time_ms),
+                        generation,
+                        on_error,
+                    },
+                ),
+                Duration::ZERO,
+            );
         }
+
+        lock(&self.active).replace(Active {
+            track: None,
+            generation,
+            paused: request.paused,
+            mode: ActiveMode::Direct(DirectState {
+                request: Box::new(request),
+                end_schedule: Arc::clone(&end_schedule),
+                pending_seek_ms: Arc::clone(&pending_seek_ms),
+                seek_serial: 0,
+            }),
+        });
+
+        let engine = self.clone();
+        let voice = Arc::clone(&self.voice);
+        let guild_id = self.guild_id;
+        self.runtime.spawn(async move {
+            let Some(handle) = voice
+                .play_track_if(track, || can_start_direct(&engine.active, generation))
+                .await
+            else {
+                tracing::debug!(guild_id, "discarded a superseded direct input");
+                return;
+            };
+
+            let state = {
+                let mut active = lock(&engine.active);
+                match active.as_mut() {
+                    Some(current)
+                        if current.generation == generation
+                            && matches!(current.mode, ActiveMode::Direct(_)) =>
+                    {
+                        current.track = Some(handle.clone());
+                        let ActiveMode::Direct(direct) = &current.mode else {
+                            unreachable!()
+                        };
+                        Some((
+                            current.paused,
+                            direct.request.volume,
+                            direct.request.start_position_ms,
+                            direct.request.end_time_ms,
+                            Arc::clone(&direct.end_schedule),
+                            Arc::clone(&direct.pending_seek_ms),
+                            direct.seek_serial,
+                        ))
+                    }
+                    _ => None,
+                }
+            };
+
+            let Some((paused, volume, position, end_time, schedule, pending, serial)) = state
+            else {
+                let _ = handle.stop();
+                tracing::debug!(guild_id, "discarded a superseded direct input");
+                return;
+            };
+
+            let _ = handle.set_volume(player_volume_multiplier(volume));
+            if position > 0 || serial > 0 {
+                engine.seek_direct(
+                    handle.clone(),
+                    generation,
+                    serial,
+                    position,
+                    pending,
+                );
+            } else if paused {
+                // A paused direct track should still resolve and parse now, like
+                // the PCM pump filling its buffer while the mixer is paused.
+                let _ = handle.make_playable();
+            } else {
+                let _ = handle.play();
+            }
+            engine.schedule_direct_end(handle, generation, end_time, position, schedule);
+        });
     }
 
-    fn report(&self, generation: u64, event: EngineEvent) {
-        let Some(events) = self.events.get().cloned() else {
-            return;
-        };
-        let _ = events.try_send(EngineReport { generation, event });
+    fn seek_direct(
+        &self,
+        handle: TrackHandle,
+        generation: u64,
+        serial: u64,
+        position_ms: i64,
+        pending_seek_ms: Arc<AtomicI64>,
+    ) {
+        pending_seek_ms.store(position_ms, Ordering::Relaxed);
+        let active = Arc::clone(&self.active);
+        let position = Arc::clone(&self.position_ms);
+        self.runtime.spawn(async move {
+            let result = handle
+                .seek_async(Duration::from_millis(position_ms.max(0) as u64))
+                .await;
+            let current = lock(&active).as_ref().is_some_and(|current| {
+                current.generation == generation
+                    && match &current.mode {
+                        ActiveMode::Direct(direct) | ActiveMode::Transitioning(direct) => {
+                            direct.seek_serial == serial
+                        }
+                        ActiveMode::Pump { .. } => false,
+                    }
+            });
+            if !current {
+                return;
+            }
+            pending_seek_ms.store(-1, Ordering::Relaxed);
+            if let Ok(actual) = result {
+                position.store(duration_ms(actual), Ordering::Relaxed);
+            }
+            let paused = lock(&active)
+                .as_ref()
+                .is_some_and(|current| current.generation == generation && current.paused);
+            if !paused {
+                let _ = handle.play();
+            }
+        });
     }
 
-    /// Tears down whatever is playing.
-    fn stop_active(&self) {
-        let Some(previous) = lock(&self.active).take() else {
-            return;
-        };
-
-        // Stop is the command that most needs signal_pump's ordering: without
-        // it, a pump on a stalled source could burn its whole reconnect budget (up
-        // to MAX_RECONNECT_ATTEMPTS × (connect_timeout + read_timeout), tens
-        // of seconds) before it notices it was told to stop at all.
-        //
-        // Dropping the sender is what unblocks a pump parked on a full ring.
-        signal_pump(&previous.commands, &previous.interrupt, PumpCommand::Stop);
-        drop(previous.commands);
-
-        // Before the replacement ring exists, so the reader this one leaves behind
-        // inside songbird's Input cannot report the outgoing track's position
-        // over the incoming track's.
-        previous.ring.detach_position();
-
-        if let Some(track) = previous.track {
-            let _ = track.stop();
-        }
-    }
-}
-
-impl Engine for PipelineEngine {
-    fn position_handle(&self) -> Arc<AtomicI64> {
-        Arc::clone(&self.position_ms)
+    fn schedule_direct_end(
+        &self,
+        handle: TrackHandle,
+        generation: u64,
+        end_time_ms: Option<i64>,
+        position_ms: i64,
+        schedule: Arc<AtomicU64>,
+    ) {
+        let schedule_id = schedule.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        let Some(end_time_ms) = end_time_ms else { return };
+        let delay = Duration::from_millis(end_time_ms.saturating_sub(position_ms).max(0) as u64);
+        let _ = handle.add_event(
+            Event::Delayed(delay),
+            DirectEndTime {
+                active: Arc::clone(&self.active),
+                schedule,
+                schedule_id,
+                generation,
+            },
+        );
     }
 
-    fn frame_counters(&self) -> Arc<ring::FrameCounters> {
-        Arc::clone(&self.frames)
-    }
-
-    fn attach(&self, events: AsyncSender<EngineReport>) {
-        // Engine::attach's own contract: called once, at construction.
-        let _ = self.events.set(events);
-    }
-
-    fn play(&self, request: PlayRequest) -> u64 {
-        self.stop_active();
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-
+    fn start_pump(&self, generation: u64, request: PlayRequest, transition: bool) -> bool {
         let (writer, reader) = ring::channel(
             self.buffer_ms,
             Arc::clone(&self.position_ms),
@@ -235,14 +552,33 @@ impl Engine for PipelineEngine {
         let (commands, pump_commands) = mpsc::channel();
         let interrupt = Arc::new(AtomicBool::new(false));
 
-        lock(&self.active).replace(Active {
-            commands,
-            track: None,
-            generation,
-            paused: request.paused,
-            interrupt: Arc::clone(&interrupt),
-            ring: writer.clone(),
-        });
+        {
+            let mut active = lock(&self.active);
+            if transition {
+                let Some(current) = active.as_ref() else { return false };
+                if current.generation != generation
+                    || !matches!(current.mode, ActiveMode::Transitioning(_))
+                {
+                    return false;
+                }
+                if let ActiveMode::Transitioning(direct) = &current.mode {
+                    direct.end_schedule.fetch_add(1, Ordering::Relaxed);
+                }
+            } else if active.is_some() {
+                return false;
+            }
+
+            active.replace(Active {
+                track: None,
+                generation,
+                paused: request.paused,
+                mode: ActiveMode::Pump {
+                    commands,
+                    interrupt: Arc::clone(&interrupt),
+                    ring: writer.clone(),
+                },
+            });
+        }
 
         // The mixer's end of the ring, dressed as an input it understands. Raw f32
         // PCM at Discord's own rate, so nothing downstream resamples again.
@@ -261,20 +597,13 @@ impl Engine for PipelineEngine {
                     return;
                 };
 
-                // Store the handle only if this track is still current — by the
-                // time the mixer returns its handle, a newer play request may
-                // have replaced it. play_if's earlier check also runs under the
-                // voice lock, so an older task can never replace a newer mixer
-                // input after losing the race for that lock.
-                //
-                // paused is read from current, not a snapshot captured at the top
-                // of play: Active::paused is the same field set_paused writes, so
-                // whichever of the two runs last wins, instead of a stale value
-                // from before the handle existed.
                 let should_pause = {
                     let mut active = lock(&active);
                     match active.as_mut() {
-                        Some(current) if current.generation == generation => {
+                        Some(current)
+                            if current.generation == generation
+                                && matches!(current.mode, ActiveMode::Pump { .. }) =>
+                        {
                             current.track = Some(handle.clone());
                             Some(current.paused)
                         }
@@ -299,8 +628,6 @@ impl Engine for PipelineEngine {
         let events = self.events.get().cloned();
         let guild_id = self.guild_id;
         let active = Arc::clone(&self.active);
-        // Kept outside config so catch_unwind below can still read it after a
-        // panic destroys run's own State — see PumpConfig::produced.
         let produced = Arc::new(AtomicBool::new(false));
         let config = PumpConfig {
             info: request.track.info,
@@ -314,15 +641,9 @@ impl Engine for PipelineEngine {
             produced: Arc::clone(&produced),
         };
 
-        // A dedicated thread, not the blocking pool: this lives for the whole track.
         let spawned = std::thread::Builder::new()
             .name(format!("pump-{guild_id}"))
             .spawn(move || {
-                // A Mutex<Instant> per decoded packet, just to throttle progress
-                // events. Measured and left as-is: an uncontended lock is ~15ns
-                // against the packet's own decode cost (tens of µs, see
-                // benches/pipeline.rs) — not worth swapping for an AtomicU64 of
-                // millis.
                 let last_progress = Mutex::new(Instant::now());
                 let on_progress = || {
                     let mut last = lock(&last_progress);
@@ -331,16 +652,6 @@ impl Engine for PipelineEngine {
                     }
                     *last = Instant::now();
                     drop(last);
-                    // Gated the same way the terminal outcome below is, and for
-                    // the same reason: a superseded pump keeps decoding until it
-                    // observes Stop, and the actor treats Progress as "the
-                    // current track is alive" — it restamps last_progress and
-                    // clears stuck_reported (actor.rs's apply_engine_event). An
-                    // ungated one therefore resets the replacement track's
-                    // stuck clock, suppressing or delaying a TrackStuckEvent the
-                    // new track had genuinely earned. Checked after the throttle,
-                    // so this takes the lock once per PROGRESS_INTERVAL rather
-                    // than once per decoded packet.
                     if !is_current(&active, generation) {
                         return;
                     }
@@ -352,13 +663,6 @@ impl Engine for PipelineEngine {
                     }
                 };
 
-                // Contains a panic in this pump so it can't reach another player,
-                // and still ends the track with a defined event. Cloned before the
-                // move below so it survives the unwind: writer is consumed by
-                // pump::run and gone once it panics, but this clone (same
-                // Arc<Shared>) can still call finish() — the reader's only way to
-                // learn the track ended if the actor has already gone away and the
-                // terminal report below therefore has nowhere to go.
                 let writer_after_panic = writer.clone();
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     pump::run(config, writer, pump_commands, position_ms, &on_progress)
@@ -370,12 +674,6 @@ impl Engine for PipelineEngine {
 
                 let outcome = outcome.unwrap_or_else(|_| super::PumpOutcome::Failed {
                     exception: Exception::fault("The audio pipeline panicked", "pump panic"),
-                    // Not hardcoded true: a panic inside pump::open, before any
-                    // sample reached the ring, is a load failure — the actor turns
-                    // started into loadFailed vs finished, and clients use that to
-                    // decide whether to advance the queue. Read here because State
-                    // (and its own copy) is already gone by the time the unwind
-                    // reaches this point.
                     started: produced.load(Ordering::Relaxed),
                 });
 
@@ -390,9 +688,6 @@ impl Engine for PipelineEngine {
                             }
                         }
                         super::PumpOutcome::Failed { exception, started } => {
-                            // TrackException is immediate, but TrackEnd waits for
-                            // audio already in the ring. Upstream reports the same
-                            // order through its terminate-on-empty executor.
                             if is_current(&active, generation) {
                                 send_reliable(events, EngineReport {
                                     generation,
@@ -419,7 +714,6 @@ impl Engine for PipelineEngine {
                                 });
                             }
                         }
-                        // A stop was requested; the actor already knows.
                         super::PumpOutcome::Stopped => {}
                     }
                 }
@@ -436,6 +730,128 @@ impl Engine for PipelineEngine {
                 },
             );
         }
+        true
+    }
+
+    fn finish_direct_transition(
+        &self,
+        generation: u64,
+        seek_serial: u64,
+        observed_position_ms: Option<i64>,
+    ) {
+        let request = {
+            let mut active = lock(&self.active);
+            let Some(current) = active.as_mut() else { return };
+            if current.generation != generation {
+                return;
+            }
+            let ActiveMode::Transitioning(direct) = &mut current.mode else {
+                return;
+            };
+            if direct.seek_serial == seek_serial
+                && direct.pending_seek_ms.load(Ordering::Relaxed) == -1
+            {
+                if let Some(position_ms) = observed_position_ms {
+                    direct.request.start_position_ms = position_ms;
+                }
+            }
+            direct.request.paused = current.paused;
+            (*direct.request).clone()
+        };
+        let _ = self.start_pump(generation, request, true);
+    }
+
+    fn send_to_pump(&self, command: PumpCommand) {
+        if let Some(active) = lock(&self.active).as_ref() {
+            let ActiveMode::Pump {
+                commands,
+                interrupt,
+                ring,
+            } = &active.mode
+            else {
+                return;
+            };
+            signal_pump(commands, interrupt, command);
+            // In steady playback the ring is usually full (decode outruns real
+            // time), so the pump is usually parked in wait_for_space rather than
+            // between packets — without this, a command sent there sits unseen for
+            // up to COMMAND_POLL (100ms), which for Seek means up to 100ms of
+            // playerUpdates reporting the pre-seek position before it catches up.
+            ring.wake();
+        }
+    }
+
+    fn report(&self, generation: u64, event: EngineEvent) {
+        let Some(events) = self.events.get().cloned() else {
+            return;
+        };
+        let _ = events.try_send(EngineReport { generation, event });
+    }
+
+    /// Tears down whatever is playing.
+    fn stop_active(&self) {
+        let Some(previous) = lock(&self.active).take() else {
+            return;
+        };
+
+        // Stop is the command that most needs signal_pump's ordering: without
+        // it, a pump on a stalled source could burn its whole reconnect budget (up
+        // to MAX_RECONNECT_ATTEMPTS × (connect_timeout + read_timeout), tens
+        // of seconds) before it notices it was told to stop at all.
+        //
+        // Dropping the sender is what unblocks a pump parked on a full ring.
+        match previous.mode {
+            ActiveMode::Pump {
+                commands,
+                interrupt,
+                ring,
+            } => {
+                signal_pump(&commands, &interrupt, PumpCommand::Stop);
+                drop(commands);
+
+                // Before the replacement ring exists, so the reader this one leaves behind
+                // inside songbird's Input cannot report the outgoing track's position
+                // over the incoming track's.
+                ring.detach_position();
+            }
+            ActiveMode::Direct(state) | ActiveMode::Transitioning(state) => {
+                state.end_schedule.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        if let Some(track) = previous.track {
+            let _ = track.stop();
+        }
+    }
+}
+
+impl Engine for PipelineEngine {
+    fn position_handle(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.position_ms)
+    }
+
+    fn frame_counters(&self) -> Arc<ring::FrameCounters> {
+        Arc::clone(&self.frames)
+    }
+
+    fn attach(&self, events: AsyncSender<EngineReport>) {
+        // Engine::attach's own contract: called once, at construction.
+        let _ = self.events.set(events);
+    }
+
+    fn play(&self, request: PlayRequest) -> u64 {
+        self.stop_active();
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+
+        if direct_path_eligible(&request) {
+            if let Some(input) = self.opener.direct_input(&request.track.info) {
+                self.start_direct(generation, request, input);
+                return generation;
+            }
+        }
+
+        let _ = self.start_pump(generation, request, false);
+
         generation
     }
 
@@ -478,13 +894,24 @@ impl Engine for PipelineEngine {
     /// because the counter advances on consumption. All three follow from the one
     /// call.
     fn set_paused(&self, paused: bool) {
-        let track = {
+        let (track, seek_pending) = {
             let mut active = lock(&self.active);
             let Some(current) = active.as_mut() else { return };
             current.paused = paused;
-            current.track.clone()
+            let seek_pending = match &mut current.mode {
+                ActiveMode::Direct(direct) | ActiveMode::Transitioning(direct) => {
+                    direct.request.paused = paused;
+                    direct.pending_seek_ms.load(Ordering::Relaxed) != -1
+                }
+                ActiveMode::Pump { .. } => false,
+            };
+            (current.track.clone(), seek_pending)
         };
         let Some(track) = track else { return };
+
+        if !paused && seek_pending {
+            return;
+        }
 
         let _ = if paused { track.pause() } else { track.play() };
     }
@@ -495,22 +922,155 @@ impl Engine for PipelineEngine {
         // synchronously on the calling thread — so position reporting holds at
         // the target from this call's return, not from whenever the pump gets
         // around to the command. See RingWriter::begin_seek's docs.
-        if let Some(active) = lock(&self.active).as_ref() {
-            active.ring.begin_seek(position_ms);
+        let mut pump = false;
+        let direct = {
+            let mut active = lock(&self.active);
+            let Some(current) = active.as_mut() else { return };
+            match &mut current.mode {
+                ActiveMode::Pump { ring, .. } => {
+                    ring.begin_seek(position_ms);
+                    pump = true;
+                    None
+                }
+                ActiveMode::Direct(direct) | ActiveMode::Transitioning(direct) => {
+                    direct.request.start_position_ms = position_ms;
+                    direct.seek_serial = direct.seek_serial.wrapping_add(1);
+                    direct.pending_seek_ms.store(position_ms, Ordering::Relaxed);
+                    Some((
+                        current.track.clone(),
+                        current.generation,
+                        direct.seek_serial,
+                        direct.request.end_time_ms,
+                        Arc::clone(&direct.end_schedule),
+                        Arc::clone(&direct.pending_seek_ms),
+                    ))
+                }
+            }
+        };
+        if pump {
+            self.send_to_pump(PumpCommand::Seek { position_ms });
         }
-        self.send_to_pump(PumpCommand::Seek { position_ms });
+        if let Some((Some(track), generation, serial, end_time, schedule, pending)) = direct {
+            self.schedule_direct_end(
+                track.clone(),
+                generation,
+                end_time,
+                position_ms,
+                schedule,
+            );
+            self.seek_direct(track, generation, serial, position_ms, pending);
+        }
     }
 
     fn set_volume(&self, volume: i32) {
-        self.send_to_pump(PumpCommand::SetVolume(volume));
+        let mut pump = false;
+        let track = {
+            let mut active = lock(&self.active);
+            let Some(current) = active.as_mut() else { return };
+            match &mut current.mode {
+                ActiveMode::Pump { .. } => {
+                    pump = true;
+                    None
+                }
+                ActiveMode::Direct(direct) | ActiveMode::Transitioning(direct) => {
+                    direct.request.volume = volume;
+                    current.track.clone()
+                }
+            }
+        };
+        if pump {
+            self.send_to_pump(PumpCommand::SetVolume(volume));
+        }
+        if let Some(track) = track {
+            let _ = track.set_volume(player_volume_multiplier(volume));
+        }
     }
 
     fn set_filters(&self, filters: &Filters) {
-        self.send_to_pump(PumpCommand::SetFilters(Box::new(filters.clone())));
+        let mut pump = false;
+        let transition = {
+            let mut active = lock(&self.active);
+            let Some(current) = active.as_mut() else { return };
+            match &mut current.mode {
+                ActiveMode::Pump { .. } => {
+                    pump = true;
+                    None
+                }
+                ActiveMode::Direct(direct) => {
+                    direct.request.filters = filters.clone();
+                    if filters == &Filters::default() {
+                        None
+                    } else {
+                        let state = direct.clone();
+                        let result = Some((
+                            current.track.clone(),
+                            current.generation,
+                            state.seek_serial,
+                        ));
+                        current.mode = ActiveMode::Transitioning(state);
+                        result
+                    }
+                }
+                ActiveMode::Transitioning(direct) => {
+                    direct.request.filters = filters.clone();
+                    None
+                }
+            }
+        };
+        if pump {
+            self.send_to_pump(PumpCommand::SetFilters(Box::new(filters.clone())));
+        }
+
+        if let Some((track, generation, seek_serial)) = transition {
+            if let Some(track) = track {
+                let engine = self.clone();
+                self.runtime.spawn(async move {
+                    let position = track
+                        .get_info()
+                        .await
+                        .ok()
+                        .map(|state| duration_ms(state.position));
+                    engine.finish_direct_transition(generation, seek_serial, position);
+                });
+            } else {
+                self.finish_direct_transition(generation, seek_serial, None);
+            }
+        }
     }
 
     fn set_end_time(&self, end_time_ms: Option<i64>) {
-        self.send_to_pump(PumpCommand::SetEndTime(end_time_ms));
+        let mut pump = false;
+        let direct = {
+            let mut active = lock(&self.active);
+            let Some(current) = active.as_mut() else { return };
+            match &mut current.mode {
+                ActiveMode::Pump { .. } => {
+                    pump = true;
+                    None
+                }
+                ActiveMode::Direct(direct) | ActiveMode::Transitioning(direct) => {
+                    direct.request.end_time_ms = end_time_ms;
+                    direct.end_schedule.fetch_add(1, Ordering::Relaxed);
+                    Some((
+                        current.track.clone(),
+                        current.generation,
+                        Arc::clone(&direct.end_schedule),
+                    ))
+                }
+            }
+        };
+        if pump {
+            self.send_to_pump(PumpCommand::SetEndTime(end_time_ms));
+        }
+        if let Some((Some(track), generation, schedule)) = direct {
+            self.schedule_direct_end(
+                track,
+                generation,
+                end_time_ms,
+                self.position_ms.load(Ordering::Relaxed),
+                schedule,
+            );
+        }
     }
 
     fn shutdown(&self) {
@@ -532,13 +1092,75 @@ mod tests {
             Arc::new(ring::FrameCounters::default()),
         );
         Active {
-            commands,
             track: None,
             generation,
             paused: false,
-            interrupt: Arc::new(AtomicBool::new(false)),
-            ring,
+            mode: ActiveMode::Pump {
+                commands,
+                interrupt: Arc::new(AtomicBool::new(false)),
+                ring,
+            },
         }
+    }
+
+    fn direct_request(source_name: &str, filters: Filters) -> PlayRequest {
+        PlayRequest {
+            track: lavalink_protocol::player::Track::new(
+                String::new(),
+                lavalink_protocol::player::TrackInfo {
+                    identifier: "id".into(),
+                    is_seekable: true,
+                    author: "author".into(),
+                    length: 1_000,
+                    is_stream: false,
+                    position: 0,
+                    title: "title".into(),
+                    uri: None,
+                    source_name: source_name.into(),
+                    artwork_url: None,
+                    isrc: None,
+                },
+            ),
+            start_position_ms: 0,
+            end_time_ms: None,
+            paused: false,
+            volume: 100,
+            filters,
+        }
+    }
+
+    #[test]
+    fn only_unfiltered_youtube_tracks_take_the_direct_path() {
+        assert!(direct_path_eligible(&direct_request("youtube", Filters::default())));
+        assert!(!direct_path_eligible(&direct_request("http", Filters::default())));
+
+        let filtered = Filters {
+            volume: lavalink_protocol::omissible::Omissible::Present(1.0),
+            ..Filters::default()
+        };
+        assert!(!direct_path_eligible(&direct_request("youtube", filtered)));
+    }
+
+    #[test]
+    fn direct_events_stop_as_soon_as_the_pcm_pump_takes_over() {
+        let direct = DirectState {
+            request: Box::new(direct_request("youtube", Filters::default())),
+            end_schedule: Arc::new(AtomicU64::new(0)),
+            pending_seek_ms: Arc::new(AtomicI64::new(-1)),
+            seek_serial: 0,
+        };
+        let active = Mutex::new(Some(Active {
+            track: None,
+            generation: 7,
+            paused: false,
+            mode: ActiveMode::Direct(direct.clone()),
+        }));
+
+        assert!(is_current_direct(&active, 7));
+        lock(&active).as_mut().unwrap().mode = ActiveMode::Transitioning(direct);
+        assert!(is_current_direct(&active, 7));
+        lock(&active).as_mut().unwrap().mode = dummy_active(7).mode;
+        assert!(!is_current_direct(&active, 7));
     }
 
     /// The bug: a pump superseded by a track replace can still race a natural

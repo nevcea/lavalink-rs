@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         proxy,
         Duration::from_millis(timeouts.connect_timeout_ms),
         Duration::from_millis(timeouts.socket_timeout_ms),
-    );
+    )?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
     let state = AppState::new(config, loader, opener, started_at, shutdown_rx);
 

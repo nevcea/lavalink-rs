@@ -1,7 +1,8 @@
 //! The audio pipeline.
 //!
+//! unfiltered YouTube/WebM ─────────────────────────▶ mixer forwards Opus
 //! [pump: CPU-bound, no deadline]                [send: O(1), 20ms deadline]
-//! source → decode → resample → filter ──▶ ring ──▶ mixer pulls, encodes Opus
+//! filtered/other → decode → resample → filter ──▶ ring ──▶ mixer encodes Opus
 //!
 //! Why filtering costs us seeking
 //!
@@ -16,9 +17,8 @@
 //!
 //! • The mixer pulls. It reads a MediaSource on its own clock; there is no API
 //!   for handing it finished frames. So the ring's read end is what we expose.
-//! • The mixer encodes. Opus passthrough needs track volume to be exactly 1.0,
-//!   and volume is a filter we must support, so passthrough is off. There is no
-//!   encode.rs here because encoding is not ours.
+//! • Songbird's direct path forwards WebM/Opus at unity player volume. A custom
+//!   Lavalink filter switches that track to the pump; encoding remains Songbird's.
 //!
 //! And the position counter is advanced by the consuming side, inside the ring's
 //! read — the pump runs a whole buffer ahead, so its output is not a playback

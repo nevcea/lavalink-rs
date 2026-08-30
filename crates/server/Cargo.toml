@@ -42,17 +42,14 @@ symphonia = { version = "0.6", default-features = false, features = [
 # songbird's symphonia, which is a different major version from ours and
 # therefore a different crate entirely.
 #
-# songbird builds its codec registry with symphonia::default::register_enabled_codecs
-# and enables no features on its own symphonia dependency, deliberately: the
-# downstream crate is expected to pick the codec set, and unification carries it
-# across. The mixer's RawAdapter path needs the PCM decoder specifically
-# (RawReader declares CODEC_TYPE_PCM_F32LE), so without this the registry has
-# only Opus, LiveInput::promote finds no decoder for our ring, and the mixer
-# silently never pulls a frame — see #9 and
-# ring.rs's songbird_can_promote_the_ring_into_a_playable_input, which fails
-# the moment this line goes away. This used to be satisfied by accident, back when
-# our own symphonia was also 0.5.x.
-symphonia-songbird = { package = "symphonia", version = "0.5", default-features = false, features = ["pcm"] }
+# songbird builds its codec/format registries from downstream-enabled Symphonia
+# features. PCM is the RawAdapter pump path; mkv is the WebM/Opus direct path;
+# AAC/isomp4 keep the direct input playable when yt-dlp has to fall back to m4a.
+# Without PCM, LiveInput::promote silently finds no decoder for our ring — see
+# ring.rs's songbird_can_promote_the_ring_into_a_playable_input.
+symphonia-songbird = { package = "symphonia", version = "0.5", default-features = false, features = [
+    "pcm", "mkv", "aac", "isomp4",
+] }
 # driver only — no gateway client. Lavalink receives voice state and voice server
 # updates from its own client over REST, which is exactly the standalone driver's
 # input, so serenity/twilight are not needed. tungstenite is the websocket backend
@@ -76,6 +73,9 @@ soundtouch = { version = "0.5.4", default-features = false, features = ["bundled
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
+# Exposes Songbird's mixer entry point so the YouTube-path benchmark measures
+# the real Opus passthrough branch rather than a hand-written packet-copy proxy.
+songbird = { version = "0.6", default-features = false, features = ["internals"] }
 # Already in the tree transitively via axum; util just exposes oneshot so
 # router wiring (fallbacks, layer ordering) can be tested as real HTTP calls
 # instead of trusted by inspection.
@@ -107,4 +107,8 @@ harness = false
 
 [[bench]]
 name = "pipeline"
+harness = false
+
+[[bench]]
+name = "youtube_path"
 harness = false

@@ -66,6 +66,12 @@ pub struct FrameCounters {
 }
 
 impl FrameCounters {
+    /// Records already-framed output from Songbird's direct path, which does not
+    /// pass through RingReader and therefore cannot use record_sent(samples).
+    pub(crate) fn record_sent_frames(&self, frames: u32) {
+        self.sent.fetch_add(frames, Ordering::Relaxed);
+    }
+
     /// Counts samples toward sent, in units of whole FRAME_SAMPLES frames,
     /// carrying any leftover forward.
     fn record_sent(&self, samples: usize) {
@@ -328,10 +334,27 @@ impl RingWriter {
         buffer.is_empty()
     }
 
+    /// Waits until the producer marks the stream complete. Used by offline
+    /// consumers which must not treat an ordinary starved read as EOF.
+    pub fn wait_for_finish(&self) {
+        let mut buffer = lock(&self.shared.buffer);
+        while !self.shared.finished.load(Ordering::Acquire)
+            && !self.shared.closed.load(Ordering::Relaxed)
+        {
+            buffer = self
+                .shared
+                .space
+                .wait(buffer)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+
     /// The track is fully delivered. The reader drains what is left, then reports
     /// end of stream.
     pub fn finish(&self) {
+        let _buffer = lock(&self.shared.buffer);
         self.shared.finished.store(true, Ordering::Release);
+        self.shared.space.notify_all();
     }
 
     #[cfg(test)]
@@ -852,6 +875,18 @@ mod tests {
         assert!(!writer.wait_for_drain(Duration::from_millis(1)));
         assert_eq!(read_samples(&mut reader, 2), vec![1.0, 2.0]);
         assert!(writer.wait_for_drain(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn finish_wait_does_not_treat_an_empty_live_ring_as_eof() {
+        let (writer, _reader, _position) = ring(20);
+        let waiting = writer.clone();
+        let waiter = std::thread::spawn(move || waiting.wait_for_finish());
+
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(!waiter.is_finished());
+        writer.finish();
+        waiter.join().unwrap();
     }
 
     #[test]

@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use lavalink_protocol::player::TrackInfo;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use reqwest::{Client, Response, StatusCode};
+use songbird::input::{AudioStream, AudioStreamError, Compose, HttpRequest, Input};
+use songbird::input::core::io::MediaSource as SongbirdMediaSource;
 use symphonia::core::io::MediaSource;
 
 use super::source::http::accepts_ranges;
@@ -82,6 +84,9 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 3;
 pub struct StreamOpener {
     ytdlp: Option<Arc<YtDlp>>,
     proxy: Option<reqwest::Proxy>,
+    /// Shared by the Songbird direct path. Unlike the pump's synchronous
+    /// MediaSource, HttpRequest is async and can safely reuse pooled connections.
+    direct_client: Client,
     /// lavalink.server.timeouts.connectTimeoutMs.
     connect_timeout: Duration,
     /// lavalink.server.timeouts.socketTimeoutMs — the idle-read stall threshold
@@ -94,12 +99,8 @@ pub struct StreamOpener {
 /// they became configurable.
 impl Default for StreamOpener {
     fn default() -> Self {
-        Self {
-            ytdlp: None,
-            proxy: None,
-            connect_timeout: CONNECT_TIMEOUT,
-            read_timeout: READ_TIMEOUT,
-        }
+        Self::new(None, None, CONNECT_TIMEOUT, READ_TIMEOUT)
+            .expect("the default HTTP client configuration is valid")
     }
 }
 
@@ -109,13 +110,44 @@ impl StreamOpener {
         proxy: Option<reqwest::Proxy>,
         connect_timeout: Duration,
         read_timeout: Duration,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, SourceError> {
+        let mut client = Client::builder()
+            .connect_timeout(connect_timeout)
+            .read_timeout(read_timeout)
+            .user_agent(STREAM_USER_AGENT);
+        if let Some(proxy) = proxy.clone() {
+            client = client.proxy(proxy);
+        }
+
+        Ok(Self {
             ytdlp,
             proxy,
+            direct_client: client
+                .build()
+                .map_err(|error| SourceError::Internal(error.to_string()))?,
             connect_timeout,
             read_timeout,
-        }
+        })
+    }
+
+    /// A lazy Songbird input for the unfiltered YouTube fast path. Resolution is
+    /// deferred until the mixer readies the track, so Engine::play stays
+    /// non-blocking and queued tracks still receive a fresh CDN URL.
+    pub fn direct_input(self: &Arc<Self>, info: &TrackInfo) -> Option<Input> {
+        (info.source_name == "youtube" && self.ytdlp.is_some()).then(|| {
+            Input::Lazy(Box::new(DirectSource {
+                opener: Arc::clone(self),
+                info: info.clone(),
+            }))
+        })
+    }
+
+    fn resolve_direct_url(&self, info: &TrackInfo) -> Result<String, SourceError> {
+        let ytdlp = self.ytdlp.as_ref().ok_or_else(|| SourceError::Unplayable {
+            reason: "the youtube source is not enabled on this node".to_owned(),
+        })?;
+        let page_url = youtube::playback_url(&info.identifier, info.uri.as_deref());
+        ytdlp.resolve_direct_stream_url(&page_url)
     }
 
     /// interrupt is polled by a stalled HTTP source between reconnect attempts —
@@ -205,6 +237,36 @@ impl StreamOpener {
             self.read_timeout,
             interrupt,
         )?))
+    }
+}
+
+struct DirectSource {
+    opener: Arc<StreamOpener>,
+    info: TrackInfo,
+}
+
+#[async_trait::async_trait]
+impl Compose for DirectSource {
+    fn create(&mut self) -> Result<AudioStream<Box<dyn SongbirdMediaSource>>, AudioStreamError> {
+        Err(AudioStreamError::Unsupported)
+    }
+
+    async fn create_async(
+        &mut self,
+    ) -> Result<AudioStream<Box<dyn SongbirdMediaSource>>, AudioStreamError> {
+        let opener = Arc::clone(&self.opener);
+        let info = self.info.clone();
+        let url = tokio::task::spawn_blocking(move || opener.resolve_direct_url(&info))
+            .await
+            .map_err(|error| AudioStreamError::Fail(error.to_string().into()))?
+            .map_err(|error| AudioStreamError::Fail(error.to_string().into()))?;
+
+        let mut request = HttpRequest::new(self.opener.direct_client.clone(), url);
+        request.create_async().await
+    }
+
+    fn should_create_async(&self) -> bool {
+        true
     }
 }
 

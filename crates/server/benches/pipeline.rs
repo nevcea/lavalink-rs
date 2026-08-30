@@ -118,6 +118,19 @@ fn bench_pipeline(c: &mut Criterion) {
                     );
                     let (_commands_tx, commands_rx) = mpsc::channel();
 
+                    // pump::run keeps a clean EOF alive until the ring has drained.
+                    // Wait for finish before reading: a starved RingReader returns
+                    // silence rather than EOF, so reading immediately would spin and
+                    // contend with the decode work this benchmark is meant to time.
+                    let finish = writer.clone();
+                    let (release_reader, reader_release) = mpsc::channel();
+                    let drain = std::thread::spawn(move || {
+                        finish.wait_for_finish();
+                        let mut sink = [0u8; 4096];
+                        while reader.read(&mut sink).unwrap_or(0) > 0 {}
+                        let _ = reader_release.recv();
+                    });
+
                     let config = PumpConfig {
                         info: track_info(&path),
                         start_position_ms: 0,
@@ -133,6 +146,8 @@ fn bench_pipeline(c: &mut Criterion) {
                     let start = Instant::now();
                     let outcome = pump::run(config, writer, commands_rx, position, &|| {});
                     total += start.elapsed();
+                    let _ = release_reader.send(());
+                    drain.join().unwrap();
 
                     // A broken open() (bad path, decoder registry regression) returns
                     // almost instantly via PumpOutcome::Failed, which would otherwise
@@ -140,10 +155,6 @@ fn bench_pipeline(c: &mut Criterion) {
                     // the same check pump.rs's own tests make after every pump::run.
                     assert!(matches!(outcome, PumpOutcome::Finished), "{outcome:?}");
 
-                    // Drain so the reader's thread-local state doesn't accumulate across
-                    // iterations; the ring itself is dropped with reader regardless.
-                    let mut sink = [0u8; 4096];
-                    while reader.read(&mut sink).unwrap_or(0) > 0 {}
                 }
                 total
             });

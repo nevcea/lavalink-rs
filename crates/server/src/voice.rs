@@ -169,6 +169,17 @@ impl VoiceConnection {
         should_play().then(|| state.driver.play_only_input(input))
     }
 
+    /// play_if for a preconfigured Track, used when pause, volume and event
+    /// handlers must be installed before a lazy input can finish immediately.
+    pub(crate) async fn play_track_if(
+        &self,
+        track: songbird::tracks::Track,
+        should_play: impl FnOnce() -> bool,
+    ) -> Option<songbird::tracks::TrackHandle> {
+        let mut state = self.state.lock().await;
+        should_play().then(|| state.driver.play_only(track))
+    }
+
     pub async fn stop(&self) {
         self.state.lock().await.driver.stop();
     }
