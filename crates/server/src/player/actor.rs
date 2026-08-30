@@ -332,10 +332,10 @@ impl PlayerActor {
 
         loop {
             tokio::select! {
-                command = self.commands.recv() => {
-                    let Some(command) = command else { break };
-                    self.handle(command);
-                }
+                // This order is wire-visible when several channels are ready:
+                // a terminal engine report must settle before a replacement PATCH.
+                biased;
+
                 // Destroy wins over anything in flight. The track ends with no
                 // event, matching the original, which drops the player without
                 // emitting on DELETE.
@@ -355,15 +355,6 @@ impl PlayerActor {
                     }
                     break;
                 }
-                update = self.voice_updates.recv(), if !self.voice_updates_closed => {
-                    match update {
-                        Some(update) => {
-                            self.apply_voice(update);
-                            self.sync_playing();
-                        }
-                        None => self.voice_updates_closed = true,
-                    }
-                }
                 event = self.engine_events.recv(), if !self.engine_events_closed => {
                     match event {
                         Some(report) => {
@@ -374,6 +365,19 @@ impl PlayerActor {
                         }
                         None => self.engine_events_closed = true,
                     }
+                }
+                update = self.voice_updates.recv(), if !self.voice_updates_closed => {
+                    match update {
+                        Some(update) => {
+                            self.apply_voice(update);
+                            self.sync_playing();
+                        }
+                        None => self.voice_updates_closed = true,
+                    }
+                }
+                command = self.commands.recv() => {
+                    let Some(command) = command else { break };
+                    self.handle(command);
                 }
                 // Only armed while a track is actually running. check_stuck returns
                 // immediately for every other state, so an idle player was waking
@@ -959,6 +963,59 @@ mod tests {
             reasons,
             vec![(TrackEndReason::Replaced, "first".to_owned())]
         );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_engine_event_wins_over_a_ready_replacement() {
+        let sink = Arc::new(Sink::new());
+        let engine = RecordingEngine::new();
+        let (mut actor, handle) = PlayerActor::new(
+            123,
+            Box::new(engine.clone()),
+            Arc::clone(&sink),
+            Duration::from_secs(10),
+            Arc::new(std::sync::OnceLock::new()),
+        );
+        actor.apply_patch(play(track("first")));
+        assert!(matches!(
+            sink.try_recv(),
+            Some(Message::Event(EmittedEvent::TrackStart { .. }))
+        ));
+
+        engine
+            .events()
+            .unwrap()
+            .try_send(EngineReport {
+                generation: engine.generation(),
+                event: EngineEvent::Finished,
+            })
+            .unwrap();
+        let (reply, replaced) = oneshot::channel();
+        handle
+            .commands
+            .try_send(Command::Patch(Box::new(play(track("second"))), reply))
+            .unwrap();
+
+        tokio::spawn(actor.run());
+        replaced.await.unwrap();
+
+        let events: Vec<_> = std::iter::from_fn(|| sink.try_recv())
+            .filter_map(|message| match message {
+                Message::Event(event) => Some(event),
+                _ => None,
+            })
+            .collect();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                EmittedEvent::TrackEnd {
+                    reason: TrackEndReason::Finished,
+                    track,
+                    ..
+                },
+                EmittedEvent::TrackStart { .. }
+            ] if track.info.title == "first"
+        ));
     }
 
     #[tokio::test]
