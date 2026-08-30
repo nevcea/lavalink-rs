@@ -93,16 +93,51 @@ impl DeezerSource {
         Ok(SourceLoad::Track(track.into_track(None)))
     }
 
+    fn complete_tracks(
+        &self,
+        endpoint: &str,
+        mut entries: Vec<DeezerTrack>,
+        total: usize,
+    ) -> Result<Vec<DeezerTrack>, SourceError> {
+        while entries.len() < total {
+            let index = entries.len().to_string();
+            let page: TrackList = self.fetch(
+                endpoint,
+                &[("index", index.as_str()), ("limit", "500")],
+            )?;
+            if page.data.is_empty() {
+                return Err(SourceError::Unplayable {
+                    reason: format!(
+                        "deezer returned only {} of {total} tracks",
+                        entries.len()
+                    ),
+                });
+            }
+            entries.extend(page.data);
+        }
+        Ok(entries)
+    }
+
     fn load_album(&self, id: &str) -> Result<SourceLoad, SourceError> {
         let album: DeezerAlbum = self.fetch(&format!("{API_BASE}/album/{id}"), &[])?;
         let cover = album.cover_xl.or(album.cover_medium);
         let entries = album.tracks.map(|list| list.data).unwrap_or_default();
+        let entries = self.complete_tracks(
+            &format!("{API_BASE}/album/{id}/tracks"),
+            entries,
+            album.nb_tracks,
+        )?;
         into_playlist(album.title, entries, cover.as_deref())
     }
 
     fn load_playlist(&self, id: &str) -> Result<SourceLoad, SourceError> {
         let playlist: DeezerPlaylist = self.fetch(&format!("{API_BASE}/playlist/{id}"), &[])?;
         let entries = playlist.tracks.map(|list| list.data).unwrap_or_default();
+        let entries = self.complete_tracks(
+            &format!("{API_BASE}/playlist/{id}/tracks"),
+            entries,
+            playlist.nb_tracks,
+        )?;
         into_playlist(playlist.title, entries, None)
     }
 
@@ -257,6 +292,8 @@ struct DeezerAlbum {
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
+    nb_tracks: usize,
+    #[serde(default)]
     cover_xl: Option<String>,
     #[serde(default)]
     cover_medium: Option<String>,
@@ -268,6 +305,8 @@ struct DeezerAlbum {
 struct DeezerPlaylist {
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    nb_tracks: usize,
     #[serde(default)]
     tracks: Option<TrackList>,
 }
@@ -315,10 +354,45 @@ impl DeezerTrack {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
     use super::*;
 
     fn source() -> DeezerSource {
         DeezerSource::new(None).unwrap()
+    }
+
+    fn spawn_json_server(
+        bodies: Vec<&'static str>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            bodies
+                .into_iter()
+                .map(|body| {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request_line = String::new();
+                    {
+                        let mut reader = BufReader::new(&stream);
+                        reader.read_line(&mut request_line).unwrap();
+                        let mut line = String::new();
+                        while reader.read_line(&mut line).unwrap_or(0) != 0 && line != "\r\n" {
+                            line.clear();
+                        }
+                    }
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                    request_line
+                })
+                .collect()
+        });
+        (format!("http://{addr}/tracks"), handle)
     }
 
     #[test]
@@ -428,6 +502,35 @@ mod tests {
             into_playlist(Some("Empty".to_owned()), Vec::new(), None),
             Err(SourceError::NotFound)
         ));
+    }
+
+    #[test]
+    fn pagination_completes_tracks_in_order_and_rejects_early_exhaustion() {
+        let first: DeezerTrack = serde_json::from_str(r#"{"id":1}"#).unwrap();
+        let (endpoint, server) = spawn_json_server(vec![
+            r#"{"data":[{"id":2},{"id":3}]}"#,
+            r#"{"data":[{"id":4}]}"#,
+        ]);
+        let tracks = source().complete_tracks(&endpoint, vec![first], 4).unwrap();
+        assert_eq!(
+            tracks.iter().map(|track| track.id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            server.join().unwrap(),
+            vec![
+                "GET /tracks?index=1&limit=500 HTTP/1.1\r\n",
+                "GET /tracks?index=3&limit=500 HTTP/1.1\r\n",
+            ]
+        );
+
+        let first: DeezerTrack = serde_json::from_str(r#"{"id":1}"#).unwrap();
+        let (endpoint, server) = spawn_json_server(vec![r#"{"data":[]}"#]);
+        assert!(matches!(
+            source().complete_tracks(&endpoint, vec![first], 2),
+            Err(SourceError::Unplayable { .. })
+        ));
+        server.join().unwrap();
     }
 
     /// Deezer names no entry point within an album or playlist, so the selection
