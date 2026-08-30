@@ -15,12 +15,11 @@
 //!
 //! Expiring URLs
 //!
-//! A resolved media URL is valid for hours at best, so it is deliberately not
-//! stored in the encoded track. What is stored is whatever
-//! SourceKind::playback_url can turn back into a page URL; the direct stream is
-//! resolved again at playback time by YtDlp::resolve_stream_url. A track queued
-//! in the morning therefore still plays in the evening, which storing the URL would
-//! not give.
+//! A resolved media URL is valid for hours at best, so it is never stored in the
+//! encoded track. A direct-video load keeps its negotiated URLs in memory for one
+//! minute so an immediate play does not repeat the extraction; expired, queued or
+//! foreign tracks resolve again at playback time. A track queued in the morning
+//! therefore still plays in the evening.
 //!
 //! No circumvention
 //!
@@ -28,8 +27,10 @@
 //! back — TrackException with the message yt-dlp gave. Nothing here works around
 //! them.
 
+use std::collections::HashMap;
 use std::io::Read as _;
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use lavalink_protocol::encoded_track::SourceTail;
@@ -37,9 +38,15 @@ use lavalink_protocol::player::TrackInfo;
 use serde::Deserialize;
 
 use super::{SourceError, SourceLoad, SourcePlaylist, SourceTrack};
+use crate::lock;
 
 /// How long any one yt-dlp invocation may take before it is killed.
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Direct media URLs expire, but keeping the ones a direct load just negotiated
+/// avoids running yt-dlp a second time when that track is played immediately.
+const STREAM_URL_CACHE_TTL: Duration = Duration::from_mins(1);
+const MAX_STREAM_URL_CACHE_ENTRIES: usize = 1_024;
 
 /// The User-Agent a resolved stream URL is negotiated under.
 ///
@@ -139,6 +146,13 @@ pub struct YtDlp {
     /// youtubePlaylistLoadLimit, already converted from the original's "pages
     /// of 100" into a flat track count.
     playlist_track_limit: usize,
+    stream_urls: Mutex<HashMap<String, CachedStreamUrls>>,
+}
+
+struct CachedStreamUrls {
+    normal: String,
+    direct: String,
+    expires_at: Instant,
 }
 
 impl YtDlp {
@@ -165,6 +179,7 @@ impl YtDlp {
             version,
             proxy_arg,
             playlist_track_limit,
+            stream_urls: Mutex::new(HashMap::new()),
         })
     }
 
@@ -174,12 +189,85 @@ impl YtDlp {
     /// binary — so they need a backend to hang a source off, not a working one.
     #[cfg(test)]
     pub(super) fn stub() -> Self {
+        Self::stub_with_program("yt-dlp")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stub_with_program(program: &str) -> Self {
         Self {
-            program: "yt-dlp".to_owned(),
+            program: program.to_owned(),
             version: "0000.00.00".to_owned(),
             proxy_arg: None,
             playlist_track_limit: DEFAULT_PLAYLIST_TRACK_LIMIT,
+            stream_urls: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// A fresh URL negotiated by a preceding direct-video load, if there is one.
+    pub(crate) fn cached_stream_url(&self, page_url: &str, direct: bool) -> Option<String> {
+        let mut cache = lock(&self.stream_urls);
+        if cache
+            .get(page_url)
+            .is_some_and(|entry| entry.expires_at <= Instant::now())
+        {
+            cache.remove(page_url);
+            return None;
+        }
+        cache.get(page_url).map(|entry| {
+            if direct {
+                entry.direct.clone()
+            } else {
+                entry.normal.clone()
+            }
+        })
+    }
+
+    pub(crate) fn invalidate_stream_urls(&self, page_url: &str) {
+        lock(&self.stream_urls).remove(page_url);
+    }
+
+    fn cache_stream_urls(&self, page_url: &str, video: &Video) {
+        let Some(normal) = video
+            .requested_downloads
+            .first()
+            .and_then(|item| item.url.as_ref())
+        else {
+            return;
+        };
+        let direct = video
+            .requested_downloads
+            .last()
+            .and_then(|item| item.url.as_ref())
+            .unwrap_or(normal);
+        self.insert_stream_urls(page_url, normal, direct);
+    }
+
+    fn insert_stream_urls(&self, page_url: &str, normal: &str, direct: &str) {
+        let now = Instant::now();
+        let mut cache = lock(&self.stream_urls);
+        if cache.len() >= MAX_STREAM_URL_CACHE_ENTRIES {
+            cache.retain(|_, entry| entry.expires_at > now);
+        }
+        if cache.len() < MAX_STREAM_URL_CACHE_ENTRIES {
+            cache.insert(
+                page_url.to_owned(),
+                CachedStreamUrls {
+                    normal: normal.to_owned(),
+                    direct: direct.to_owned(),
+                    expires_at: now + STREAM_URL_CACHE_TTL,
+                },
+            );
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_stream_urls_for_test(
+        &self,
+        page_url: &str,
+        normal: &str,
+        direct: &str,
+    ) {
+        self.insert_stream_urls(page_url, normal, direct);
     }
 
     /// ["--proxy", "<url>"] when a proxy is configured, else empty — spread
@@ -235,13 +323,24 @@ impl YtDlp {
         url: &str,
         kind: SourceKind,
     ) -> Result<SourceLoad, SourceError> {
-        let mut args = vec!["--no-playlist", "-J", "-f", FORMAT];
+        let format = if kind == SourceKind::YouTube {
+            format!("{FORMAT},{DIRECT_FORMAT}")
+        } else {
+            FORMAT.to_owned()
+        };
+        let mut args = vec!["--no-playlist", "-J", "-f", &format];
+        if kind == SourceKind::YouTube {
+            args.extend(["--user-agent", STREAM_USER_AGENT]);
+        }
         args.extend(self.proxy_args());
         args.push(url);
 
         let output = run(&self.program, &args, PROCESS_TIMEOUT)?;
 
         let video: Video = parse(&output)?;
+        if kind == SourceKind::YouTube {
+            self.cache_stream_urls(url, &video);
+        }
         Ok(SourceLoad::Track(video.into_track(kind)))
     }
 
@@ -363,6 +462,14 @@ pub(super) struct Video {
     #[serde(default)]
     webpage_url: Option<String>,
     /// SoundCloud reports one; YouTube does not.
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    requested_downloads: Vec<RequestedDownload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestedDownload {
     #[serde(default)]
     url: Option<String>,
 }
@@ -584,6 +691,61 @@ mod tests {
     fn direct_playback_prefers_webm_opus_but_keeps_the_pcm_fallbacks() {
         assert!(DIRECT_FORMAT.starts_with("bestaudio[acodec=opus][ext=webm]"));
         assert!(DIRECT_FORMAT.ends_with(FORMAT));
+    }
+
+    #[test]
+    fn direct_load_urls_are_short_lived_bounded_and_invalidatable() {
+        let backend = YtDlp::stub();
+        let page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        let video: Video = serde_json::from_str(
+            r#"{"requested_downloads":[
+                {"url":"https://cdn.invalid/audio.m4a"},
+                {"url":"https://cdn.invalid/audio.webm"}
+            ]}"#,
+        )
+        .unwrap();
+
+        backend.cache_stream_urls(page_url, &video);
+        assert_eq!(
+            backend.cached_stream_url(page_url, false).as_deref(),
+            Some("https://cdn.invalid/audio.m4a")
+        );
+        assert_eq!(
+            backend.cached_stream_url(page_url, true).as_deref(),
+            Some("https://cdn.invalid/audio.webm")
+        );
+
+        let fallback_url = "https://www.youtube.com/watch?v=aaaaaaaaaaa";
+        let fallback: Video = serde_json::from_str(
+            r#"{"requested_downloads":[{"url":"https://cdn.invalid/only.m4a"}]}"#,
+        )
+        .unwrap();
+        backend.cache_stream_urls(fallback_url, &fallback);
+        assert_eq!(
+            backend.cached_stream_url(fallback_url, true).as_deref(),
+            Some("https://cdn.invalid/only.m4a")
+        );
+
+        lock(&backend.stream_urls)
+            .get_mut(page_url)
+            .unwrap()
+            .expires_at = Instant::now();
+        assert!(backend.cached_stream_url(page_url, false).is_none());
+
+        for index in 0..=MAX_STREAM_URL_CACHE_ENTRIES {
+            backend.insert_stream_urls(
+                &format!("https://www.youtube.com/watch?v={index:011}"),
+                "normal",
+                "direct",
+            );
+        }
+        assert_eq!(lock(&backend.stream_urls).len(), MAX_STREAM_URL_CACHE_ENTRIES);
+
+        backend.invalidate_stream_urls("https://www.youtube.com/watch?v=00000000000");
+        assert_eq!(
+            lock(&backend.stream_urls).len(),
+            MAX_STREAM_URL_CACHE_ENTRIES - 1
+        );
     }
 
     #[test]

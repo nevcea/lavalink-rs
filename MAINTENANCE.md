@@ -38,6 +38,22 @@ deadline and RSS gate and writes raw JSON plus a Markdown summary under
 changing the runner. Attach generated results to the PR; do not commit
 machine-specific output or run the noisy comparison in shared CI.
 
+### YouTube cold-load baseline
+
+An August 2026 WSL diagnostic compared this node with Lavalink 4.2.2 plus the
+recommended `youtube-source` 1.18.2 plugin. Across three successful cold loads,
+the median direct-video response was 2.574s here versus 0.888s upstream; search
+was 1.535s versus 0.610s. Lavalink's deprecated built-in YouTube source failed
+all equivalent requests and is not a useful baseline.
+
+The difference is yt-dlp extraction, not the generic loader: `-J` took 2.370s
+and the playback-time `--get-url` took another 2.430s. Direct-video loads
+therefore retain the AAC and Opus URLs already present in `-J` output for one
+minute, bounded to 1,024 entries. Immediate playback avoids the second process;
+expired, queued, foreign, or failed cached URLs fall back to a fresh resolution.
+Cold `/loadtracks` and `ytsearch:` remain slower than the native plugin; closing
+that gap would require a maintained InnerTube client rather than loader tuning.
+
 ## Diagnostics and logging
 
 The default filter is `info,lavalink_server=debug` with Symphonia's expected

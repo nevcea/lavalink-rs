@@ -79,8 +79,9 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 3;
 
 /// Opens byte streams for resolved tracks.
 ///
-/// Holds the yt-dlp handle because those sources' media URLs are not stored — they
-/// expire in hours, so they are resolved again here, at playback time.
+/// Holds the yt-dlp handle because those sources' media URLs are not encoded into
+/// tracks. A fresh direct-video cache entry may avoid one extraction; everything
+/// else is resolved here at playback time.
 pub struct StreamOpener {
     ytdlp: Option<Arc<YtDlp>>,
     proxy: Option<reqwest::Proxy>,
@@ -132,7 +133,8 @@ impl StreamOpener {
 
     /// A lazy Songbird input for the unfiltered YouTube fast path. Resolution is
     /// deferred until the mixer readies the track, so Engine::play stays
-    /// non-blocking and queued tracks still receive a fresh CDN URL.
+    /// non-blocking. Immediate plays may use the short-lived load cache; queued
+    /// tracks still receive a fresh CDN URL after it expires.
     pub fn direct_input(self: &Arc<Self>, info: &TrackInfo) -> Option<Input> {
         (info.source_name == "youtube" && self.ytdlp.is_some()).then(|| {
             Input::Lazy(Box::new(DirectSource {
@@ -197,6 +199,18 @@ impl StreamOpener {
                     }
                     _ => kind.playback_url(&info.identifier),
                 };
+                if kind == SourceKind::YouTube {
+                    if let Some(url) = ytdlp.cached_stream_url(&page_url, false) {
+                        match self.open_http(
+                            &url,
+                            Some(STREAM_USER_AGENT),
+                            Arc::clone(&interrupt),
+                        ) {
+                            Ok(source) => return Ok(source),
+                            Err(_) => ytdlp.invalidate_stream_urls(&page_url),
+                        }
+                    }
+                }
                 let url = ytdlp.resolve_stream_url(&page_url)?;
                 // Fetched under the same User-Agent yt-dlp resolved it with —
                 // googlevideo.com 403s a mismatch. See STREAM_USER_AGENT.
@@ -254,6 +268,17 @@ impl Compose for DirectSource {
     async fn create_async(
         &mut self,
     ) -> Result<AudioStream<Box<dyn SongbirdMediaSource>>, AudioStreamError> {
+        let page_url = youtube::playback_url(&self.info.identifier, self.info.uri.as_deref());
+        if let Some(ytdlp) = self.opener.ytdlp.as_ref() {
+            if let Some(url) = ytdlp.cached_stream_url(&page_url, true) {
+                let mut request = HttpRequest::new(self.opener.direct_client.clone(), url);
+                match request.create_async().await {
+                    Ok(stream) => return Ok(stream),
+                    Err(_) => ytdlp.invalidate_stream_urls(&page_url),
+                }
+            }
+        }
+
         let opener = Arc::clone(&self.opener);
         let info = self.info.clone();
         let url = tokio::task::spawn_blocking(move || opener.resolve_direct_url(&info))
@@ -688,6 +713,22 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         (listener, url)
+    }
+
+    fn spawn_static_server(body: &'static [u8]) -> String {
+        let (listener, url) = listening_server();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            consume_request(&stream);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+        url
     }
 
     /// A server that answers the first request with a body cut short of what
@@ -1344,6 +1385,95 @@ mod tests {
             SourceError::Unplayable { reason } => assert!(reason.contains("not enabled")),
             other => panic!("expected Unplayable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn youtube_uses_a_fresh_cached_url_without_running_yt_dlp_again() {
+        let backend = Arc::new(YtDlp::stub_with_program(
+            "definitely-not-a-program-8f3a",
+        ));
+        let page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        let media_url = spawn_static_server(b"cached media");
+        backend.cache_stream_urls_for_test(page_url, &media_url, &media_url);
+        let opener = StreamOpener::new(
+            Some(Arc::clone(&backend)),
+            None,
+            CONNECT_TIMEOUT,
+            READ_TIMEOUT,
+        )
+        .unwrap();
+
+        let source = opener
+            .open(
+                &info("youtube", "dQw4w9WgXcQ"),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+
+        assert_eq!(source.byte_len(), Some(12));
+        assert!(backend.cached_stream_url(page_url, false).is_some());
+    }
+
+    #[tokio::test]
+    async fn direct_youtube_uses_its_cached_opus_url() {
+        let backend = Arc::new(YtDlp::stub_with_program(
+            "definitely-not-a-program-8f3a",
+        ));
+        let page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        let media_url = spawn_static_server(b"cached opus");
+        backend.cache_stream_urls_for_test(
+            page_url,
+            "http://127.0.0.1:0",
+            &media_url,
+        );
+        let opener = Arc::new(
+            StreamOpener::new(
+                Some(backend),
+                None,
+                CONNECT_TIMEOUT,
+                READ_TIMEOUT,
+            )
+            .unwrap(),
+        );
+        let mut source = DirectSource {
+            opener,
+            info: info("youtube", "dQw4w9WgXcQ"),
+        };
+
+        if let Err(error) = source.create_async().await {
+            panic!("the cached direct URL should open: {error}");
+        }
+    }
+
+    #[test]
+    fn a_failed_cached_url_is_invalidated_before_fresh_resolution() {
+        let backend = Arc::new(YtDlp::stub_with_program(
+            "definitely-not-a-program-8f3a",
+        ));
+        let page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        backend.cache_stream_urls_for_test(
+            page_url,
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:0",
+        );
+        let opener = StreamOpener::new(
+            Some(Arc::clone(&backend)),
+            None,
+            CONNECT_TIMEOUT,
+            READ_TIMEOUT,
+        )
+        .unwrap();
+
+        let error = match opener.open(
+            &info("youtube", "dQw4w9WgXcQ"),
+            Arc::new(AtomicBool::new(false)),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("expected fresh yt-dlp resolution to fail"),
+        };
+
+        assert!(matches!(error, SourceError::Internal(_)));
+        assert!(backend.cached_stream_url(page_url, false).is_none());
     }
 
     #[test]
